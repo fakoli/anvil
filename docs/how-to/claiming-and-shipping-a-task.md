@@ -67,8 +67,17 @@ What happens, in order, inside the CLI ([`cli/claim.py::claim`](https://github.c
 1. **Stale-claim reap.** `detect_and_release_stale()` releases any expired leases first so the conflict check sees current truth.
 2. **Pre-claim conflict check.** `manager.check_conflicts()` compares the task's `likely_files` against the `expected_files` of every active claim by another actor. Any overlap is printed to stderr; without `--force` the command exits non-zero before mutating state.
 3. **Atomic claim transaction.** `manager.claim()` emits a `claim.created` event; the backend's SQLite handler inserts the `Claim` row and flips the task to `claimed` inside one `BEGIN IMMEDIATE` transaction.
-4. **Git branch creation.** `create_branch_for_task()` runs `git checkout -b agent/<task_id>-<slug>`. The slug is derived from `task.title` (lowercase, alphanumeric + hyphens, max 40 chars). If the branch name collides with an existing one, `-2`, `-3`, ... is appended (capped at 20 attempts).
-5. **Optional worktree.** When `--worktree` is passed, `create_worktree_for_task()` runs `git worktree add ../wt-<task_id> <branch>` next to the project root.
+4. **Deterministic Git plan.** The CLI freezes the canonical repository root, selected local/upstream base, exact claim-start commit, branch owner, target path, caller cleanliness, and worktree topology before state mutation.
+5. **Transactional state + Git apply.** Under one cross-process lock, the CLI revalidates that plan, records the claim, and then checks out the shared branch or creates/reuses the isolated worktree. A Git failure or interruption releases state and compensates invocation-owned artifacts. Temporary ownership refs keep that cleanup reliable across normal ref packing, reftable compaction, and reflog expiry; successful claims retire them.
+
+This is a local coordination guarantee, not protection from another process
+deliberately erasing Git's ownership history. Anvil preserves external branch
+replacements whenever a distinct ref, reflog, or filesystem-identity witness
+remains. If another actor deletes and recreates the exact branch at the exact
+same commit and then removes every continuity witness (for example by both
+packing refs and expiring reflogs) before compensation, Git exposes no way to
+distinguish the replacement from the invocation-owned ref. Do not run that
+destructive sequence concurrently with a claim transaction.
 
 Sample output:
 
@@ -88,7 +97,7 @@ Run `anvil renew C9F3A210 --actor alice` to extend the lease before it expires.
 
 | Flag | Effect |
 |---|---|
-| `--worktree` | Also create a git worktree at `../wt-<task_id>/` so you can work on multiple claims in parallel without checkout-thrash. Skipped (with a stderr warning) if the working tree is dirty. |
+| `--worktree` | Create or safely reuse the planned isolated worktree at `../wt-<task_id>/`. A dirty caller is allowed because isolated mode never moves it; an existing target worktree must be clean and bound to the planned branch. For `--separate-git-dir`, run this from the main checkout; a linked caller safely refuses because Git does not record the main checkout path. |
 | `--force` | Override file-overlap and conflict-group warnings; the conflict event is still logged. Use sparingly. |
 | `--actor <name>` | Local audit identity recorded on the claim. Precedence is explicit `--actor` > `ANVIL_ACTOR` > legacy `ANVIL_GATE_ACTOR` > derived `$USER`/signing fingerprint/`agent` plus a session discriminator. It is not cryptographic authentication. Claim output returns exact structured continuation argv/environment data. |
 | `--lease <minutes>` | Lease duration for this claim, overriding `default_lease_minutes` from project/global `config.yaml` (precedence: this flag > project config > global config > built-in default of `240`). |
@@ -100,7 +109,9 @@ The `Claim` row carries `expected_files` (copied from `task.likely_files`), `cla
 
 ### Git is not required
 
-`create_branch_for_task()` returns a non-blocking warning when `git` is missing or the cwd is not a git repository — the claim still succeeds, you just don't get a branch. anvil must work without git so non-source projects (writing, research) can use it.
+When Git is missing or the resolved project is not a repository, claim planning
+selects the state-only path: the claim still succeeds without a branch. Anvil
+therefore remains usable for writing, research, and other non-source projects.
 
 ## Step 3 — Get the work packet: `anvil packet T012`
 

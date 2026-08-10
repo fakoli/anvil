@@ -47,6 +47,7 @@ from anvil.state.models import (
     BundleThroughputBudget,
     ClaimAttestationContext,
     ClaimCommandProof,
+    ClaimGitMetadata,
     DelegatedAgentObservation,
     EvidenceCategory,
     PRDAssumption,
@@ -362,6 +363,9 @@ class PrdDecisionResolvedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    # T013 selected-partition binding. Historical decision events predate
+    # multi-PRD scoping and therefore replay as the default partition.
+    prd_id: str = DEFAULT_PRD_ID
     decision_id: str
     decision_kind: str
     prd_ref: str
@@ -867,6 +871,7 @@ class BundleClaimedPayload(BaseModel):
     claimed_by: str = Field(min_length=1)
     branch: str | None = None
     worktree_path: str | None = None
+    git_metadata: ClaimGitMetadata | None = None
     session_id: str | None = None
     expected_files: list[str] = Field(default_factory=list)
     member_claims: list[BundleMemberClaimPayload]
@@ -905,6 +910,11 @@ class BundleClaimedPayload(BaseModel):
             raise ValueError(
                 "bundle claim timestamps require created_at <= heartbeat <= expiry"
             )
+        if self.git_metadata is not None:
+            if self.branch != self.git_metadata.branch:
+                raise ValueError("bundle branch must match Git metadata")
+            if self.worktree_path != self.git_metadata.worktree_path:
+                raise ValueError("bundle worktree must match Git metadata")
         return self
 
 
@@ -1029,6 +1039,7 @@ class ClaimCreatedPayload(BaseModel):
     last_heartbeat_at: str
     branch: str | None = None
     worktree_path: str | None = None
+    git_metadata: ClaimGitMetadata | None = None
     session_id: str | None = None
     expected_files: list[Any] = []
     # v17 lifecycle binding.  Legacy events omit both fields; replay assigns a
@@ -1047,6 +1058,22 @@ class ClaimCreatedPayload(BaseModel):
     # field existed (and replayed events) still validate and behave as a
     # non-forced claim.
     force: bool = False
+
+    @model_validator(mode="after")
+    def _validate_git_metadata(self) -> ClaimCreatedPayload:
+        if self.git_metadata is None:
+            return self
+        if self.branch != self.git_metadata.branch:
+            raise ValueError("claim branch must match Git metadata")
+        if self.worktree_path != self.git_metadata.worktree_path:
+            raise ValueError("claim worktree must match Git metadata")
+        if (
+            self.attestation_context is not None
+            and self.attestation_context.claim_start_sha
+            != self.git_metadata.claim_start_sha
+        ):
+            raise ValueError("claim attestation start must match Git metadata")
+        return self
 
 
 class ClaimReleasedPayload(BaseModel):

@@ -153,7 +153,7 @@ def test_workbench_consumer_fixture_maps_v1_and_fails_closed_on_drift() -> None:
     assert not compatible(absent)
 
     wrong_api = deepcopy(manifest)
-    wrong_api["api_version"] = "11"
+    wrong_api["api_version"] = "10"
     assert not compatible(wrong_api)
 
     wrong_operation = deepcopy(manifest)

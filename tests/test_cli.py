@@ -1306,7 +1306,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "10"
+        assert API_VERSION == "14"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -3929,7 +3929,90 @@ The system must serialize inputs [NEEDS DECISION: which format?].
 """
 
 
+def _seed_three_decision_prds(tmp_path: Path) -> dict[str, Path]:
+    """Create three parsed sources whose local decision IDs deliberately collide."""
+    _do_init(tmp_path)
+    state_dir = tmp_path / ".anvil"
+    sources: dict[str, Path] = {}
+    for prd_id, label in (
+        ("default", "default-choice"),
+        ("v0.1", "first-choice"),
+        ("v0.2", "second-choice"),
+    ):
+        markdown = _PRD_WITH_DECISIONS.replace(
+            "CLI Decisions Test", f"Decisions {prd_id}"
+        ).replace("which format?", label)
+        if prd_id == "default":
+            path = state_dir / "prd.md"
+            path.write_text(markdown, encoding="utf-8")
+            result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        else:
+            source_dir = state_dir / "prds"
+            source_dir.mkdir(exist_ok=True)
+            path = source_dir / f"{prd_id}.md"
+            path.write_text(markdown, encoding="utf-8")
+            result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", prd_id])
+        assert result.exit_code == 0, result.output
+        sources[prd_id] = path
+    return sources
+
+
 class TestPrdFindDecisions:
+    def test_find_decisions_three_prd_collision_scoped_cli_json_and_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_three_decision_prds(tmp_path)
+
+        explicit = _invoke_cmd(
+            tmp_path, ["prd", "find-decisions", "--prd", "v0.2", "--json"]
+        )
+
+        assert explicit.exit_code == 0, explicit.output
+        data = json.loads(explicit.output)["data"]
+        assert data["prd_id"] == "v0.2"
+        assert data["prd_source"] == "v0.2"
+        assert {item["id"] for item in data["decisions"]} >= {"ND-001"}
+        assert "second-choice" in next(
+            item["text"] for item in data["decisions"] if item["id"] == "ND-001"
+        )
+        assert "default-choice" not in explicit.output
+        assert "first-choice" not in explicit.output
+
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+        selected = _invoke_cmd(tmp_path, ["prd", "find-decisions", "--json"])
+        assert selected.exit_code == 0, selected.output
+        selected_data = json.loads(selected.output)["data"]
+        assert selected_data["prd_id"] == "v0.1"
+        assert "first-choice" in selected.output
+        assert "second-choice" not in selected.output
+
+        human = _invoke_cmd(
+            tmp_path, ["prd", "find-decisions", "--prd", "v0.2"]
+        )
+        assert human.exit_code == 0, human.output
+        assert "PRD: v0.2" in human.output
+        assert "--prd v0.2" in human.output
+
+    def test_find_decisions_single_named_prd_resolves_without_flag(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        source_dir = tmp_path / ".anvil" / "prds"
+        source_dir.mkdir()
+        (source_dir / "solo.md").write_text(
+            _PRD_WITH_DECISIONS.replace("which format?", "solo-choice"),
+            encoding="utf-8",
+        )
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "solo"])
+        assert parsed.exit_code == 0, parsed.output
+
+        result = _invoke_cmd(tmp_path, ["prd", "find-decisions", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "solo"
+        assert "solo-choice" in result.output
+
     def test_clean_prd_exits_zero_with_zero_total(self, tmp_path: Path) -> None:
         """A PRD with no markers, no open questions, no missing fields →
         exit 0 with a summary line that mentions 0 total."""
@@ -3994,6 +4077,204 @@ def _events_text(tmp_path: Path) -> str:
 
 
 class TestPrdResolveDecisionBackprop:
+    def test_post_log_projection_failure_keeps_resolved_source_for_catchup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sqlite3
+
+        from anvil.state.backend import TransactionAborted
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        insert = SqliteBackend._insert_event_row
+
+        def fail_insert(self, conn, event, *, seq):  # type: ignore[no-untyped-def]
+            if event.action == "prd.decision_resolved":
+                raise sqlite3.OperationalError("injected post-log failure")
+            return insert(self, conn, event, seq=seq)
+
+        monkeypatch.setattr(SqliteBackend, "_insert_event_row", fail_insert)
+        with pytest.raises(TransactionAborted, match="log line remains"):
+            _invoke_cmd(
+                tmp_path,
+                ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+            )
+
+        assert "serialize inputs JSON" in source.read_text(encoding="utf-8")
+        assert b'"action":"prd.decision_resolved"' in (
+            tmp_path / ".anvil" / "events.jsonl"
+        ).read_bytes()
+
+    def test_concurrent_source_replace_during_append_is_reconciled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        append = SqliteBackend.append
+
+        def replace_during_append(self, draft):  # type: ignore[no-untyped-def]
+            source.write_text("external concurrent replacement\n", encoding="utf-8")
+            return append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", replace_during_append)
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+        )
+
+        assert result.exit_code == 0, result.output
+        final_source = source.read_text(encoding="utf-8")
+        assert "serialize inputs JSON" in final_source
+        assert "external concurrent replacement" not in final_source
+
+    def test_append_refusal_restores_exact_source_and_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        log = tmp_path / ".anvil" / "events.jsonl"
+        source_before = source.read_bytes()
+        log_before = log.read_bytes()
+        append = SqliteBackend.append
+
+        def refuse_decision(self, draft):  # type: ignore[no-untyped-def]
+            if draft.action == "prd.decision_resolved":
+                raise RuntimeError("injected append refusal")
+            return append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", refuse_decision)
+        with pytest.raises(RuntimeError, match="injected append refusal"):
+            _invoke_cmd(
+                tmp_path,
+                ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+            )
+
+        assert source.read_bytes() == source_before
+        assert log.read_bytes() == log_before
+
+    def test_source_change_before_locked_replace_refuses_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        log = tmp_path / ".anvil" / "events.jsonl"
+        log_before = log.read_bytes()
+        from anvil.planning import decisions as decisions_module
+
+        apply_decision = decisions_module.apply_decision_to_markdown
+
+        def race(markdown, *, decision, resolution):  # type: ignore[no-untyped-def]
+            result = apply_decision(
+                markdown, decision=decision, resolution=resolution
+            )
+            source.write_text(markdown + "\nexternal edit\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(decisions_module, "apply_decision_to_markdown", race)
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "prd",
+                "resolve-decision",
+                "ND-001",
+                "--resolution",
+                "JSON",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["error"]["code"] == "source_changed"
+        assert source.read_text(encoding="utf-8").endswith("external edit\n")
+        assert log.read_bytes() == log_before
+
+    def test_resolve_decision_anvil_prd_mutates_only_selected_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sources = _seed_three_decision_prds(tmp_path)
+        before = {prd_id: path.read_bytes() for prd_id, path in sources.items()}
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "prd",
+                "resolve-decision",
+                "ND-001",
+                "--resolution",
+                "YAML",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "v0.1"
+        assert data["continuation"]["parse_argv"][-2:] == ["--prd", "v0.1"]
+        assert sources["default"].read_bytes() == before["default"]
+        assert sources["v0.2"].read_bytes() == before["v0.2"]
+        assert sources["v0.1"].read_bytes() != before["v0.1"]
+        assert "YAML" in sources["v0.1"].read_text(encoding="utf-8")
+
+    def test_resolve_decision_custom_file_records_selected_prd_and_continuation(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _seed_three_decision_prds(tmp_path)
+        before = {prd_id: path.read_bytes() for prd_id, path in sources.items()}
+        custom = tmp_path / "custom-v02.md"
+        custom.write_text(
+            _PRD_WITH_DECISIONS.replace("which format?", "custom-choice"),
+            encoding="utf-8",
+        )
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "prd",
+                "resolve-decision",
+                "ND-001",
+                "--resolution",
+                "CBOR",
+                "--file",
+                str(custom),
+                "--prd",
+                "v0.2",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "v0.2"
+        assert data["prd_source"] == "custom"
+        assert data["continuation"]["parse_argv"][-2:] == ["--prd", "v0.2"]
+        assert data["continuation"]["parse_argv"][3:5] == ["--file", str(custom)]
+        assert "custom-choice" not in custom.read_text(encoding="utf-8")
+        assert "CBOR" in custom.read_text(encoding="utf-8")
+        assert all(path.read_bytes() == before[prd_id] for prd_id, path in sources.items())
+        events = [
+            json.loads(line)
+            for line in (tmp_path / ".anvil" / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        event = next(e for e in reversed(events) if e["action"] == "prd.decision_resolved")
+        assert event["target_id"] == "v0.2"
+        assert event["payload_json"]["prd_id"] == "v0.2"
+
     def test_backprop_marker_updates_prd_and_records_event(
         self, tmp_path: Path
     ) -> None:
@@ -4803,6 +5084,62 @@ class TestScore:
         assert result.exit_code == 0, f"score T001 failed: {result.output}"
         assert "T001" in result.output
 
+    def test_incomplete_score_json_refuses_before_append_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.planning import scoring as scoring_module
+        from anvil.planning.llm import LLMProvider
+        from anvil.planning.scoring import CompleteScore
+        from anvil.state.models import Score, Task
+
+        self._setup_planned_project(tmp_path)
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+        db_path = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db_path)) as connection:
+            before_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        calls: list[str] = []
+
+        def injected_score(
+            task: Task, *, provider: LLMProvider | None = None
+        ) -> Score:
+            _ = provider
+            calls.append(task.id)
+            if len(calls) == 1:
+                return CompleteScore(
+                    complexity=1,
+                    parallelizability=2,
+                    context_load=3,
+                    blast_radius=4,
+                    review_risk=5,
+                    agent_suitability=1,
+                )
+            return Score(
+                complexity=1,
+                parallelizability=2,
+                context_load=3,
+                blast_radius=4,
+                review_risk=5,
+                agent_suitability=None,
+            )
+
+        monkeypatch.setattr(scoring_module, "score_task", injected_score)
+
+        result = _invoke_cmd(tmp_path, ["score", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"]["code"] == "score_incomplete"
+        assert events_path.read_bytes() == before_events
+        with sqlite3.connect(str(db_path)) as connection:
+            after_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        assert after_scores == before_scores
+        assert calls == ["T001", "T002"]
+        assert _events_of_action(tmp_path, "task.scored") == []
+
     def test_score_nonexistent_task_exits_1(self, tmp_path: Path) -> None:
         """score T999 when T999 doesn't exist → exit 1."""
         self._setup_planned_project(tmp_path)
@@ -4835,6 +5172,12 @@ class TestScore:
     ) -> None:
         """The CLI expansion queue must use the recursive depth-capped frontier."""
         _do_init(tmp_path)
+        _insert_prd_row(
+            tmp_path / ".anvil" / "state.db",
+            prd_id="default",
+            status="approved",
+            is_default=1,
+        )
         self._insert_over_depth_chain(tmp_path)
 
         result = _invoke_cmd(tmp_path, ["score"])
@@ -4877,6 +5220,122 @@ class TestReviewTasks:
         _invoke_cmd(tmp_path, ["prd", "parse"])
         _invoke_cmd(tmp_path, ["plan"])
         _invoke_cmd(tmp_path, ["score"])
+
+    def _setup_scoped_review(self, tmp_path: Path) -> None:
+        """Seed three valid drafted partitions without exercising review itself."""
+        _do_init(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        scores = json.dumps(
+            {
+                "complexity": 2,
+                "parallelizability": 2,
+                "context_load": 2,
+                "blast_radius": 2,
+                "review_risk": 2,
+                "agent_suitability": 4,
+            }
+        )
+        verification = json.dumps({"commands": ["pytest -q"]})
+        with sqlite3.connect(str(db)) as conn:
+            project_id = conn.execute("SELECT id FROM projects").fetchone()[0]
+            for prd_id, task_id, feature_id, is_default in (
+                ("default", "T001", "F001", 1),
+                ("v0.1", "v0.1:T001", "v0.1:F001", 0),
+                ("v0.2", "v0.2:T001", "v0.2:F001", 0),
+            ):
+                conn.execute(
+                    "INSERT INTO prds (id, project_id, status, is_default) "
+                    "VALUES (?, ?, 'draft', ?)",
+                    (prd_id, project_id, is_default),
+                )
+                conn.execute(
+                    "INSERT INTO features "
+                    "(id, prd_id, title, description, status, requirements, tasks) "
+                    "VALUES (?, ?, 'Feature', 'desc', 'proposed', '[]', '[]')",
+                    (feature_id, prd_id),
+                )
+                conn.execute(
+                    """INSERT INTO tasks
+                    (id, feature_id, prd_id, title, description, status, priority,
+                     task_type, dependencies, conflict_groups, scores,
+                     acceptance_criteria, implementation_notes, verification,
+                     likely_files, created_at, updated_at)
+                    VALUES (?, ?, ?, 'Task', 'desc', 'drafted', 'medium',
+                            'feature', '[]', '[]', ?, '["done"]', '[]', ?, '[]',
+                            '2026-01-01T00:00:00+00:00',
+                            '2026-01-01T00:00:00+00:00')""",
+                    (task_id, feature_id, prd_id, scores, verification),
+                )
+
+    def test_review_tasks_scopes_default_flag_env_and_human_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+
+        self._setup_scoped_review(tmp_path)
+
+        default_result = _invoke_cmd(tmp_path, ["review", "tasks", "--json"])
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.output)["data"]
+        assert default_data["prd_id"] == "default"
+        assert default_data["all_prds"] is False
+        assert default_data["promoted_to_ready"] == ["T001"]
+
+        explicit = _invoke_cmd(
+            tmp_path, ["review", "tasks", "--prd", "v0.2", "--json"]
+        )
+        assert explicit.exit_code == 0, explicit.output
+        explicit_data = json.loads(explicit.output)["data"]
+        assert explicit_data["prd_id"] == "v0.2"
+        assert explicit_data["promoted_to_ready"] == ["v0.2:T001"]
+
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+        selected = _invoke_cmd(tmp_path, ["review", "tasks", "--json"])
+        assert selected.exit_code == 0, selected.output
+        selected_data = json.loads(selected.output)["data"]
+        assert selected_data["prd_id"] == "v0.1"
+        assert selected_data["promoted_to_ready"] == ["v0.1:T001"]
+
+        human = _invoke_cmd(tmp_path, ["review", "tasks", "--prd", "v0.2"])
+        assert human.exit_code == 0, human.output
+        assert "PRD: v0.2" in human.output
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            tasks = {task.id: task for task in backend.list_tasks()}
+        finally:
+            backend.close()
+        assert all(task.status.value == "ready" for task in tasks.values())
+        assert all(task.scores.blast_radius_confirmed for task in tasks.values())
+        assert all(task.scores.review_risk_confirmed for task in tasks.values())
+
+    def test_review_tasks_requires_explicit_all_prds_and_reports_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._setup_scoped_review(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        result = _invoke_cmd(tmp_path, ["review", "tasks", "--all-prds", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] is None
+        assert data["all_prds"] is True
+        assert set(data["promoted_to_ready"]) == {
+            "T001",
+            "v0.1:T001",
+            "v0.2:T001",
+        }
+        human = _invoke_cmd(tmp_path, ["review", "tasks", "--all-prds"])
+        assert human.exit_code == 0, human.output
+        assert "Scope: all PRDs" in human.output
+
+        conflict = _invoke_cmd(
+            tmp_path,
+            ["review", "tasks", "--prd", "v0.1", "--all-prds", "--json"],
+        )
+        assert conflict.exit_code == 1
+        assert json.loads(conflict.output)["error"]["code"] == "bad_request"
 
     def test_review_tasks_promotes_complete_tasks(self, tmp_path: Path) -> None:
         """Tasks with acceptance_criteria + verification → promoted to ready."""
@@ -8853,6 +9312,7 @@ class TestT019PrdScopedCliCommands:
         _seed_two_prd_project(tmp_path)
         result = _invoke_cmd(tmp_path, ["score", "--prd", "v0.2"])
         assert result.exit_code == 0, result.output
+        assert "PRD: v0.2" in result.output
 
         db = tmp_path / ".anvil" / "state.db"
         conn = sqlite3.connect(str(db))
@@ -8865,6 +9325,94 @@ class TestT019PrdScopedCliCommands:
         # Default task untouched; named task scored.
         assert scores["T001"] == "{}", scores["T001"]
         assert scores["v0.2:T900"] != "{}", scores["v0.2:T900"]
+
+    def test_score_prd_default_scope_contains_every_derivative(
+        self, tmp_path: Path
+    ) -> None:
+        """No selector resolves one PRD and cannot leak another PRD's queue."""
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        high_score = {
+            "complexity": 5,
+            "parallelizability": 2,
+            "context_load": 2,
+            "blast_radius": 2,
+            "review_risk": 2,
+            "agent_suitability": 1,
+            "blast_radius_confirmed": True,
+            "review_risk_confirmed": True,
+        }
+        with sqlite3.connect(str(db)) as connection:
+            connection.execute(
+                "UPDATE tasks SET scores = ?, conflict_groups = ? "
+                "WHERE id = 'v0.2:T900'",
+                (json.dumps(high_score), json.dumps(["CG-global"])),
+            )
+            connection.execute(
+                "UPDATE tasks SET conflict_groups = ? WHERE id = 'T001'",
+                (json.dumps(["CG-global"]),),
+            )
+
+        result = _invoke_cmd(tmp_path, ["score", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "default"
+        assert data["all_prds"] is False
+        assert [entry["task_id"] for entry in data["scored"]] == ["T001"]
+        assert data["expansion_queue"] == []
+        with sqlite3.connect(str(db)) as connection:
+            named_score, named_groups = connection.execute(
+                "SELECT scores, conflict_groups FROM tasks WHERE id = 'v0.2:T900'"
+            ).fetchone()
+            default_groups = connection.execute(
+                "SELECT conflict_groups FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        assert json.loads(named_score) == high_score
+        assert json.loads(named_groups) == ["CG-global"]
+        assert json.loads(default_groups) == ["CG-global"]
+
+    def test_score_prd_all_opt_in_overrides_env_and_conflicts_with_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        result = _invoke_cmd(tmp_path, ["score", "--all-prds", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] is None
+        assert data["all_prds"] is True
+        assert {entry["task_id"] for entry in data["scored"]} == {
+            "T001",
+            "v0.2:T900",
+        }
+
+        conflict = _invoke_cmd(
+            tmp_path,
+            ["score", "--prd", "default", "--all-prds", "--json"],
+        )
+        assert conflict.exit_code == 1
+        assert json.loads(conflict.output)["error"]["code"] == "bad_request"
+
+    def test_score_prd_explicit_task_owner_mismatch_refuses(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+        events = tmp_path / ".anvil" / "events.jsonl"
+        before = events.read_bytes()
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["score", "T001", "--prd", "v0.2", "--json"],
+        )
+
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "not_found"
+        assert "belongs to PRD 'default'" in error["message"]
+        assert events.read_bytes() == before
 
     # ---- prd review ---------------------------------------------------------
 

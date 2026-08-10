@@ -4555,6 +4555,19 @@ class SqliteBackend:
             raise
         conn.execute("COMMIT")
 
+    def _m_to_v20(self, conn: sqlite3.Connection) -> None:
+        """v19 -> v20: add nullable versioned Git bindings to claim projections."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table in ("claims", "bundle_claims"):
+                columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if "git_metadata" not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN git_metadata TEXT")
+        except BaseException:
+            self._safe_rollback(conn)
+            raise
+        conn.execute("COMMIT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -4573,6 +4586,7 @@ class SqliteBackend:
         (16, _m_to_v17),
         (17, _m_to_v18),
         (18, _m_to_v19),
+        (19, _m_to_v20),
     ]
 
     @staticmethod
@@ -4700,17 +4714,19 @@ class SqliteBackend:
 
     @contextmanager
     def claim_operation_lock(self) -> Iterator[None]:
-        """Serialize one logical claim operation on this backend instance.
+        """Serialize one logical claim operation across threads and processes.
 
         The append path already serializes writes, but claim also performs
         pre-append reads (task status, PRD gate, conflict checks). A single
         sqlite3 connection is not safe for overlapping reads from many threads,
         even with ``check_same_thread=False``. This lock lets ClaimManager make
         those reads and the eventual append one same-process critical section.
-        Cross-process atomicity still comes from the events.jsonl flock and
-        SQLite write transaction inside append().
+        The events-log flock spans precondition reads, the claim append, and
+        any caller-owned Git mutation/compensation. ``append()`` is reentrant
+        under this lock, so the state event and external Git plan share one
+        cross-process ownership boundary.
         """
-        with self._proc_lock:
+        with self._append_lock():
             yield
 
     @contextmanager
@@ -9284,15 +9300,24 @@ class SqliteBackend:
         conn.execute(
             """INSERT INTO bundle_claims
                (id, bundle_id, claimed_by, status, branch, worktree_path,
-                session_id, expected_files, member_claim_ids, created_at,
+                git_metadata, session_id, expected_files, member_claim_ids, created_at,
                 lease_expires_at, last_heartbeat_at, released_at, release_reason)
-               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
             (
                 payload.id,
                 payload.bundle_id,
                 payload.claimed_by,
                 payload.branch,
                 payload.worktree_path,
+                (
+                    json.dumps(
+                        payload.git_metadata.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if payload.git_metadata is not None
+                    else None
+                ),
                 payload.session_id,
                 json.dumps(payload.expected_files),
                 json.dumps(member_claim_ids, sort_keys=True),
@@ -9313,11 +9338,11 @@ class SqliteBackend:
             conn.execute(
                 """INSERT INTO claims
                    (id, task_id, claimed_by, claim_type, status, branch,
-                    worktree_path, session_id, bundle_claim_id, expected_files,
+                    worktree_path, git_metadata, session_id, bundle_claim_id, expected_files,
                     generation, attestation_context,
                     created_at, lease_expires_at, last_heartbeat_at,
                     released_at, release_reason)
-                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?,
+                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?, ?,
                            (SELECT COALESCE(MAX(generation), 0) + 1
                               FROM claims WHERE task_id = ?),
                            NULL, ?, ?, ?, NULL, NULL)""",
@@ -9327,6 +9352,15 @@ class SqliteBackend:
                     payload.claimed_by,
                     payload.branch,
                     payload.worktree_path,
+                    (
+                        json.dumps(
+                            payload.git_metadata.model_dump(mode="json"),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        if payload.git_metadata is not None
+                        else None
+                    ),
                     payload.session_id,
                     payload.id,
                     likely_files_json or "[]",
@@ -10987,6 +11021,7 @@ class SqliteBackend:
         last_heartbeat_at: str = payload.last_heartbeat_at
         branch: str | None = payload.branch
         worktree_path: str | None = payload.worktree_path
+        git_metadata = payload.git_metadata
         expected_files = payload.expected_files
         generation = payload.generation
         if generation is None:
@@ -11090,11 +11125,11 @@ class SqliteBackend:
             """
             INSERT OR IGNORE INTO claims
                 (id, task_id, claimed_by, claim_type, status, branch,
-                 worktree_path, session_id, expected_files, generation,
+                 worktree_path, git_metadata, session_id, expected_files, generation,
                  attestation_context, created_at,
                  lease_expires_at, last_heartbeat_at, released_at, release_reason)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """,
             (
                 claim_id,
@@ -11104,6 +11139,15 @@ class SqliteBackend:
                 status,
                 branch,
                 worktree_path,
+                (
+                    json.dumps(
+                        git_metadata.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if git_metadata is not None
+                    else None
+                ),
                 getattr(payload, "session_id", None),
                 json.dumps(expected_files),
                 generation,
@@ -12975,6 +13019,8 @@ class SqliteBackend:
         for column in ("expected_files", "member_claim_ids"):
             if isinstance(d.get(column), str):
                 d[column] = json.loads(d[column])
+        if isinstance(d.get("git_metadata"), str):
+            d["git_metadata"] = json.loads(d["git_metadata"])
         return BundleClaim.model_validate(d)
 
     def _row_to_claim(self, row: Any) -> Claim:
@@ -12984,6 +13030,8 @@ class SqliteBackend:
             d["expected_files"] = json.loads(d["expected_files"])
         if isinstance(d.get("attestation_context"), str):
             d["attestation_context"] = json.loads(d["attestation_context"])
+        if isinstance(d.get("git_metadata"), str):
+            d["git_metadata"] = json.loads(d["git_metadata"])
         return Claim.model_validate(d)
 
     @staticmethod

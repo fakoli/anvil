@@ -22,6 +22,7 @@ from anvil.state.backend import Backend, BackendError
 from anvil.state.models import (
     BundleClaim,
     BundleStatus,
+    ClaimGitMetadata,
     EventDraft,
     ExecutionBundle,
     TaskStatus,
@@ -86,6 +87,7 @@ class BundleManager:
         *,
         branch: str | None = None,
         worktree_path: str | None = None,
+        git_metadata: ClaimGitMetadata | None = None,
     ) -> BundleClaimResult:
         bundle = self.preflight(bundle_id)
         tasks = [self._backend.get_task(task_id) for task_id in bundle.task_ids]
@@ -116,6 +118,11 @@ class BundleManager:
                 "claimed_by": self._actor,
                 "branch": branch,
                 "worktree_path": worktree_path,
+                "git_metadata": (
+                    git_metadata.model_dump(mode="json")
+                    if git_metadata is not None
+                    else None
+                ),
                 "session_id": session_discriminator(),
                 "expected_files": expected_files,
                 "member_claims": member_claims,

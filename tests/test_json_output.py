@@ -288,7 +288,7 @@ class TestFindDecisionsJson:
         res = _invoke(tmp_path, ["prd", "find-decisions", "--json"])
         assert res.exit_code != 0
         err = _assert_error(_parse_envelope(res), "prd find-decisions")
-        assert err["code"] == "not_found"
+        assert err["code"] == "source_not_found"
 
 
 # ---------------------------------------------------------------------------

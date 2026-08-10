@@ -142,7 +142,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 19)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 20)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -266,7 +266,7 @@ anvil project snapshot --json
 anvil project snapshot --json --limit max_tasks=1000 --limit max_dependency_edges=5000
 ```
 
-Consumers must first pin describe API 10, operation version 1, and the exact
+Consumers must first pin describe API 14, operation version 1, and the exact
 packaged schema resource. See [Provider read contracts](contracts/provider-reads-v1.md)
 for limits, digest framing, fixtures, and the Workbench mapping.
 
@@ -568,9 +568,12 @@ contract.
 
 **Synopsis:** Score tasks across six rule-based dimensions (complexity,
 parallelizability, context_load, blast_radius, review_risk,
-agent_suitability). Without a task id: scores every task whose scores are
-incomplete. With a task id: scores that single task. Emits one `task.scored`
-event per task and prints a summary table.
+agent_suitability). By default it resolves one PRD through `--prd`,
+`ANVIL_PRD`, or the default/single partition and keeps scoring, skipped work,
+and the expansion queue inside that partition. Pass `--all-prds` for an
+explicit project-wide run. With a task id: scores that single task after
+verifying it belongs to the selected PRD. Emits one `task.scored` event per
+task and prints the effective scope plus a summary table.
 
 **Positional arguments:**
 
@@ -587,6 +590,10 @@ event per task and prints a summary table.
 - `--model NAME` *(default: unset)* — override the LLM model for this run
   (wins over `llm_model` / `llm_tier`). See [`anvil plan`](#plan) for the
   per-provider name conventions.
+- `--prd ID` — select one PRD partition. Precedence is the explicit flag,
+  `ANVIL_PRD`, then default/single-PRD resolution.
+- `--all-prds` — explicitly score every partition. Mutually exclusive with a
+  command-line `--prd`; it overrides an environment-only `ANVIL_PRD`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -594,13 +601,16 @@ event per task and prints a summary table.
 - `0` — scoring completed (including the "no tasks require scoring" no-op).
 - `1` — specified `TASK_ID` not found; or an explicitly-pinned
   (`bedrock`/`custom`) provider could not be built. The default agent-sdk
-  provider needs no key.
+  provider needs no key. A scoring implementation that returns an incomplete
+  or out-of-range dimension also exits with `score_incomplete`; when scoring a
+  batch, Anvil validates every result before appending any `task.scored` event.
 
 **Example:**
 
 ```bash
-anvil score                # score every unscored task
-anvil score T003
+anvil score                # score unscored tasks in the resolved PRD
+anvil score T003 --prd default
+anvil score --all-prds     # explicit project-wide pass
 anvil score T003 --use-llm
 ```
 
@@ -658,14 +668,21 @@ complexity score); [`docs/llm.md`](llm.md);
 
 ### `anvil review tasks` { #review-tasks }
 
-**Synopsis:** Promote tasks through the review lifecycle in two stages:
+**Synopsis:** Promote tasks in one resolved PRD through the review lifecycle in two stages:
 `drafted` → `reviewed`, then `reviewed` → `ready`. The `drafted` → `reviewed`
 gate requires non-empty `acceptance_criteria` AND non-empty
 `verification.commands`. Prints a summary of how many tasks were promoted at
-each stage and lists any blocked tasks with the gate-failure reason.
+each stage and lists any blocked tasks with the gate-failure reason. Selection
+uses `--prd`, then `ANVIL_PRD`, then the single/default PRD. Project-wide
+mutation requires the explicit `--all-prds` flag. Both promotion passes and
+risk-score confirmation remain inside the reported scope.
 
 **Flags:**
 
+- `--prd ID` — review one PRD partition. Also reads `ANVIL_PRD`.
+- `--all-prds` — explicitly review every PRD partition. This overrides an
+  environment-only `ANVIL_PRD` but cannot be combined with a command-line
+  `--prd`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -678,6 +695,8 @@ each stage and lists any blocked tasks with the gate-failure reason.
 
 ```bash
 anvil review tasks
+anvil review tasks --prd v0.2
+anvil review tasks --all-prds
 ```
 
 **See also:** [`anvil list`](#list) to inspect the current statuses;
@@ -841,9 +860,14 @@ worktree at `../wt-<task_id>/`.
 **Flags:**
 
 - `--worktree` *(flag)* — also create a git worktree at `../wt-<task_id>/`.
+  For a repository created with `--separate-git-dir`, invoke this flag from
+  the main checkout so Anvil can preserve project-adjacent placement. A linked
+  caller cannot reconstruct that unrecorded main-checkout path and refuses
+  with `worktree_placement_unavailable`; use the main checkout or an explicit
+  shared-tree claim instead.
 - `--shared-tree` *(flag)* — claim into the shared checkout even under `worktree_isolation: require` (read-only/docs work); also silences the advisory shared-checkout warning.
-  Skipped with a stderr warning when no branch was created (e.g. when the
-  branch already exists).
+  A compatible existing branch/worktree is revalidated and reused; an occupied,
+  dirty, stale, or differently owned target is refused before mutation.
 - `--force` *(flag)* — override the pre-claim conflict warnings. Without
   `--force`, file overlap or group conflicts cause the command to exit 1
   after listing every conflicting claim.
@@ -1680,10 +1704,14 @@ flag list; full prose treatment may follow in a later pass.
   `prd parse` explicitly to persist a canonical title.
 - `anvil prd find-decisions` — Scan a PRD for `[NEEDS DECISION]` markers,
   open questions, and missing acceptance-criteria/verification fields
-  (`--file`, `--json`); read-only, always exits 0.
+  (`--prd`/`ANVIL_PRD`, `--file`, `--json`); read-only, always exits 0.
+  `--file` selects markdown content while `--prd` remains the task/state
+  partition used for missing-field detection and reported scope.
 - `anvil prd resolve-decision DECISION_ID` — Back-propagate a resolved
   decision into the PRD source and record a `prd.decision_resolved` event
-  (`--resolution`/`-r`, `--by`, `--file`, `--json`).
+  bound to the effective partition (`--resolution`/`-r`, `--by`,
+  `--prd`/`ANVIL_PRD`, `--file`, `--json`). The returned parse continuation
+  repeats both the effective PRD and custom file selection.
 
 **Planning extras**
 

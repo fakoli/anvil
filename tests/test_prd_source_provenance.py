@@ -612,7 +612,7 @@ def test_schema_v18_migration_preserves_lifecycle_tasks_and_marks_legacy_unavail
 
     migrated = _projection_backend(state_dir)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 19
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 20
         prd = migrated.get_prd("release")
         assert prd is not None
         assert prd.status.value == "approved"

@@ -117,6 +117,7 @@ __all__ = [
     "ClaimExpectedPathBaseline",
     "ClaimAttestationContext",
     "ClaimProgressAttestation",
+    "ClaimGitMetadata",
     "Claim",
     "BundleClaim",
     "Evidence",
@@ -1776,6 +1777,35 @@ class ClaimProgressAttestation(BaseModel):
         return _require_utc(value, "attestation timestamp")
 
 
+class ClaimGitMetadata(BaseModel):
+    """Validated Git intent frozen before a task or bundle claim mutates Git."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    mode: Literal["isolated", "shared"]
+    canonical_root: StrictStr = Field(min_length=1, max_length=4096)
+    selected_default_base_ref: StrictStr = Field(min_length=1, max_length=1024)
+    selected_default_base_sha: StrictStr = Field(
+        pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    )
+    claim_start_ref: StrictStr = Field(min_length=1, max_length=1024)
+    claim_start_sha: StrictStr = Field(
+        pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    )
+    branch: StrictStr = Field(min_length=1, max_length=1024)
+    target_path: StrictStr = Field(min_length=1, max_length=4096)
+    worktree_path: StrictStr | None = Field(default=None, min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def _validate_mode_path(self) -> ClaimGitMetadata:
+        if self.mode == "isolated" and self.worktree_path != self.target_path:
+            raise ValueError("isolated Git metadata requires its target worktree path")
+        if self.mode == "shared" and self.worktree_path is not None:
+            raise ValueError("shared Git metadata cannot carry an isolated worktree path")
+        return self
+
+
 class Claim(BaseModel):
     """An exclusive lease that an agent holds on a Task while working on it."""
 
@@ -1788,6 +1818,7 @@ class Claim(BaseModel):
     status: ClaimStatus = ClaimStatus.active
     branch: str | None = None
     worktree_path: str | None = None
+    git_metadata: ClaimGitMetadata | None = None
     expected_files: list[str] = Field(default_factory=list)
     # Monotonic per-task lifecycle generation.  v17 migration deterministically
     # assigns generations to legacy rows; only claims with an immutable context
@@ -1809,6 +1840,22 @@ class Claim(BaseModel):
     released_at: datetime.datetime | None = None
     release_reason: str | None = None
 
+    @model_validator(mode="after")
+    def _validate_git_metadata(self) -> Claim:
+        if self.git_metadata is None:
+            return self
+        if self.branch != self.git_metadata.branch:
+            raise ValueError("claim branch must match Git metadata")
+        if self.worktree_path != self.git_metadata.worktree_path:
+            raise ValueError("claim worktree must match Git metadata")
+        if (
+            self.attestation_context is not None
+            and self.attestation_context.claim_start_sha
+            != self.git_metadata.claim_start_sha
+        ):
+            raise ValueError("claim attestation start must match Git metadata")
+        return self
+
     @field_validator(
         "created_at",
         "lease_expires_at",
@@ -1822,10 +1869,12 @@ class Claim(BaseModel):
         return _require_utc(v, "created_at / lease_expires_at / last_heartbeat_at")
 
     @model_serializer(mode="wrap")
-    def _omit_empty_bundle_claim(self, handler: Any) -> dict[str, Any]:
+    def _omit_legacy_optional_claim_fields(self, handler: Any) -> dict[str, Any]:
         data = handler(self)
         if data.get("bundle_claim_id") is None:
             data.pop("bundle_claim_id", None)
+        if data.get("git_metadata") is None:
+            data.pop("git_metadata", None)
         return data
 
 
@@ -1844,6 +1893,7 @@ class BundleClaim(BaseModel):
     status: ClaimStatus = ClaimStatus.active
     branch: str | None = None
     worktree_path: str | None = None
+    git_metadata: ClaimGitMetadata | None = None
     session_id: str | None = None
     expected_files: list[str] = Field(default_factory=list)
     member_claim_ids: dict[TaskID, ClaimID]
@@ -1864,7 +1914,19 @@ class BundleClaim(BaseModel):
             raise ValueError("bundle claim requires member claim authorizations")
         if len(set(self.member_claim_ids.values())) != len(self.member_claim_ids):
             raise ValueError("bundle member claim ids must be unique")
+        if self.git_metadata is not None:
+            if self.branch != self.git_metadata.branch:
+                raise ValueError("bundle claim branch must match Git metadata")
+            if self.worktree_path != self.git_metadata.worktree_path:
+                raise ValueError("bundle claim worktree must match Git metadata")
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_legacy_git_metadata(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("git_metadata") is None:
+            data.pop("git_metadata", None)
+        return data
 
     @field_validator("released_at", mode="after")
     @classmethod

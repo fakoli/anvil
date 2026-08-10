@@ -8,6 +8,39 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Transactional task and bundle claim Git wiring (#180).** Claims now freeze
+  and persist the selected local base, exact claim-start ref and commit, branch,
+  canonical repository root, and shared or isolated target before Git mutation.
+  The engine revalidates those observations under one cross-process claim lock;
+  branch/worktree failures release state and remove invocation-owned artifacts,
+  including after normal ref packing, reftable compaction, or reflog expiry.
+  External replacements are preserved while Git retains any distinct ref,
+  reflog, or filesystem-identity witness. A same-SHA delete/recreate followed
+  by destruction of every continuity witness is intentionally outside this
+  local coordination guarantee because Git no longer exposes which generation
+  owns the indistinguishable ref. Historical claims keep nullable Git metadata. This adds
+  schema version 20 and advances the public API contract to version 11.
+
+- **PRD-scoped decision discovery and resolution (#180).** CLI decision reads
+  and writes now resolve an explicit `--prd`, `ANVIL_PRD`, or the unambiguous
+  default/single partition; `--file` selects content without changing that
+  state scope. MCP discovery accepts the same PRD selector, and CLI/MCP JSON,
+  human guidance, continuation argv, and audit events report the effective
+  partition. This advances the public API contract to version 12.
+
+- **PRD-scoped task review (#180).** CLI and MCP task-review passes now resolve
+  one PRD by default and require an explicit `--all-prds` / `all_prds=true`
+  opt-in for project-wide mutation. Drafted-to-reviewed, reviewed-to-ready, and
+  durable risk-score confirmation all use the same reported partition scope.
+  This advances the public API contract to version 13.
+
+- **PRD-scoped scoring and advisories (#180).** CLI and MCP scoring now resolve
+  one PRD by default and require explicit `--all-prds` / `all_prds=true` for a
+  project-wide run. Scored and skipped counts, task-owner checks, recursive
+  expansion queues, persisted confirmation state, and human/JSON/MCP output all
+  use the same reported scope while global conflict groups remain unchanged.
+  This advances the public API contract to version 14.
+
 - **Truthful task-rejection provenance and governor recovery (#181).** Rejected
   review attempts now persist engine-derived quality, evidence-resubmission, or
   process provenance with exact claim/evidence identity, and new accepted
@@ -22,6 +55,20 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
+- **Transactional claim and decision recovery (#180).** Task and bundle claims
+  now release state on cancellation as well as ordinary Git errors, absorbed
+  submodules resolve their real worktree root, and the supported local `.anvil`
+  layout is excluded from claim cleanliness checks without hiding unrelated
+  changes. Git observation output is bounded. PRD decision resolution now uses
+  a locked compare-and-swap source replacement and restores exact source bytes
+  when the matching audit append is refused.
+
+- **Total, mutation-atomic planning contracts.** CLI and MCP PRD revisions keep
+  requirement identifiers structurally typed through diff construction, and
+  scoring validates all six bounded dimensions for the entire request before
+  appending any `task.scored` event. Incomplete mixed batches now fail with a
+  bounded `score_incomplete` refusal and leave scores and event history intact;
+  the strict planning/scoring mypy boundary is enforced in CI.
 - **Atomic canonical planning graphs.** CLI, MCP, sample, and scan planning now
   persist one validated canonical graph event and one SQLite transaction, so a
   later operation failure cannot leave a partial or transient raw graph in the

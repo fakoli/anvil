@@ -32,11 +32,11 @@ The toolset is organized by lifecycle phase:
 - **Decision resolution** (`find_decisions`)
 - **Introspection** (`describe_surface`)
 
-The nine workflow tools — `init_project`, `get_project_status`,
-`parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
-`apply_review_decision` — deliberately omit git operations (branch / worktree creation),
-matching `claim_task`'s long-standing behavior: remote agents may have no git access, so
-the MCP surface stays git-free. Git side-effects remain CLI-only.
+Planning tools do not create branches or worktrees. `claim_task` and `claim_bundle`,
+however, use the same transactional shared-branch claim plan as the CLI when `cwd`
+resolves to a Git repository: they may create or check out the claim branch. Isolated
+worktree creation remains CLI-only. If Git is unavailable, the non-isolated state-only
+claim path remains usable.
 
 ---
 
@@ -492,9 +492,12 @@ edge, drop a spurious one) before promoting tasks to `ready`, without hand-editi
 
 ### `claim_task`
 
-Acquires an exclusive lease on a task for the given actor. Delegates to
-`ClaimManager.claim`, which writes the `Claim` row in an atomic SQLite transaction.
-Stale-claim reaping runs first.
+Acquires an exclusive lease on a task for the given actor. It first resolves a
+read-only shared-branch Git plan, then revalidates that plan under the same
+cross-process lock used by `ClaimManager.claim`. State and the planned branch mutation
+therefore succeed together; a Git failure or interruption releases the claim and
+compensates only Git artifacts created by that invocation. Isolated worktrees require
+the CLI. Stale-claim reaping runs first.
 
 **Gate**: the task's owning PRD must be in `reviewed` or `approved` status. If the PRD is in
 any other status (e.g. `draft`) or missing, the tool raises a `ToolError` and no claim is
@@ -527,6 +530,7 @@ and the project-level override is read from `.anvil/config.yaml`.
   "lease_expires_at": "2026-05-25T14:15:00+00:00",
   "branch": "agent/t012-implement-auth",
   "worktree_path": null,
+  "git_metadata": {"mode": "shared", "canonical_root": "...", "claim_start_sha": "...", "branch": "agent/t012-implement-auth", "target_path": "..."},
   "expected_files": ["src/auth/middleware.py", "tests/test_auth.py"],
   "generation": 2,
   "attestation_context": {"repository_id": "...", "claim_start_sha": "...", "expected_paths": [{"path": "src/auth/middleware.py", "baseline_sha256": "..."}]},
@@ -535,15 +539,20 @@ and the project-level override is read from `.anvil/config.yaml`.
 ```
 
 The immutable attestation context binds external progress to this claim generation,
-repository, PRD/task revisions, and canonical expected-path baselines. `branch` and
-`worktree_path` are `null` when git ops are not configured. In a non-Git project the
-claim still succeeds with `attestation_context: null` and an additive warning; legacy
-hook-observed file progress remains available.
+repository, PRD/task revisions, and canonical expected-path baselines. `git_metadata`
+records the exact selected base, claim-start commit, branch, canonical root, and target.
+Here `canonical_root` is the stable Git repository identity shared by all linked
+callers; for `--separate-git-dir` repositories that identity is the common Git
+directory, while CLI isolated-worktree placement remains main-checkout-adjacent.
+`branch`, `worktree_path`, and `git_metadata` are nullable on the state-only path. In a
+non-Git project the claim still succeeds with `attestation_context: null` and an
+additive warning; legacy hook-observed file progress remains available.
 
 **Failure modes**
 
 - `ToolError` — PRD is not in `reviewed` or `approved` status, or missing.
 - `ToolError` — `ClaimError` from `ClaimManager` (task already claimed, task not in claimable state, etc.).
+- `ToolError` — bounded Git-plan refusal; no active claim or invocation-owned Git artifact remains.
 - `ToolError` — state directory not found.
 
 **When to call**: after `get_next_task` or `get_task` confirms the task is ready and
@@ -984,6 +993,7 @@ counts when `.anvil/` is absent — does **not** raise. Use this as the canonica
 | Parameter | Type             | Required | Default      |
 |-----------|------------------|----------|--------------|
 | `cwd`     | `string \| null` | no       | `Path.cwd()` |
+| `prd_id`  | `string \| null` | no       | explicit value, `ANVIL_PRD`, then single/default PRD |
 
 **Output**
 
@@ -1236,21 +1246,27 @@ latest PRD content.
 
 ### `score_tasks`
 
-Runs the rule-based scoring engine on a single task or all unscored tasks. Emits
-`task.scored` per scored task. Mirrors `anvil score [TASK_ID]` in deterministic
-mode.
+Runs the rule-based scoring engine on a single task or all unscored tasks in
+one resolved PRD. Set `all_prds=true` for an explicit project-wide run. Scored
+and skipped counts, ownership checks, and the recursive expansion queue all use
+the same scope. Emits `task.scored` per scored task and mirrors
+`anvil score [TASK_ID]` in deterministic mode.
 
 **Inputs**
 
-| Parameter | Type             | Required | Default      |
-|-----------|------------------|----------|--------------|
-| `task_id` | `string \| null` | no       | `null` (score all unscored) |
-| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+| Parameter  | Type             | Required | Default      |
+|------------|------------------|----------|--------------|
+| `task_id`  | `string \| null` | no       | `null` (score all unscored) |
+| `prd_id`   | `string \| null` | no       | resolved env/default/single PRD |
+| `all_prds` | `boolean`        | no       | `false`      |
+| `cwd`      | `string \| null` | no       | `Path.cwd()` |
 
 **Output**
 
 ```json
 {
+  "prd_id": "default",
+  "all_prds": false,
   "scored": [
     {
       "task_id": "T001",
@@ -1269,21 +1285,31 @@ mode.
 **Failure modes**
 
 - `ToolError` — `task_id` provided but not found.
+- `ToolError` — `prd_id` and `all_prds=true` are combined, the selected PRD
+  does not exist, or an explicit task belongs to another PRD.
 - `ToolError` — project not initialized.
+- `ToolError` with `score_incomplete` — a scoring implementation returned an
+  incomplete or out-of-range dimension. The entire request is validated before
+  any `task.scored` event is appended, so a mixed valid/invalid batch leaves all
+  prior scores and the event frontier unchanged.
 
 ---
 
 ### `review_tasks`
 
 Promotes tasks through `drafted → reviewed → ready` using the gate functions in
-`anvil.state.transitions`. Mirrors `anvil review tasks`. Returns the lists
-of promoted task IDs and any tasks blocked by a gate (with the gate's failure reason).
+`anvil.state.transitions`. By default it resolves one PRD using explicit
+`prd_id`, `ANVIL_PRD`, then single/default selection. Set `all_prds=true` for
+an explicit project-wide mutation. Both promotion passes and durable risk-score
+confirmation stay inside the reported scope. Mirrors `anvil review tasks`.
 
 **Inputs**
 
-| Parameter | Type             | Required | Default      |
-|-----------|------------------|----------|--------------|
-| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+| Parameter  | Type             | Required | Default      |
+|------------|------------------|----------|--------------|
+| `cwd`      | `string \| null` | no       | `Path.cwd()` |
+| `prd_id`   | `string \| null` | no       | resolved     |
+| `all_prds` | `boolean`        | no       | `false`      |
 
 **Output**
 
@@ -1291,7 +1317,9 @@ of promoted task IDs and any tasks blocked by a gate (with the gate's failure re
 {
   "promoted_to_reviewed": ["T001", "T002"],
   "promoted_to_ready":    ["T001", "T002"],
-  "blocked": []
+  "blocked": [],
+  "prd_id": "default",
+  "all_prds": false
 }
 ```
 
@@ -1300,7 +1328,8 @@ verification commands) appears in `blocked` instead of either promotion list.
 
 **Failure modes**
 
-- `ToolError` — project not initialized.
+- `ToolError` — project not initialized, selected PRD is missing, or
+  `prd_id` is combined with `all_prds=true`.
 
 ---
 
@@ -1421,6 +1450,8 @@ power the `resolve-decisions` skill's Q&A loop. Mirrors `anvil prd find-decision
 
 ```json
 {
+  "prd_id": "v0.2",
+  "prd_source": "v0.2",
   "decisions": [
     {
       "id": "ND-001",
@@ -1454,7 +1485,8 @@ agent walks the list and drives one Q&A per entry, so ordering shapes the conver
 
 ```bash
 anvil prd find-decisions
-anvil prd find-decisions --file path/to/prd.md
+anvil prd find-decisions --prd v0.2
+anvil prd find-decisions --file path/to/prd.md --prd v0.2
 ```
 
 **When to call**: after `parse_prd` succeeds but before `review_prd` or `plan_tasks`, so
@@ -1491,7 +1523,7 @@ None.
 
 ```json
 {
-  "api_version": "10",
+  "api_version": "14",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",
@@ -1499,7 +1531,7 @@ None.
   "tag": "v0.6.4",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 19,
+  "schema_version": 20,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],
@@ -1580,7 +1612,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":20,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":19}}
+{"error":{"code":"schema_mismatch","database_schema":21,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":20}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh

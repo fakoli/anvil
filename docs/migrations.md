@@ -32,6 +32,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v17     | Claim-bound progress attestations | `claims` adds monotonic `generation` and nullable immutable `attestation_context`; `claim_progress_attestations` records one pending, consumed, invalidated, or quarantined progress fact per claim generation. Legacy claims receive deterministic generations and remain unattestable when their context is NULL. |
 | v18     | Revision-bound PRD source provenance | `prds` adds exact source bytes plus digest, size, UTF-8 encoding, source revision, and explicit availability fields. Existing rows retain their lifecycle and ownership state but migrate as `legacy_unbound` with no fabricated source or digest. |
 | v19     | Task-rejection provenance | `reviews` adds immutable engine-derived category, reason, attempt/claim identity, evidence digest, typed findings, matched process predicate, and accept-rate accounting. Historical task rejections migrate conservatively as counting `quality`; no missing identity is fabricated. |
+| v20     | Transactional claim Git bindings | `claims` and `bundle_claims` add nullable `git_metadata` containing the validated selected base, exact claim-start identity, branch, repository root, and shared/isolated target. Historical claims remain unbound. |
 
 Canonical PRD titles require no new schema migration: `prds.title` has existed
 since v7. Historical rows and legacy events that have no title remain `""`;
@@ -152,6 +153,16 @@ accepted events that predate the v1 payload discriminator remain deliberately
 unbound (`review_attempt_id` and submitter stay NULL); migration and replay do
 not guess an identity for them.
 
+## Transactional claim Git bindings — v19 → v20 auto-upgrade
+
+The v20 migration adds nullable `git_metadata` to task and bundle claim
+projections. New Git-backed claims persist the already validated selected base,
+exact claim-start ref and commit, branch, canonical repository root, and shared
+or isolated target so state and filesystem preparation can be rolled back as
+one operation. Existing claims retain `NULL`: migration does not inspect a
+working tree or invent historical Git identity. The additive columns and schema
+stamp commit in one SQLite transaction and safely retry after interruption.
+
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
 The schema diff from v1/v2 to v3 is **purely additive**:
@@ -251,13 +262,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v19, including the final v18→v19 step) that already lives in
+(currently v20, including the final v19→v20 step) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v19
+Schema migration  : v3 -> v20
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -265,7 +276,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v19.
+Migrated state.db v3 -> v20.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 

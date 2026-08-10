@@ -11,8 +11,13 @@ from __future__ import annotations
 
 import datetime
 
+import pytest
+
 from anvil.planning.scoring import (
+    CompleteScore,
+    IncompleteScoreError,
     rank_assumptions,
+    require_complete_score,
     review_tier,
     score_all,
     score_requirement_assumption,
@@ -89,6 +94,20 @@ class TestPureFunctionContracts:
         assert result.blast_radius is not None
         assert result.review_risk is not None
         assert result.agent_suitability is not None
+        assert isinstance(result, CompleteScore)
+
+    def test_complete_score_boundary_refuses_one_missing_dimension(self) -> None:
+        incomplete = Score(
+            complexity=1,
+            parallelizability=2,
+            context_load=3,
+            blast_radius=4,
+            review_risk=5,
+            agent_suitability=None,
+        )
+
+        with pytest.raises(IncompleteScoreError, match="incomplete or out-of-range"):
+            require_complete_score(incomplete)
 
     def test_score_all_returns_new_task_instances(self) -> None:
         """score_all uses model_copy — returns new Task instances, originals unchanged."""

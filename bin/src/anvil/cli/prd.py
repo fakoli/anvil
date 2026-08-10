@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import stat
+import tempfile
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 import typer
 
 from anvil.cli._helpers import (
     _DEFAULT_PRD_IDS,
-    _PRD_FILENAME,
     PRD_OPTION,
+    PrdAmbiguityError,
     PrdSourceIngestError,
     StateRootError,
     _get_project_id,
@@ -21,6 +27,7 @@ from anvil.cli._helpers import (
     ingest_prd_source,
     ingest_prd_source_for_id,
     prd_source_filename,
+    replace_prd_source_for_id,
     resolve_prd_id,
     selected_prd_source_path,
     validate_prd_id,
@@ -36,6 +43,155 @@ prd_app = typer.Typer(
 )
 
 _ALLOWED_TERMINAL_TITLE_FORMAT_CONTROLS = {"\u200c", "\u200d"}
+_MAX_DECISION_SOURCE_BYTES = 2_097_152
+_MAX_DECISION_EVENT_BYTES = 16 * 1024 * 1024
+
+
+def _decision_prd_id(
+    backend: Any,
+    requested: str | None,
+    *,
+    require_existing: bool = True,
+) -> str:
+    """Resolve one existing PRD partition for decision operations."""
+    try:
+        resolved = canonical_prd_id(resolve_prd_id(backend, requested))
+    except PrdAmbiguityError:
+        if backend.list_prds():
+            raise
+        # Decision discovery historically runs before the first parse. Keep
+        # that source-only workflow while still making an explicit id/env the
+        # authoritative future partition.
+        resolved = canonical_prd_id(requested or "default")
+    validated = canonical_prd_id(validate_prd_id(resolved))
+    if require_existing and backend.get_prd(validated) is None:
+        raise PrdSourceIngestError(
+            "prd_not_found",
+            f"PRD partition {validated!r} does not exist",
+        )
+    return validated
+
+
+def _decision_source(
+    state_dir: Path,
+    *,
+    cwd: Path | None,
+    file: Path | None,
+    prd_id: str,
+) -> tuple[Path, str, str]:
+    """Read one exact decision source while keeping content and scope separate."""
+    if file is not None:
+        source_path = file
+        if not source_path.is_absolute():
+            base = cwd.resolve() if cwd is not None else Path.cwd().resolve()
+            source_path = base / source_path
+        source = ingest_prd_source(source_path)
+        return source_path, source.markdown, "custom"
+    source_path = selected_prd_source_path(state_dir, prd_id)
+    source = ingest_prd_source_for_id(state_dir, prd_id)
+    return source_path, source.markdown, prd_id
+
+
+def _replace_custom_decision_source(
+    source_path: Path,
+    *,
+    expected_sha256: str,
+    markdown: str,
+) -> str:
+    """CAS-replace one custom decision source through a same-directory temp."""
+    source_bytes = markdown.encode("utf-8", errors="strict")
+    if len(source_bytes) > _MAX_DECISION_SOURCE_BYTES:
+        raise PrdSourceIngestError(
+            "source_limit_exceeded",
+            "PRD source exceeds the configured byte limit",
+        )
+    current = ingest_prd_source(source_path)
+    if current.source_sha256 != expected_sha256:
+        raise PrdSourceIngestError(
+            "source_changed",
+            "PRD source changed before verified replacement",
+        )
+    resolved = source_path.resolve(strict=True)
+    opened = os.stat(resolved, follow_symlinks=False)
+    if not stat.S_ISREG(opened.st_mode):
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "custom PRD source is not a regular file",
+        )
+
+    descriptor = -1
+    temp_path: Path | None = None
+    try:
+        descriptor, raw_temp = tempfile.mkstemp(
+            prefix=f".{resolved.name}.",
+            suffix=".tmp",
+            dir=resolved.parent,
+        )
+        temp_path = Path(raw_temp)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            stream.write(source_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        latest = ingest_prd_source(resolved)
+        if latest.source_sha256 != expected_sha256:
+            raise PrdSourceIngestError(
+                "source_changed",
+                "PRD source changed before verified replacement",
+            )
+        os.chmod(temp_path, stat.S_IMODE(opened.st_mode))
+        os.replace(temp_path, resolved)
+        temp_path = None
+    except PrdSourceIngestError:
+        raise
+    except OSError as exc:
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot replace verified custom PRD source",
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return hashlib.sha256(source_bytes).hexdigest()
+
+
+def _decision_event_was_appended(
+    events_path: Path,
+    *,
+    previous_size: int,
+    draft: EventDraft,
+) -> bool:
+    """Return whether one complete matching event became durable after an error."""
+    try:
+        with events_path.open("rb") as stream:
+            stream.seek(previous_size)
+            appended = stream.read(_MAX_DECISION_EVENT_BYTES + 1)
+    except OSError:
+        return False
+    if (
+        not appended
+        or len(appended) > _MAX_DECISION_EVENT_BYTES
+        or not appended.endswith(b"\n")
+        or appended.count(b"\n") != 1
+    ):
+        return False
+    try:
+        record = json.loads(appended.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(record, dict)
+        and record.get("actor") == draft.actor
+        and record.get("action") == draft.action
+        and record.get("target_kind") == draft.target_kind
+        and record.get("target_id") == draft.target_id
+        and record.get("payload_json") == draft.payload_json
+    )
 
 
 @prd_app.command("show")
@@ -287,16 +443,11 @@ def prd_parse(
         existing_prd = backend.get_prd(stored_prd_id)
         is_default_prd = parse_prd_id in _DEFAULT_PRD_IDS
 
-        new_requirements = [
-            {
-                "id": r.id,
-                "prd_section": r.prd_section,
-                "text": r.text,
-                "source_paragraph": r.source_paragraph,
-                "derived": r.derived,
-            }
-            for r in result.requirements
-        ]
+        # Keep revision projections as validated Requirement models until the
+        # final event serialization boundary. This makes every id statically a
+        # string and prevents heterogeneous anonymous dictionaries from
+        # weakening diff/refusal logic.
+        new_requirements = list(result.requirements)
 
         if existing_prd is None:
             # FIRST parse of this prd_id → create-if-absent prd.parsed.
@@ -308,7 +459,10 @@ def prd_parse(
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
                 "non_goals": result.prd.non_goals,
-                "requirements": new_requirements,
+                "requirements": [
+                    requirement.model_dump(mode="json")
+                    for requirement in new_requirements
+                ],
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
@@ -367,7 +521,7 @@ def prd_parse(
                 prd_id=stored_prd_id, include_superseded=True
             )
             all_ids = {r.id for r in all_reqs}
-            new_by_id = {r["id"]: r for r in new_requirements}
+            new_by_id = {requirement.id: requirement for requirement in new_requirements}
 
             # A new parse that re-lists an id retired in a PRIOR revision (in
             # all_ids but NOT live) would fall into NO diff bucket — added
@@ -399,19 +553,15 @@ def prd_parse(
                 raise typer.Exit(code=1)
 
             requirements_added = [
-                r for r in new_requirements if r["id"] not in all_ids
+                requirement
+                for requirement in new_requirements
+                if requirement.id not in all_ids
             ]
             requirements_unchanged = [
                 new_by_id[rid] for rid in live_by_id if rid in new_by_id
             ]
             requirements_superseded = [
-                {
-                    "id": r.id,
-                    "prd_section": r.prd_section,
-                    "text": r.text,
-                    "source_paragraph": r.source_paragraph,
-                    "derived": r.derived,
-                }
+                r
                 for r in live_reqs
                 if r.id not in new_by_id
             ]
@@ -443,9 +593,18 @@ def prd_parse(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                "requirements_added": requirements_added,
-                "requirements_superseded": requirements_superseded,
-                "requirements_unchanged": requirements_unchanged,
+                "requirements_added": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_added
+                ],
+                "requirements_superseded": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_superseded
+                ],
+                "requirements_unchanged": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_unchanged
+                ],
                 **source_binding(new_revision),
             }
 
@@ -888,6 +1047,7 @@ def prd_find_decisions(
             "Defaults to .anvil/prd.md in the current directory."
         ),
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -923,35 +1083,31 @@ def prd_find_decisions(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="prd find-decisions", json_output=json_output)
 
-    prd_path = file if file is not None else state_dir / _PRD_FILENAME
-    if not prd_path.exists():
-        if json_output:
-            fail(
-                "prd find-decisions",
-                f"PRD file not found at {prd_path}. "
-                "Author your PRD there or pass --file PATH.",
-                code="not_found",
-            )
-        typer.echo(
-            f"Error: PRD file not found at {prd_path}. "
-            "Author your PRD there or pass --file PATH.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
+    backend = _open_backend(state_dir)
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        effective_prd_id = _decision_prd_id(backend, prd, require_existing=False)
+        prd_path, markdown, source_identity = _decision_source(
+            state_dir,
+            cwd=cwd,
+            file=file,
+            prd_id=effective_prd_id,
+        )
+        backend_tasks = backend.list_tasks(prd_id=effective_prd_id)
+        tasks_or_none = backend_tasks or None
+    except (PrdAmbiguityError, PrdSourceIngestError) as exc:
+        code = exc.code if isinstance(exc, PrdSourceIngestError) else "prd_ambiguous"
         if json_output:
             fail(
                 "prd find-decisions",
-                f"cannot read {prd_path}: {exc}",
-                code="io_error",
+                str(exc),
+                code=code,
             )
-        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+    finally:
+        backend.close()
 
-    result = parse_prd(markdown, prd_id="prd")
+    result = parse_prd(markdown, prd_id=effective_prd_id)
 
     if result.errors:
         if json_output:
@@ -980,20 +1136,6 @@ def prd_find_decisions(
         )
         raise typer.Exit(code=1)
 
-    # Pull tasks from the backend so missing_field detection has data to
-    # walk. The backend may be empty (no plan run yet) — pass None in that
-    # case so the detector skips the missing_field check rather than
-    # synthesising decisions from PRD-tasks that aren't in state yet.
-    tasks_or_none = None
-    if state_dir.exists():
-        backend = _open_backend(state_dir)
-        try:
-            backend_tasks = backend.list_tasks()
-            if backend_tasks:
-                tasks_or_none = backend_tasks
-        finally:
-            backend.close()
-
     decisions = find_unresolved_decisions(
         markdown,
         prd=result.prd,
@@ -1002,7 +1144,6 @@ def prd_find_decisions(
 
     if json_output:
         import dataclasses
-        from typing import Any
 
         decisions_data: list[dict[str, Any]] = []
         for d in decisions:
@@ -1025,7 +1166,8 @@ def prd_find_decisions(
         emit_success(
             "prd find-decisions",
             {
-                "prd_source": str(prd_path),
+                "prd_id": effective_prd_id,
+                "prd_source": source_identity,
                 "decisions": decisions_data,
                 "count": len(decisions),
                 "counts_by_kind": counts,
@@ -1050,7 +1192,8 @@ def prd_find_decisions(
         DecisionKind.missing_field: "Missing fields",
     }
 
-    typer.echo(f"PRD source: {prd_path}")
+    typer.echo(f"PRD: {effective_prd_id}")
+    typer.echo(f"PRD source: {source_identity}")
 
     for kind in (
         DecisionKind.needs_decision,
@@ -1070,6 +1213,12 @@ def prd_find_decisions(
             if d.context_paragraph:
                 typer.echo(f"    context:  {_truncate(d.context_paragraph)}")
             typer.echo(f"    resolve:  {d.suggested_resolution_field}")
+            file_arg = " --file <same-file>" if file is not None else ""
+            typer.echo(
+                "    command:  anvil prd resolve-decision "
+                f"{d.id} --prd {effective_prd_id}{file_arg} "
+                "--resolution <answer>"
+            )
 
     typer.echo("")
     typer.echo(
@@ -1114,6 +1263,7 @@ def prd_resolve_decision(
             "Defaults to .anvil/prd.md in the current directory."
         ),
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1151,27 +1301,27 @@ def prd_resolve_decision(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command=cmd, json_output=json_output)
 
-    prd_path = file if file is not None else state_dir / _PRD_FILENAME
-    if not prd_path.exists():
-        if json_output:
-            fail(
-                cmd,
-                f"PRD file not found at {prd_path}.",
-                code="not_found",
-            )
-        typer.echo(f"Error: PRD file not found at {prd_path}.", err=True)
-        raise typer.Exit(code=1)
-
+    backend = _open_backend(state_dir)
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        effective_prd_id = _decision_prd_id(backend, prd)
+        prd_path, markdown, source_identity = _decision_source(
+            state_dir,
+            cwd=cwd,
+            file=file,
+            prd_id=effective_prd_id,
+        )
+        source_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    except (PrdAmbiguityError, PrdSourceIngestError) as exc:
+        backend.close()
+        code = exc.code if isinstance(exc, PrdSourceIngestError) else "prd_ambiguous"
         if json_output:
-            fail(cmd, f"cannot read {prd_path}: {exc}", code="io_error")
-        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+            fail(cmd, str(exc), code=code)
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    result = parse_prd(markdown, prd_id="prd")
+    result = parse_prd(markdown, prd_id=effective_prd_id)
     if result.errors:
+        backend.close()
         msg = f"PRD parse failed with {len(result.errors)} error(s)."
         if json_output:
             fail(cmd, msg, code="parse_error")
@@ -1179,9 +1329,8 @@ def prd_resolve_decision(
         raise typer.Exit(code=1)
 
     # Pull tasks from the backend so MF-* decisions can be located.
-    backend = _open_backend(state_dir)
     try:
-        backend_tasks = backend.list_tasks()
+        backend_tasks = backend.list_tasks(prd_id=effective_prd_id)
         tasks_or_none = backend_tasks or None
         decisions = find_unresolved_decisions(
             markdown,
@@ -1206,12 +1355,7 @@ def prd_resolve_decision(
         clock = SystemClock()
         now = clock.now()
         project_id = _get_project_id(backend)
-        # T021 audit (get_prd no-arg): default-only-correct. `resolve-decision`
-        # (like `find-decisions`) operates on the default PRD's markdown source
-        # (.anvil/prd.md, or --file) and is NOT --prd scoped, so the transition
-        # is validated against the default PRD. ``or result.prd`` covers the
-        # pre-parse case where no PRD row exists yet.
-        prd_model = backend.get_prd() or result.prd
+        prd_model = backend.get_prd(effective_prd_id) or result.prd
 
         try:
             transition_payload = prd_decision_resolved(
@@ -1239,18 +1383,9 @@ def prd_resolve_decision(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
-        # Write the file first, then record the event. If the write fails we
-        # never record a transition that does not match the file.
-        try:
-            prd_path.write_text(resolution_result.markdown, encoding="utf-8")
-        except OSError as exc:
-            if json_output:
-                fail(cmd, f"cannot write {prd_path}: {exc}", code="io_error")
-            typer.echo(f"Error: cannot write {prd_path}: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-
         payload: dict[str, object] = {
             "project_id": project_id,
+            "prd_id": effective_prd_id,
             "decision_id": target.id,
             "decision_kind": target.kind.value,
             "prd_ref": transition_payload["prd_ref"],
@@ -1265,10 +1400,73 @@ def prd_resolve_decision(
             actor="anvil-cli",
             action="prd.decision_resolved",
             target_kind="prd",
-            target_id=project_id,
+            target_id=effective_prd_id,
             payload_json=payload,
         )
-        event = backend.append(draft)
+
+        def replace_source(expected_sha256: str, replacement: str) -> str:
+            if file is None:
+                return replace_prd_source_for_id(
+                    state_dir,
+                    effective_prd_id,
+                    expected_sha256=expected_sha256,
+                    markdown=replacement,
+                ).source_sha256
+            return _replace_custom_decision_source(
+                prd_path,
+                expected_sha256=expected_sha256,
+                markdown=replacement,
+            )
+
+        def current_source_sha256() -> str:
+            current = (
+                ingest_prd_source_for_id(state_dir, effective_prd_id)
+                if file is None
+                else ingest_prd_source(prd_path)
+            )
+            return current.source_sha256
+
+        def ensure_source(expected_sha256: str, replacement: str) -> None:
+            observed = current_source_sha256()
+            if observed != expected_sha256:
+                replace_source(observed, replacement)
+            if current_source_sha256() != expected_sha256:
+                raise RuntimeError(
+                    "decision source changed during the locked event commit"
+                )
+
+        try:
+            with backend.claim_operation_lock():
+                events_path = state_dir / "events.jsonl"
+                log_size_before = events_path.stat().st_size
+                updated_sha256 = replace_source(
+                    source_sha256, resolution_result.markdown
+                )
+                try:
+                    event = backend.append(draft)
+                except BaseException:
+                    if _decision_event_was_appended(
+                        events_path,
+                        previous_size=log_size_before,
+                        draft=draft,
+                    ):
+                        ensure_source(
+                            updated_sha256, resolution_result.markdown
+                        )
+                    else:
+                        try:
+                            replace_source(updated_sha256, markdown)
+                        except Exception as rollback_exc:
+                            raise RuntimeError(
+                                "decision source rollback failed after event refusal"
+                            ) from rollback_exc
+                    raise
+                ensure_source(updated_sha256, resolution_result.markdown)
+        except PrdSourceIngestError as exc:
+            if json_output:
+                fail(cmd, str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
     finally:
         backend.close()
 
@@ -1276,7 +1474,8 @@ def prd_resolve_decision(
         emit_success(
             cmd,
             {
-                "prd_source": str(prd_path),
+                "prd_id": effective_prd_id,
+                "prd_source": source_identity,
                 "decision_id": target.id,
                 "decision_kind": target.kind.value,
                 "prd_ref": target.prd_ref,
@@ -1284,14 +1483,31 @@ def prd_resolve_decision(
                 "before": resolution_result.before,
                 "after": resolution_result.after,
                 "event_id": event.id if event is not None else None,
+                "continuation": {
+                    "parse_argv": [
+                        "anvil",
+                        "prd",
+                        "parse",
+                        *(["--file", str(file)] if file is not None else []),
+                        "--prd",
+                        effective_prd_id,
+                    ]
+                },
             },
         )
         return
 
-    typer.echo(f"Resolved {target.id} ({target.kind.value}) in {prd_path}.")
+    typer.echo(
+        f"Resolved {target.id} ({target.kind.value}) in PRD "
+        f"{effective_prd_id} ({source_identity})."
+    )
     typer.echo(f"  section:  {resolution_result.section}")
     typer.echo(f"  before:   {_truncate(resolution_result.before)}")
     typer.echo(f"  after:    {_truncate(resolution_result.after)}")
     if event is not None:
         typer.echo(f"  recorded: {event.id} (prd.decision_resolved)")
-    typer.echo("Run `anvil prd parse` to refresh state.db.")
+    file_arg = " --file <same-file>" if file is not None else ""
+    typer.echo(
+        "Run `anvil prd parse"
+        f"{file_arg} --prd {effective_prd_id}` to refresh state.db."
+    )

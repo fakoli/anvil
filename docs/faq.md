@@ -282,7 +282,7 @@ sqlite3 "$STATE_DIR/state.db" .schema
 sqlite3 "$STATE_DIR/state.db" "SELECT id, status, title FROM tasks;"
 ```
 
-The engine's current schema version is reported by `anvil --version` (v19 in
+The engine's current schema version is reported by `anvil --version` (v20 in
 this release). Supported historical databases are auto-upgraded through the
 ordered, additive migration chain when the backend opens (`anvil migrate
 state` is dry-run by default; pass `--yes` to apply it deliberately). Pydantic models in

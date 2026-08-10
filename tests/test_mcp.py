@@ -5760,6 +5760,15 @@ class TestParsePrd:
         assert {r["id"] for r in payload["requirements_added"]} == {"R003"}
         assert {r["id"] for r in payload["requirements_superseded"]} == {"R001"}
         assert {r["id"] for r in payload["requirements_unchanged"]} == {"R002"}
+        assert all(
+            type(requirement["id"]) is str
+            for field in (
+                "requirements_added",
+                "requirements_superseded",
+                "requirements_unchanged",
+            )
+            for requirement in payload[field]
+        )
 
         from anvil.clock import SystemClock
         from anvil.state.sqlite import SqliteBackend
@@ -7213,10 +7222,55 @@ class TestPlanTasksLlmBackstop:
 
 
 class TestScoreTasks:
+    @staticmethod
+    def _setup_score_prd_scope(state_dir: Path) -> dict[str, Any]:
+        high_score = {
+            "complexity": 5,
+            "parallelizability": 2,
+            "context_load": 2,
+            "blast_radius": 2,
+            "review_risk": 2,
+            "agent_suitability": 1,
+            "blast_radius_confirmed": True,
+            "review_risk_confirmed": True,
+        }
+        _add_prd(state_dir)
+        _add_prd(state_dir, prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_feature(state_dir, "v0.2:F001", prd_id="v0.2")
+        _add_task(
+            state_dir,
+            task_id="T001",
+            prd_id="default",
+            scores=high_score,
+            conflict_groups=["CG-global"],
+        )
+        _add_task(
+            state_dir,
+            task_id="v0.2:T900",
+            feature_id="v0.2:F001",
+            prd_id="v0.2",
+            conflict_groups=["CG-global"],
+        )
+        return high_score
+
+    def test_score_prd_public_schema_exposes_explicit_scope(self) -> None:
+        tool = _run(mcp.get_tool("score_tasks"))
+        optional_string = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        }
+        prd_schema = tool.parameters["properties"]["prd_id"]
+        assert {key: prd_schema[key] for key in optional_string} == optional_string
+        all_schema = tool.parameters["properties"]["all_prds"]
+        assert all_schema["default"] is False
+        assert all_schema["type"] == "boolean"
+
     def test_score_single_task_returns_full_score(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="drafted",
                   likely_files=["src/foo.py"])
@@ -7239,10 +7293,97 @@ class TestScoreTasks:
         ):
             assert 1 <= entry[dim] <= 5
 
+        event_scores = _events_with_action(state_dir, "task.scored")[-1]["scores"]
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            stored_scores = json.loads(
+                connection.execute(
+                    "SELECT scores FROM tasks WHERE id = 'T001'"
+                ).fetchone()[0]
+            )
+        response_scores = {
+            dimension: entry[dimension]
+            for dimension in (
+                "complexity",
+                "parallelizability",
+                "context_load",
+                "blast_radius",
+                "review_risk",
+                "agent_suitability",
+            )
+        }
+        assert event_scores == response_scores
+        assert {
+            dimension: stored_scores[dimension] for dimension in response_scores
+        } == response_scores
+
+    def test_incomplete_score_refuses_before_append_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.planning import scoring as scoring_module
+        from anvil.planning.llm import LLMProvider
+        from anvil.planning.scoring import CompleteScore
+        from anvil.state.models import Score, Task
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="drafted")
+        _add_task(state_dir, task_id="T002", status="drafted")
+        monkeypatch.chdir(tmp_path)
+        before_events = (state_dir / "events.jsonl").read_bytes()
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            before_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+
+        calls: list[str] = []
+
+        def injected_score(
+            task: Task, *, provider: LLMProvider | None = None
+        ) -> Score:
+            _ = provider
+            calls.append(task.id)
+            if len(calls) == 1:
+                return CompleteScore(
+                    complexity=1,
+                    parallelizability=2,
+                    context_load=3,
+                    blast_radius=4,
+                    review_risk=5,
+                    agent_suitability=1,
+                )
+            return Score(
+                complexity=1,
+                parallelizability=2,
+                context_load=3,
+                blast_radius=4,
+                review_risk=5,
+                agent_suitability=None,
+            )
+
+        monkeypatch.setattr(scoring_module, "score_task", injected_score)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("score_tasks", {})
+
+        with pytest.raises(ToolError, match="score_incomplete"):
+            _run(run())
+
+        assert (state_dir / "events.jsonl").read_bytes() == before_events
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            after_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        assert after_scores == before_scores
+        assert calls == ["T001", "T002"]
+        assert _events_with_action(state_dir, "task.scored") == []
+
     def test_error_on_unknown_task(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _init_state_dir(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -7256,6 +7397,7 @@ class TestScoreTasks:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         parent: str | None = None
         for task_id in ("root", "a", "b", "c", "d"):
@@ -7278,6 +7420,99 @@ class TestScoreTasks:
         queue_ids = [entry["task_id"] for entry in resp["expansion_queue"]]
         assert "d" not in queue_ids
 
+    def test_score_prd_scope_contains_counts_queue_and_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        high_score = self._setup_score_prd_scope(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("score_tasks", {"prd_id": "v0.2"})
+                )
+
+        response = _run(run())
+        assert response["prd_id"] == "v0.2"
+        assert response["all_prds"] is False
+        assert response["skipped_already_scored"] == 0
+        assert [entry["task_id"] for entry in response["scored"]] == [
+            "v0.2:T900"
+        ]
+        assert response["expansion_queue"] == []
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            default_score, default_groups = connection.execute(
+                "SELECT scores, conflict_groups FROM tasks WHERE id = 'T001'"
+            ).fetchone()
+            named_groups = connection.execute(
+                "SELECT conflict_groups FROM tasks WHERE id = 'v0.2:T900'"
+            ).fetchone()[0]
+        assert json.loads(default_score) == high_score
+        assert json.loads(default_groups) == ["CG-global"]
+        assert json.loads(named_groups) == ["CG-global"]
+
+    def test_score_prd_default_and_explicit_all_modes_are_total(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        self._setup_score_prd_scope(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def default_run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("score_tasks", {}))
+
+        default_response = _run(default_run())
+        assert default_response["prd_id"] == "default"
+        assert default_response["all_prds"] is False
+        assert default_response["scored"] == []
+        assert default_response["skipped_already_scored"] == 1
+        assert [entry["task_id"] for entry in default_response["expansion_queue"]] == [
+            "T001"
+        ]
+
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        async def all_run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("score_tasks", {"all_prds": True}))
+
+        all_response = _run(all_run())
+        assert all_response["prd_id"] is None
+        assert all_response["all_prds"] is True
+        assert {entry["task_id"] for entry in all_response["scored"]} == {
+            "v0.2:T900"
+        }
+        assert all_response["skipped_already_scored"] == 1
+
+        async def conflict() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "score_tasks", {"prd_id": "default", "all_prds": True}
+                )
+
+        with pytest.raises(ToolError, match="mutually exclusive"):
+            _run(conflict())
+
+    def test_score_prd_explicit_task_owner_mismatch_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        self._setup_score_prd_scope(state_dir)
+        monkeypatch.chdir(tmp_path)
+        before = (state_dir / "events.jsonl").read_bytes()
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "score_tasks", {"task_id": "T001", "prd_id": "v0.2"}
+                )
+
+        with pytest.raises(ToolError, match="belongs to PRD 'default'"):
+            _run(run())
+        assert (state_dir / "events.jsonl").read_bytes() == before
+
 
 # ===========================================================================
 # Tool 20: review_tasks
@@ -7285,6 +7520,97 @@ class TestScoreTasks:
 
 
 class TestReviewTasks:
+    def _setup_scoped_review(self, tmp_path: Path) -> Path:
+        state_dir = _init_state_dir(tmp_path)
+        scores = {
+            "complexity": 2,
+            "parallelizability": 2,
+            "context_load": 2,
+            "blast_radius": 2,
+            "review_risk": 2,
+            "agent_suitability": 4,
+        }
+        for prd_id, task_id, feature_id, is_default in (
+            ("default", "T001", "F001", 1),
+            ("v0.1", "v0.1:T001", "v0.1:F001", 0),
+            ("v0.2", "v0.2:T001", "v0.2:F001", 0),
+        ):
+            _add_prd(state_dir, prd_id=prd_id, is_default=is_default)
+            _add_feature(state_dir, feature_id, prd_id=prd_id)
+            _add_task(
+                state_dir,
+                task_id=task_id,
+                feature_id=feature_id,
+                prd_id=prd_id,
+                status="drafted",
+                scores=scores,
+            )
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            connection.execute(
+                "UPDATE tasks SET verification = ?",
+                (json.dumps({"commands": ["pytest -q"]}),),
+            )
+        return state_dir
+
+    def test_scoped_review_parity_and_risk_confirmation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+
+        state_dir = self._setup_scoped_review(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("review_tasks", {"prd_id": "v0.2"})
+                )
+
+        response = _run(run())
+        assert response["prd_id"] == "v0.2"
+        assert response["all_prds"] is False
+        assert response["promoted_to_ready"] == ["v0.2:T001"]
+
+        backend = _open_backend(state_dir)
+        try:
+            tasks = {task.id: task for task in backend.list_tasks()}
+        finally:
+            backend.close()
+        assert tasks["v0.2:T001"].status.value == "ready"
+        assert tasks["v0.2:T001"].scores.blast_radius_confirmed is True
+        assert tasks["v0.2:T001"].scores.review_risk_confirmed is True
+        assert tasks["T001"].status.value == "drafted"
+        assert tasks["v0.1:T001"].status.value == "drafted"
+
+    def test_explicit_all_prds_overrides_env_and_reports_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._setup_scoped_review(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("review_tasks", {"all_prds": True}))
+
+        response = _run(run())
+        assert response["prd_id"] is None
+        assert response["all_prds"] is True
+        assert set(response["promoted_to_ready"]) == {
+            "T001",
+            "v0.1:T001",
+            "v0.2:T001",
+        }
+
+        async def conflict() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "review_tasks", {"prd_id": "v0.1", "all_prds": True}
+                )
+
+        with pytest.raises(ToolError, match="mutually exclusive"):
+            _run(conflict())
+
     def test_promotes_drafted_to_ready_when_gates_pass(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -7309,6 +7635,7 @@ class TestReviewTasks:
     ) -> None:
         """A drafted task with no acceptance criteria must block, not crash."""
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         # Drop a drafted task and manually clear its acceptance_criteria
         # so the gate fails.
@@ -7732,6 +8059,58 @@ A clean PRD.
 
 
 class TestFindDecisions:
+    def test_find_decisions_three_prd_collision_scoped_mcp_and_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        source_dir = state_dir / "prds"
+        source_dir.mkdir()
+        for prd_id, label in (
+            ("default", "default-choice"),
+            ("v0.1", "first-choice"),
+            ("v0.2", "second-choice"),
+        ):
+            _add_prd(
+                state_dir,
+                status="draft",
+                prd_id=prd_id,
+                is_default=1 if prd_id == "default" else 0,
+            )
+            path = (
+                state_dir / "prd.md"
+                if prd_id == "default"
+                else source_dir / f"{prd_id}.md"
+            )
+            path.write_text(
+                _PRD_WITH_NEEDS_DECISION.replace("which format?", label),
+                encoding="utf-8",
+            )
+        monkeypatch.chdir(tmp_path)
+
+        async def explicit() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("find_decisions", {"prd_id": "v0.2"})
+                )
+
+        selected = _run(explicit())
+        assert selected["prd_id"] == "v0.2"
+        assert selected["prd_source"] == "v0.2"
+        assert "second-choice" in str(selected["decisions"])
+        assert "default-choice" not in str(selected["decisions"])
+        assert "first-choice" not in str(selected["decisions"])
+
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+
+        async def from_env() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("find_decisions", {}))
+
+        env_selected = _run(from_env())
+        assert env_selected["prd_id"] == "v0.1"
+        assert "first-choice" in str(env_selected["decisions"])
+        assert "second-choice" not in str(env_selected["decisions"])
+
     def test_clean_prd_returns_total_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -7858,7 +8237,8 @@ class TestFindDecisions:
     ) -> None:
         """anvil initialized but prd.md missing → ToolError (matches
         parse_prd behaviour; see find_decisions docstring for rationale)."""
-        _init_state_dir(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -8145,6 +8525,7 @@ class TestRequireActor:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_prd(state_dir, status="reviewed")

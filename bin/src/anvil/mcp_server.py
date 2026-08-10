@@ -5,9 +5,9 @@ State resolves per call from the cwd arg (workflow tools), else ANVIL_ROOT,
 else Path.cwd(); the no-cwd tools are pinned to the server's launch directory.
 
 Stale-claim reaping runs at the top of every mutating tool and on
-get_project_summary; read-only listers skip it for latency. No tool touches
-git — branch/worktree creation stays in the CLI so remote agents without git
-access can still drive the PRD → plan → review → claim → apply lifecycle.
+get_project_summary; read-only listers skip it for latency. Claim tools use the
+same transactional Git plan as the CLI when the resolved project is a Git
+repository; non-Git projects continue through the state-only claim path.
 """
 
 from __future__ import annotations
@@ -38,7 +38,9 @@ from anvil.state.models import (
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
+    from anvil.claims.command_proof_artifact import LoadedClaimCommandProof
     from anvil.cli._helpers import IngestedPrdSource
+    from anvil.state.models import ClaimCommandProof
 
 # ---------------------------------------------------------------------------
 # FastMCP instance
@@ -264,6 +266,7 @@ class ClaimResponse(BaseModel):
     lease_expires_at: str
     branch: str | None
     worktree_path: str | None
+    git_metadata: dict[str, Any] | None = None
     expected_files: list[str]
     # Advisory notes (e.g. the worktree_isolation shared-checkout warning);
     # additive with a default so existing readers are unaffected.
@@ -416,6 +419,7 @@ class BundleClaimRecord(BaseModel):
     status: str
     branch: str | None = None
     worktree_path: str | None = None
+    git_metadata: dict[str, Any] | None = None
     session_id: str | None = None
     expected_files: list[str]
     member_claim_ids: dict[str, str]
@@ -1316,6 +1320,16 @@ def claim_task(
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
+        from anvil.git_ops import (
+            ClaimGitMutationTracker,
+            ClaimPlanError,
+            apply_claim_plan,
+            claim_git_metadata,
+            compensate_claim_plan_tracker,
+            finalize_claim_plan_tracker,
+            resolve_claim_plan,
+            revalidate_claim_plan,
+        )
 
         _reap_stale(backend)
 
@@ -1358,18 +1372,61 @@ def claim_task(
         # pre-check on the global get_prd() lived here pre-T012; it resolved the
         # default PRD and so disagreed with the per-PRD gate under multi-PRD.)
         lease_minutes = max(1, lease_duration_seconds // 60)
+        project_dir = _resolve_project_dir(Path(cwd) if cwd else None)
         manager = ClaimManager(
             backend,
             SystemClock(),
             actor=claimed_by,
             default_lease_minutes=lease_minutes,
-            project_root=_resolve_project_dir(Path(cwd) if cwd else None),
+            project_root=project_dir,
         )
 
         files = expected_files or []
+        task = backend.get_task(task_id)
+        if task is None:
+            raise ToolError(f"Task '{task_id}' not found.")
 
         try:
-            result = manager.claim(task_id, expected_files=files)
+            plan = resolve_claim_plan(
+                task_id,
+                task.title,
+                cwd=project_dir,
+                branch_prefix=cfg.branch_prefix if cfg is not None else "agent",
+                shared_tree=shared_tree,
+                ignored_worktree_paths=(state_dir,),
+            )
+            metadata = claim_git_metadata(plan)
+            mutation_tracker = ClaimGitMutationTracker(plan)
+            with backend.claim_operation_lock():
+                revalidate_claim_plan(plan, cwd=project_dir)
+                result = manager.claim(
+                    task_id,
+                    expected_files=files,
+                    branch=metadata.branch if metadata is not None else None,
+                    worktree_path=(
+                        metadata.worktree_path if metadata is not None else None
+                    ),
+                    git_metadata=metadata,
+                    operation_locked=True,
+                )
+                try:
+                    apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                except BaseException:
+                    try:
+                        manager.release(
+                            result.claim.id,
+                            reason="transactional Git claim failed",
+                        )
+                    finally:
+                        compensate_claim_plan_tracker(
+                            mutation_tracker, cwd=project_dir
+                        )
+                    raise
+                finalize_claim_plan_tracker(
+                    mutation_tracker, cwd=project_dir
+                )
+        except ClaimPlanError as exc:
+            raise ToolError(f"{exc.code}: {exc}") from exc
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -1386,6 +1443,11 @@ def claim_task(
             lease_expires_at=claim.lease_expires_at.isoformat(),
             branch=claim.branch,
             worktree_path=claim.worktree_path,
+            git_metadata=(
+                claim.git_metadata.model_dump(mode="json")
+                if claim.git_metadata is not None
+                else None
+            ),
             expected_files=claim.expected_files,
             warnings=isolation_warnings,
             actor_identity=actor_identity_data(claim.claimed_by),
@@ -1569,12 +1631,12 @@ def renew_claim(
             lease_expires_at=renewal.claim.lease_expires_at.isoformat(),
             renewed=renewal.renewed,
             actor_identity=actor_identity_data(actor),
-            progress={
-                "source": renewal.progress_source,
-                "digest": renewal.attestation_digest,
-                "generation": renewal.attestation_generation,
-                "trust_mode": renewal.attestation_trust_mode,
-            },
+            progress=RenewProgressReceipt(
+                source=renewal.progress_source,
+                digest=renewal.attestation_digest,
+                generation=renewal.attestation_generation,
+                trust_mode=renewal.attestation_trust_mode,
+            ),
         )
     finally:
         backend.close()
@@ -1755,13 +1817,13 @@ def submit_progress(
                 recorded=True,
                 actor_identity=actor_identity_data(actor),
                 event_action="progress.attested",
-                attestation={
-                    "digest": persisted.semantic_digest,
-                    "generation": persisted.generation,
-                    "trust_mode": persisted.trust_mode,
-                    "kind": persisted.kind,
-                    "issuer_id": persisted.issuer_id,
-                },
+                attestation=ProgressAttestationReceipt(
+                    digest=persisted.semantic_digest,
+                    generation=persisted.generation,
+                    trust_mode=persisted.trust_mode,
+                    kind=persisted.kind,
+                    issuer_id=persisted.issuer_id,
+                ),
             )
 
         if notes is None:
@@ -1867,8 +1929,8 @@ def submit_completion_evidence(
 
         clock = SystemClock()
 
-        claim_bound_proofs = ()
-        loaded_claim_proofs = []
+        claim_bound_proofs: tuple[ClaimCommandProof, ...] = ()
+        loaded_claim_proofs: list[LoadedClaimCommandProof] = []
         proof_project = None
         proof_project_root = None
         if command_proof_artifacts_base64:
@@ -1941,8 +2003,8 @@ def submit_completion_evidence(
         # against its authoritative clock while holding the append lock.
         now = clock.now()
         if command_proof_artifacts_base64:
-            assert proof_project is not None
-            assert proof_project_root is not None
+            if proof_project is None or proof_project_root is None:
+                raise ToolError("command_proof_error[context_missing]: project context missing")
             try:
                 claim_bound_proofs = verify_claim_command_proof_batch(
                     loaded_claim_proofs,
@@ -2016,6 +2078,28 @@ def submit_completion_evidence(
             NextReadyTask(**next_ready_raw) if next_ready_raw is not None else None
         )
 
+        hook_command_proof_receipts: list[dict[str, object]] = []
+        for proof in command_proofs:
+            attribution = proof.attribution
+            if attribution is None or proof.semantic_digest is None:
+                raise ToolError(
+                    "hook_command_proof_error[attribution_missing]: "
+                    "claim-bound hook proof attribution is missing"
+                )
+            hook_command_proof_receipts.append(
+                {
+                    "command": proof.command,
+                    "exit_code": proof.exit_code,
+                    "output_sha256": proof.output_sha256,
+                    "captured_at": proof.captured_at.isoformat(),
+                    "source": "hook_claim_bound",
+                    "claim_id": attribution.claim_id,
+                    "generation": attribution.generation,
+                    "semantic_digest": proof.semantic_digest,
+                    "actor": attribution.claimed_by,
+                }
+            )
+
         return EvidenceResponse(
             evidence_id=evidence_id,
             task_status=task_status,
@@ -2032,20 +2116,7 @@ def submit_completion_evidence(
                 }
                 for proof in claim_bound_proofs
             ],
-            hook_command_proofs=[
-                {
-                    "command": proof.command,
-                    "exit_code": proof.exit_code,
-                    "output_sha256": proof.output_sha256,
-                    "captured_at": proof.captured_at.isoformat(),
-                    "source": "hook_claim_bound",
-                    "claim_id": proof.attribution.claim_id,
-                    "generation": proof.attribution.generation,
-                    "semantic_digest": proof.semantic_digest,
-                    "actor": proof.attribution.claimed_by,
-                }
-                for proof in command_proofs
-            ],
+            hook_command_proofs=hook_command_proof_receipts,
             missing_claim_bound_proofs=missing_claim_bound_proofs,
             missing_legacy_evidence=missing_legacy_evidence,
         )
@@ -2862,16 +2933,10 @@ def parse_prd(
         # status would lie. Re-read the stored status after the revised append.
         effective_status = result.prd.status.value
 
-        new_requirements = [
-            {
-                "id": r.id,
-                "prd_section": r.prd_section,
-                "text": r.text,
-                "source_paragraph": r.source_paragraph,
-                "derived": r.derived,
-            }
-            for r in result.requirements
-        ]
+        # Preserve validated Requirement models through diff construction so
+        # requirement ids remain structurally typed strings. Serialize only at
+        # the event payload boundary.
+        new_requirements = list(result.requirements)
 
         if existing_prd is None:
             # FIRST parse → create-if-absent prd.parsed. Mirrors cli/prd.py.
@@ -2883,7 +2948,10 @@ def parse_prd(
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
                 "non_goals": result.prd.non_goals,
-                "requirements": new_requirements,
+                "requirements": [
+                    requirement.model_dump(mode="json")
+                    for requirement in new_requirements
+                ],
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
@@ -2927,7 +2995,7 @@ def parse_prd(
                 prd_id=stored_prd_id, include_superseded=True
             )
             all_ids = {r.id for r in all_reqs}
-            new_by_id = {r["id"]: r for r in new_requirements}
+            new_by_id = {requirement.id: requirement for requirement in new_requirements}
 
             # An id retired in a PRIOR revision (in all_ids but NOT live) that
             # reappears in the new parse falls into NO diff bucket and would be
@@ -2949,19 +3017,15 @@ def parse_prd(
                 )
 
             requirements_added = [
-                r for r in new_requirements if r["id"] not in all_ids
+                requirement
+                for requirement in new_requirements
+                if requirement.id not in all_ids
             ]
             requirements_unchanged = [
                 new_by_id[rid] for rid in live_by_id if rid in new_by_id
             ]
             requirements_superseded = [
-                {
-                    "id": r.id,
-                    "prd_section": r.prd_section,
-                    "text": r.text,
-                    "source_paragraph": r.source_paragraph,
-                    "derived": r.derived,
-                }
+                r
                 for r in live_reqs
                 if r.id not in new_by_id
             ]
@@ -2988,9 +3052,18 @@ def parse_prd(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                "requirements_added": requirements_added,
-                "requirements_superseded": requirements_superseded,
-                "requirements_unchanged": requirements_unchanged,
+                "requirements_added": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_added
+                ],
+                "requirements_superseded": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_superseded
+                ],
+                "requirements_unchanged": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_unchanged
+                ],
                 **source_binding(new_revision),
             }
 
@@ -3652,6 +3725,8 @@ class ScoreTasksResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    prd_id: str | None
+    all_prds: bool
     scored: list[TaskScoreEntry]
     skipped_already_scored: int
     # ``expansion_queue`` lists every task at/above ``auto_expand_threshold``
@@ -3664,6 +3739,8 @@ class ScoreTasksResponse(BaseModel):
 @mcp.tool(tags={PLANNING_TAG})
 def score_tasks(
     task_id: str | None = None,
+    prd_id: str | None = None,
+    all_prds: bool = False,
     cwd: str | None = None,
 ) -> ScoreTasksResponse:
     """Run the rule-based (non-LLM) scoring engine on one task or all unscored
@@ -3671,19 +3748,28 @@ def score_tasks(
 
     Pass task_id to always re-score that one task; pass None to score only
     tasks whose scores are incomplete (the rest count toward
-    skipped_already_scored). The response also carries a deterministic
+    skipped_already_scored). By default exactly one PRD is resolved from
+    prd_id, ANVIL_PRD, or the default/single partition. Set all_prds=true for
+    an explicit project-wide pass. The response also carries a deterministic
     expansion_queue of high-complexity tasks; the LLM-side expansion runs via
     the planner agent, never here.
 
     Args:
         task_id: Specific task to score (always re-scored). None scores all
                  unscored tasks.
+        prd_id:  PRD partition to score. Mutually exclusive with all_prds.
+        all_prds: Explicitly score every PRD partition; ignores ANVIL_PRD.
         cwd:     Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _scores_complete
+    from anvil.cli._helpers import _scores_complete, canonical_prd_id
     from anvil.clock import SystemClock
     from anvil.config import DEFAULT_AUTO_EXPAND_THRESHOLD
-    from anvil.planning.scoring import build_recursive_expansion_queue, score_task
+    from anvil.planning.scoring import (
+        IncompleteScoreError,
+        build_recursive_expansion_queue,
+        require_complete_score,
+        score_task,
+    )
     from anvil.state.backend import EventRejected
     from anvil.state.models import EventDraft
 
@@ -3727,21 +3813,44 @@ def score_tasks(
 
     backend = _open_backend(state_dir)
     try:
+        if all_prds and prd_id is not None:
+            raise ToolError("prd_id and all_prds are mutually exclusive")
+        scoped_prd_id = None
+        if not all_prds:
+            scoped_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+            if backend.get_prd(scoped_prd_id) is None:
+                raise ToolError(
+                    "selected PRD was not found in state. Run parse_prd first."
+                )
+
         if task_id is not None:
             task = backend.get_task(task_id)
             if task is None:
                 raise ToolError(f"Task '{task_id}' not found.")
+            if scoped_prd_id is not None and task.prd_id != scoped_prd_id:
+                raise ToolError(
+                    f"Task '{task_id}' belongs to PRD '{task.prd_id}', "
+                    f"not '{scoped_prd_id}'."
+                )
             tasks_to_score = [task]
             skipped = 0
         else:
-            all_tasks = backend.list_tasks()
+            all_tasks = backend.list_tasks(prd_id=scoped_prd_id)
             tasks_to_score = [t for t in all_tasks if not _scores_complete(t)]
             skipped = len(all_tasks) - len(tasks_to_score)
 
         clock = SystemClock()
         scored: list[TaskScoreEntry] = []
+        validated_scores = []
         for task in tasks_to_score:
-            computed = score_task(task)
+            try:
+                computed = require_complete_score(score_task(task))
+            except IncompleteScoreError as exc:
+                raise ToolError(f"score_incomplete: {exc}") from exc
+            validated_scores.append((task, computed))
+
+        # Refuse an incomplete batch before the first event append.
+        for task, computed in validated_scores:
             now = clock.now()
             payload: dict[str, Any] = {
                 "task_id": task.id,
@@ -3793,11 +3902,14 @@ def score_tasks(
                     ),
                 )
                 for candidate in build_recursive_expansion_queue(
-                    backend.list_tasks(), threshold=auto_expand_threshold
+                    backend.list_tasks(prd_id=scoped_prd_id),
+                    threshold=auto_expand_threshold,
                 )
             ]
 
         return ScoreTasksResponse(
+            prd_id=scoped_prd_id,
+            all_prds=all_prds,
             scored=scored,
             skipped_already_scored=skipped,
             auto_expand=auto_expand,
@@ -3830,16 +3942,26 @@ class ReviewTasksResponse(BaseModel):
     promoted_to_reviewed: list[str]
     promoted_to_ready: list[str]
     blocked: list[BlockedTaskEntry]
+    prd_id: str | None
+    all_prds: bool
 
 
 @mcp.tool(tags={PLANNING_TAG})
-def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
+def review_tasks(
+    cwd: str | None = None,
+    prd_id: str | None = None,
+    all_prds: bool = False,
+) -> ReviewTasksResponse:
     """Promote tasks through drafted → reviewed → ready, applying the review
     gates. Returns the promoted task IDs per stage plus any tasks a gate
     blocked (with reasons).
 
     Args:
         cwd: Project root. Defaults to Path.cwd().
+        prd_id: PRD partition. Precedence is explicit value, ``ANVIL_PRD``,
+            then single/default resolution. Mutually exclusive with all_prds.
+        all_prds: Explicitly review every PRD partition. When true, an ambient
+            ``ANVIL_PRD`` is ignored.
     """
     from anvil.clock import SystemClock
     from anvil.state.backend import EventRejected
@@ -3860,7 +3982,16 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
-        all_tasks = backend.list_tasks()
+        if all_prds and prd_id is not None:
+            raise ToolError("prd_id and all_prds are mutually exclusive.")
+        selected_prd_id = None
+        if not all_prds:
+            from anvil.cli._helpers import canonical_prd_id
+
+            selected_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+            if backend.get_prd(selected_prd_id) is None:
+                raise ToolError("selected PRD was not found in state. Run parse_prd first.")
+        all_tasks = backend.list_tasks(prd_id=selected_prd_id)
 
         drafted = [t for t in all_tasks if t.status.value == "drafted"]
         already_reviewed_ids = {
@@ -3898,7 +4029,7 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
             promoted_to_reviewed.append(task.id)
 
         # reviewed → ready (covers tasks promoted just above plus pre-existing reviewed)
-        candidates = backend.list_tasks()
+        candidates = backend.list_tasks(prd_id=selected_prd_id)
         promoted_set = set(promoted_to_reviewed)
         for task in candidates:
             if task.status.value != "reviewed":
@@ -3927,12 +4058,20 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
                 ))
             except EventRejected as exc:
                 raise ToolError(str(exc)) from exc
+            try:
+                from anvil.cli.plan import confirm_task_risk_scores
+
+                confirm_task_risk_scores(backend, task, now, "anvil-mcp")
+            except EventRejected as exc:
+                raise ToolError(str(exc)) from exc
             promoted_to_ready.append(task.id)
 
         return ReviewTasksResponse(
             promoted_to_reviewed=promoted_to_reviewed,
             promoted_to_ready=promoted_to_ready,
             blocked=blocked,
+            prd_id=selected_prd_id,
+            all_prds=all_prds,
         )
     finally:
         backend.close()
@@ -4265,13 +4404,18 @@ class FindDecisionsResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    prd_id: str
+    prd_source: str
     decisions: list[UnresolvedDecisionEntry]
     counts_by_kind: dict[str, int]
     total: int
 
 
 @mcp.tool(tags={PLANNING_TAG})
-def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
+def find_decisions(
+    cwd: str | None = None,
+    prd_id: str | None = None,
+) -> FindDecisionsResponse:
     """Scan the PRD for items needing a human decision (read-only; emits no
     events). Walks three sources: inline ``[NEEDS DECISION]`` markers,
     ``## Open Questions`` items, and tasks with empty acceptance_criteria or
@@ -4283,7 +4427,17 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
 
     Args:
         cwd: Project root. Defaults to ``Path.cwd()``.
+        prd_id: PRD partition. Precedence is explicit value, ``ANVIL_PRD``,
+            then the single/default partition.
     """
+    import os
+
+    from anvil.cli._helpers import (
+        PrdSourceIngestError,
+        canonical_prd_id,
+        ingest_prd_source_for_id,
+        validate_prd_id,
+    )
     from anvil.planning.decisions import find_unresolved_decisions
     from anvil.planning.template import parse_prd as _parse_prd_impl
 
@@ -4294,19 +4448,31 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
             "Call init_project first.",
         )
 
-    prd_path = state_dir / _PRD_FILENAME
-    if not prd_path.exists():
-        raise ToolError(
-            f"PRD file not found at {prd_path}. "
-            "Author your PRD and call parse_prd before find_decisions.",
-        )
-
+    backend = _open_backend(state_dir)
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ToolError(f"Cannot read {prd_path}: {exc}") from exc
+        has_prds = bool(backend.list_prds())
+        if has_prds:
+            effective_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+        else:
+            effective_prd_id = canonical_prd_id(
+                validate_prd_id(prd_id or os.environ.get("ANVIL_PRD") or "default")
+            )
+        if has_prds and backend.get_prd(effective_prd_id) is None:
+            raise ToolError(f"PRD partition {effective_prd_id!r} does not exist")
+        try:
+            source = ingest_prd_source_for_id(state_dir, effective_prd_id)
+        except PrdSourceIngestError as exc:
+            if exc.code == "source_not_found":
+                raise ToolError(
+                    f"PRD file not found for partition {effective_prd_id!r}"
+                ) from exc
+            raise ToolError(f"{exc.code}: {exc.message}") from exc
+        backend_tasks = backend.list_tasks(prd_id=effective_prd_id)
+        tasks_or_none = backend_tasks if backend_tasks else None
+    finally:
+        backend.close()
 
-    result = _parse_prd_impl(markdown, prd_id="prd")
+    result = _parse_prd_impl(source.markdown, prd_id=effective_prd_id)
     # Match the CLI's behavior: if the parse failed, surface the errors
     # rather than silently returning a deceptive 0-open_questions count
     # (the PRD model exists but with empty sections). The needs_decision
@@ -4323,15 +4489,8 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
             f"fix prd.md and call parse_prd before find_decisions. {error_summary}"
         )
 
-    backend = _open_backend(state_dir)
-    try:
-        backend_tasks = backend.list_tasks()
-        tasks_or_none = backend_tasks if backend_tasks else None
-    finally:
-        backend.close()
-
     decisions = find_unresolved_decisions(
-        markdown,
+        source.markdown,
         prd=result.prd,
         tasks=tasks_or_none,
     )
@@ -4357,6 +4516,8 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
         counts[d.kind.value] = counts.get(d.kind.value, 0) + 1
 
     return FindDecisionsResponse(
+        prd_id=effective_prd_id,
+        prd_source=effective_prd_id,
         decisions=entries,
         counts_by_kind=counts,
         total=len(entries),
@@ -4516,6 +4677,17 @@ def claim_bundle(
 ) -> BundleClaimResponse:
     """Atomically claim a bundle and create internal member authorizations."""
     from anvil.bundles.manager import BundleError
+    from anvil.cli._helpers import _resolve_project_dir
+    from anvil.git_ops import (
+        ClaimGitMutationTracker,
+        ClaimPlanError,
+        apply_claim_plan,
+        claim_git_metadata,
+        compensate_claim_plan_tracker,
+        finalize_claim_plan_tracker,
+        resolve_claim_plan,
+        revalidate_claim_plan,
+    )
 
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
@@ -4542,15 +4714,54 @@ def claim_bundle(
                     f"{len(shared)} active task claim(s) share this checkout; "
                     "prefer the CLI worktree claim path."
                 )
+        project_dir = _resolve_project_dir(Path(cwd) if cwd else None)
+        manager = _bundle_manager(
+            backend,
+            state_dir,
+            actor,
+            lease_minutes=lease_minutes,
+            cwd=cwd,
+            new_claim=True,
+        )
         try:
-            result = _bundle_manager(
-                backend,
-                state_dir,
-                actor,
-                lease_minutes=lease_minutes,
-                cwd=cwd,
-                new_claim=True,
-            ).claim(bundle_id)
+            plan = resolve_claim_plan(
+                bundle_id,
+                f"Bundle {bundle_id}",
+                cwd=project_dir,
+                branch_prefix=cfg.branch_prefix if cfg is not None else "agent",
+                shared_tree=shared_tree,
+                ignored_worktree_paths=(state_dir,),
+            )
+            metadata = claim_git_metadata(plan)
+            mutation_tracker = ClaimGitMutationTracker(plan)
+            with backend.claim_operation_lock():
+                revalidate_claim_plan(plan, cwd=project_dir)
+                result = manager.claim(
+                    bundle_id,
+                    branch=metadata.branch if metadata is not None else None,
+                    worktree_path=(
+                        metadata.worktree_path if metadata is not None else None
+                    ),
+                    git_metadata=metadata,
+                )
+                try:
+                    apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                except BaseException:
+                    try:
+                        manager.release(
+                            bundle_id,
+                            reason="transactional Git claim failed",
+                        )
+                    finally:
+                        compensate_claim_plan_tracker(
+                            mutation_tracker, cwd=project_dir
+                        )
+                    raise
+                finalize_claim_plan_tracker(
+                    mutation_tracker, cwd=project_dir
+                )
+        except ClaimPlanError as exc:
+            raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         return BundleClaimResponse(
