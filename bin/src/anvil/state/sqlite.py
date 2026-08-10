@@ -6464,6 +6464,11 @@ class SqliteBackend:
         TransactionAborted`` on an invalid Requirement); now rejects up front.
         """
         _ = event
+        if payload.status != "draft":
+            raise EventRejected(
+                "prd.parsed: first parse status must be draft; "
+                "review and approval require lineage-bound lifecycle events"
+            )
         if payload.expected_absent is True:
             existing = conn.execute(
                 "SELECT 1 FROM prds WHERE id = ?", (payload.prd_id,)
@@ -6580,7 +6585,12 @@ class SqliteBackend:
                 return
         project_id: str = payload.project_id
         summary: str = payload.summary
-        status: str = payload.status
+        # A parse establishes content, never lifecycle authority. Historical
+        # payloads could spell reviewed/approved here, but schema-v21 migration
+        # deliberately demotes projections without exact review lineage. Apply
+        # the same rule during empty replay so recovery cannot manufacture an
+        # approval that no prd.reviewed/prd.approved event established.
+        status = "draft"
         goals = payload.goals
         non_goals = payload.non_goals
         requirements_raw: list[Any] = payload.requirements

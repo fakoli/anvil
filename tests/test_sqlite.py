@@ -561,12 +561,35 @@ A test PRD summary.
         finally:
             backend.close()
 
+        # Pre-v21 logs could carry lifecycle-looking status directly on a
+        # parse event. Keep the migrated projection and immutable event row in
+        # that historical shape; v21 replay must demote it just as migration
+        # does instead of manufacturing approval authority from content alone.
+        rewritten: list[str] = []
+        parsed_payload_json: str | None = None
+        for raw in Path(events_path).read_text(encoding="utf-8").splitlines():
+            event = json.loads(raw)
+            if event["action"] == "prd.parsed":
+                event["payload_json"]["status"] = "approved"
+                parsed_payload_json = json.dumps(
+                    event["payload_json"], separators=(",", ":")
+                )
+            rewritten.append(json.dumps(event, separators=(",", ":")))
+        Path(events_path).write_text(
+            "\n".join(rewritten) + "\n", encoding="utf-8"
+        )
+        assert parsed_payload_json is not None
+
         # Model the exact v20 projection: complete v18 source provenance and
         # content event in the immutable log, but no v21 material columns or
         # trustworthy lifecycle binding. Existing columns are nulled rather
         # than dropped so this test remains portable across SQLite builds.
         conn = sqlite3.connect(db_path)
         try:
+            conn.execute(
+                "UPDATE events SET payload_json = ? WHERE action = 'prd.parsed'",
+                (parsed_payload_json,),
+            )
             conn.execute(
                 "UPDATE prds SET status = 'approved', material_sha256 = NULL, "
                 "content_event_id = NULL WHERE id = ?",
@@ -12411,6 +12434,33 @@ class TestDecideApplyContract:
             prd = b.get_prd()
             assert prd is not None
             assert prd.status.value == "draft"
+        finally:
+            b.close()
+
+    def test_prd_parsed_rejects_lifecycle_status_before_log(
+        self, tmp_path: Path
+    ) -> None:
+        """Content parsing cannot bypass lineage-bound review and approval."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            _setup_project(b)
+            before = events_path.read_bytes()
+            payload = _make_prd_parsed_payload()
+            payload.update({"expected_absent": True, "status": "approved"})
+
+            with pytest.raises(EventRejected, match="status must be draft"):
+                b.append(
+                    _make_event(
+                        "prd.parsed",
+                        payload,
+                        target_kind="prd",
+                        target_id="default",
+                    )
+                )
+
+            assert events_path.read_bytes() == before
+            assert b.get_prd() is None
         finally:
             b.close()
 
