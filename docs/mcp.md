@@ -881,6 +881,10 @@ Returns the bundle, coordinator claim, and isolation warnings. Under required wo
 isolation, callers must use the Git-aware CLI claim path or explicitly opt into a shared
 tree. The response also includes the exact coordinator identity and structured bundle
 renew, release, progress, and complete continuations; it never substitutes task submit.
+The bundle's owning PRD must be exactly approved for its current canonical source. That
+source is rechecked at the claim event's pre-log linearization point; drift refuses with
+`prd_source_unapproved` and creates no coordinator claim, member claim, bundle-status, or
+Git mutation.
 
 ### `generate_bundle_packet`
 

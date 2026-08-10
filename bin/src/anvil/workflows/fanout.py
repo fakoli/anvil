@@ -68,6 +68,7 @@ def run_fan_out(
     actor: str,
     clock: Clock,
     reviewer: str,
+    claim_pre_log_check: Callable[[], None] | None = None,
 ) -> list[StepRecord]:
     """Create + claim + drive one governed task per item; return a record each.
 
@@ -88,7 +89,11 @@ def run_fan_out(
         mgr = ClaimManager(backend, clock, actor=actor)
         # expected_files derived from the item — this is what exercises the
         # single-winner lease + file-conflict guarantee under fan-out.
-        claim = mgr.claim(task_id, expected_files=[item]).claim
+        claim = mgr.claim(
+            task_id,
+            expected_files=[item],
+            pre_log_check=claim_pre_log_check,
+        ).claim
 
         outcome = fan_out_executor(step, item)
         passed = (

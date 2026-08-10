@@ -88,6 +88,7 @@ def test_bundle_claim_releases_when_source_changes_during_linearization(
         ],
     )
     assert created.exit_code == 0, created.output
+    before_events = (state_dir / "events.jsonl").read_bytes()
     source_path = prd_source_path(state_dir, "release")
     original = persistence.require_canonical_prd_claim_binding
     calls = 0
@@ -112,6 +113,7 @@ def test_bundle_claim_releases_when_source_changes_during_linearization(
 
     assert refused.exit_code == 1
     assert json.loads(refused.output)["error"]["code"] == "prd_source_unapproved"
+    assert (state_dir / "events.jsonl").read_bytes() == before_events
     import sqlite3
 
     with sqlite3.connect(state_dir / "state.db") as conn:
@@ -121,6 +123,9 @@ def test_bundle_claim_releases_when_source_changes_during_linearization(
         assert conn.execute(
             "SELECT COUNT(*) FROM claims WHERE status='active'"
         ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT status FROM execution_bundles WHERE id='B001'"
+        ).fetchone()[0] == "planned"
 
 
 def _invoke(tmp_path, args):

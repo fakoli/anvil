@@ -876,7 +876,9 @@ class TestBundleTools:
         self._seed(tmp_path)
         monkeypatch.chdir(tmp_path)
         source_path = prd_source_path(tmp_path / ".anvil", "default")
+        events_path = tmp_path / ".anvil" / "events.jsonl"
         original = git_ops.revalidate_claim_plan
+        before_events: bytes | None = None
 
         def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
             original(plan, cwd=cwd)
@@ -889,6 +891,7 @@ class TestBundleTools:
         )
 
         async def run() -> None:
+            nonlocal before_events
             async with Client(mcp) as client:
                 await client.call_tool(
                     "create_bundle",
@@ -900,6 +903,7 @@ class TestBundleTools:
                         "actor": "planner",
                     },
                 )
+                before_events = events_path.read_bytes()
                 await client.call_tool(
                     "claim_bundle",
                     {"bundle_id": "B001", "actor": "coordinator"},
@@ -907,6 +911,8 @@ class TestBundleTools:
 
         with pytest.raises(ToolError, match="prd_source_unapproved"):
             _run(run())
+        assert before_events is not None
+        assert events_path.read_bytes() == before_events
         with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
             assert conn.execute(
                 "SELECT COUNT(*) FROM bundle_claims WHERE status='active'"
@@ -914,6 +920,9 @@ class TestBundleTools:
             assert conn.execute(
                 "SELECT COUNT(*) FROM claims WHERE status='active'"
             ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM execution_bundles WHERE id='B001'"
+            ).fetchone()[0] == "planned"
 
     def test_create_read_claim_packet_and_progress(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2481,6 +2490,7 @@ class TestClaimTask:
         _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
         source_path = prd_source_path(state_dir, "default")
+        before_events = (state_dir / "events.jsonl").read_bytes()
         original = git_ops.revalidate_claim_plan
 
         def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
@@ -2502,6 +2512,7 @@ class TestClaimTask:
 
         with pytest.raises(ToolError, match="prd_source_unapproved"):
             _run(run())
+        assert (state_dir / "events.jsonl").read_bytes() == before_events
         with sqlite3.connect(state_dir / "state.db") as conn:
             assert conn.execute(
                 "SELECT COUNT(*) FROM claims WHERE status='active'"

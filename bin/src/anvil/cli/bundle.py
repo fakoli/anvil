@@ -237,18 +237,13 @@ def claim_bundle(
                 state_dir,
                 backend.get_prd(bundle.prd_id),
             )
-            result = manager.claim(bundle_id)
-            try:
-                require_canonical_prd_claim_binding(
+            result = manager.claim(
+                bundle_id,
+                pre_log_check=lambda: require_canonical_prd_claim_binding(
                     state_dir,
                     backend.get_prd(bundle.prd_id),
-                )
-            except BaseException:
-                manager.release(
-                    bundle_id,
-                    reason="canonical PRD source changed during claim",
-                )
-                raise
+                ),
+            )
     except BundleActorMismatch as exc:
         if json_output:
             fail_with(

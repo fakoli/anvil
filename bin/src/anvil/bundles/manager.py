@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -88,6 +89,7 @@ class BundleManager:
         branch: str | None = None,
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
+        pre_log_check: Callable[[], None] | None = None,
     ) -> BundleClaimResult:
         bundle = self.preflight(bundle_id)
         tasks = [self._backend.get_task(task_id) for task_id in bundle.task_ids]
@@ -134,7 +136,10 @@ class BundleManager:
             },
         )
         try:
-            self._backend.append(draft)
+            if pre_log_check is None:
+                self._backend.append(draft)
+            else:
+                self._backend.append(draft, pre_log_check=pre_log_check)
         except BackendError as exc:
             raise BundleError(str(exc)) from exc
         claimed_bundle = self._backend.get_bundle(bundle_id)

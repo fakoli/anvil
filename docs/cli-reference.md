@@ -1084,6 +1084,8 @@ to one PRD.
 `anvil bundle claim B001` atomically creates the coordinator claim and member task
 authorizations. `--shared-tree` explicitly accepts a shared checkout; required worktree
 isolation otherwise directs callers to the top-level Git-aware bundle claim path.
+The owning PRD must remain exactly approved for its canonical source at the pre-log
+claim boundary; drift refuses without a claim, bundle-status change, or Git mutation.
 JSON output includes the exact coordinator identity plus structured renew, release,
 progress, and complete argv/environment continuations; no task-submit command is emitted.
 
@@ -1820,6 +1822,8 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
 - `anvil run-workflow NAME` — Run a declarative
   `.anvil/workflows/<name>.yaml` workflow to completion through anvil's
   governed create → claim → run → submit → apply transitions, then exit.
+  The owning PRD must be exactly approved for its current canonical source
+  before workflow task creation and at each task-claim pre-log boundary.
 - `anvil backup` — Push `events.jsonl` (and, with `--include-db`,
   `state.db`) to the configured S3 `durable_store`.
 - `anvil restore` — Pull `events.jsonl` from S3 and replay it into

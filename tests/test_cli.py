@@ -5873,6 +5873,7 @@ class TestClaimCommand:
         task_id = _get_first_ready_task_id(tmp_path)
         assert task_id is not None
         before_branch = _git_current_branch(tmp_path)
+        before_events = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
         source_path = tmp_path / ".anvil" / "prd.md"
         original = git_ops.revalidate_claim_plan
 
@@ -5894,6 +5895,7 @@ class TestClaimCommand:
         assert refused.exit_code == 1
         assert json.loads(refused.output)["error"]["code"] == "prd_source_unapproved"
         assert _git_current_branch(tmp_path) == before_branch
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == before_events
         with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
             assert conn.execute(
                 "SELECT COUNT(*) FROM claims WHERE status='active'"
@@ -5928,6 +5930,7 @@ class TestClaimCommand:
         )
         assert created.exit_code == 0, created.output
         before_branch = _git_current_branch(tmp_path)
+        before_events = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
         source_path = tmp_path / ".anvil" / "prd.md"
         original = git_ops.revalidate_claim_plan
 
@@ -5949,6 +5952,7 @@ class TestClaimCommand:
         assert refused.exit_code == 1
         assert json.loads(refused.output)["error"]["code"] == "prd_source_unapproved"
         assert _git_current_branch(tmp_path) == before_branch
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == before_events
         with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
             assert conn.execute(
                 "SELECT COUNT(*) FROM bundle_claims WHERE status='active'"
@@ -5956,6 +5960,9 @@ class TestClaimCommand:
             assert conn.execute(
                 "SELECT COUNT(*) FROM claims WHERE status='active'"
             ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM execution_bundles WHERE id='B001'"
+            ).fetchone()[0] == "planned"
 
     def test_existing_claim_can_renew_after_canonical_source_drift(
         self, tmp_path: Path

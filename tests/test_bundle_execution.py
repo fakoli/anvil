@@ -309,6 +309,63 @@ def _seed(
     return created.id
 
 
+def _bind_seeded_release_source(state_dir: Path) -> None:
+    """Upgrade the legacy bundle fixture to an exact approved source binding."""
+    import hashlib
+    import sqlite3
+    from types import SimpleNamespace
+
+    from anvil.cli._helpers import prd_source_path
+    from anvil.planning.prd_persistence import material_content_sha256
+
+    source = (
+        b"# Project: Release\n\n"
+        b"## Summary\nBundle execution.\n\n"
+        b"## Goals\n- Ship coherently.\n\n"
+        b"## Non-Goals\n- None.\n\n"
+        b"## Requirements\n- R001: Ship coherently.\n\n"
+        b"## Acceptance Criteria\n- Bundle completes.\n\n"
+        b"## Risks\n- None.\n"
+    )
+    source_path = prd_source_path(state_dir, "release")
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(source)
+    digest = hashlib.sha256(source).hexdigest()
+    material = material_content_sha256(
+        SimpleNamespace(
+            source_bytes=source,
+            markdown=source.decode(),
+            source_sha256=digest,
+            source_size_bytes=len(source),
+            source_encoding="utf-8",
+        ),
+        "Release",
+    )
+    with sqlite3.connect(state_dir / "state.db") as conn:
+        content_event_id = conn.execute(
+            "SELECT id FROM events WHERE action='prd.parsed' AND target_id='release'"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE prds SET source_bytes=?, source_sha256=?, source_size_bytes=?, "
+            "source_encoding='utf-8', source_revision=revision, "
+            "provenance_state='available', content_available=1, "
+            "material_sha256=?, content_event_id=?, lifecycle_revision=revision, "
+            "lifecycle_source_sha256=?, lifecycle_material_sha256=?, "
+            "lifecycle_content_event_id=?, review_event_id='E-TEST-REVIEW' "
+            "WHERE id='release'",
+            (
+                source,
+                digest,
+                len(source),
+                material,
+                content_event_id,
+                digest,
+                material,
+                content_event_id,
+            ),
+        )
+
+
 def _manager(backend: SqliteBackend, root: Path) -> BundleManager:
     return BundleManager(
         backend,
@@ -2215,6 +2272,7 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
         _seed(backend)
     finally:
         backend.close()
+    _bind_seeded_release_source(state_dir)
     runner = CliRunner()
     env = {"ANVIL_STATE_LAYOUT": "local"}
     claimed = runner.invoke(

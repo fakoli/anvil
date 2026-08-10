@@ -1124,7 +1124,12 @@ class SqliteBackend:
     # Core mutation — SL1-RR-1 write path
     # ------------------------------------------------------------------
 
-    def append(self, draft: EventDraft) -> Event | None:
+    def append(
+        self,
+        draft: EventDraft,
+        *,
+        pre_log_check: Callable[[], None] | None = None,
+    ) -> Event | None:
         """Validate, assign id from log-authority counter, log-first, then apply.
 
         This is the sole production write entry point (SL1-RR-1). The entire
@@ -1228,6 +1233,13 @@ class SqliteBackend:
                 reason = str(exc)
                 self._append_audit_line("idempotent_no_op", materialized_draft, reason)
                 return None
+
+            # Final caller-supplied invariant at the append linearization
+            # point. This runs after authoritative state validation and before
+            # id assignment or log mutation, so refusal cannot leave a usable
+            # partial claim that must be compensated afterward.
+            if pre_log_check is not None:
+                pre_log_check()
 
             # ---- Phase 2: id assignment ----
             if self._events_storage == "git":
@@ -7040,6 +7052,13 @@ class SqliteBackend:
         lifecycle_values: tuple[Any, Any, Any, Any] = (None, None, None, None)
         review_event_id: str | None = None
         if material_change:
+            status = "draft"
+        elif payload.lineage_version is None and status in {"reviewed", "approved"}:
+            # Schema-v21 lifecycle authority is exact content lineage. A
+            # historical revision without that lineage cannot re-author a
+            # lifecycle state that migration deliberately demotes. Apply the
+            # same conservative rule during live compatibility calls and
+            # replay so in-place upgrade and rebuild remain identical.
             status = "draft"
         elif payload.lineage_version == 1 and current_assumptions_row is not None:
             current_status = str(current_assumptions_row[1])

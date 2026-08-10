@@ -983,6 +983,7 @@ def test_prd_revision_digest_status_replays_exact_source_binding(
             {
                 "project_id": "proj-source",
                 "prd_id": DEFAULT_PRD_ID,
+                "title": "Exact",
                 "is_default": True,
                 "status": "draft",
                 "summary": "v1",
@@ -997,6 +998,7 @@ def test_prd_revision_digest_status_replays_exact_source_binding(
                 "project_id": "proj-source",
                 "prd_id": DEFAULT_PRD_ID,
                 "revision": 2,
+                "title": "Exact",
                 "expected_status": "draft",
                 "is_default": True,
                 "status": "draft",

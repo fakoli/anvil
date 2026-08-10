@@ -618,6 +618,198 @@ A test PRD summary.
         finally:
             migrated_backend.close()
 
+    @pytest.mark.parametrize(
+        ("prd_id", "is_default"),
+        [("default", True), ("named-release", False)],
+    )
+    def test_v20_legacy_approved_revision_migration_matches_v21_replay(
+        self,
+        tmp_path: Path,
+        prd_id: str,
+        is_default: bool,
+    ) -> None:
+        """A lineage-less revision cannot restore demoted legacy approval."""
+        events_path = tmp_path / "events.jsonl"
+        db_path = tmp_path / "state.db"
+        backend = _make_backend(tmp_path, _make_clock())
+        source_v1 = """\
+# Project: Test Project
+
+## Summary
+
+A test PRD summary.
+
+## Goals
+
+- Goal one.
+
+## Requirements
+
+- R001: The system does X.
+"""
+        source_v2 = source_v1.replace(
+            "# Project: Test Project", "# Project: Test Project v2", 1
+        )
+        try:
+            backend.append(_make_project_event())
+            parsed = _make_prd_parsed_payload()
+            parsed.pop("material_sha256")
+            source_v1_bytes = source_v1.encode()
+            parsed.update(
+                {
+                    "prd_id": prd_id,
+                    "is_default": is_default,
+                    "source_text": source_v1,
+                    "source_sha256": hashlib.sha256(source_v1_bytes).hexdigest(),
+                    "source_size_bytes": len(source_v1_bytes),
+                }
+            )
+            backend.append(_make_event("prd.parsed", parsed, target_id=prd_id))
+            backend.append(
+                _make_event(
+                    "prd.reviewed",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": prd_id,
+                        "reviewer": "reviewer",
+                    },
+                    target_id=prd_id,
+                )
+            )
+            backend.append(
+                _make_event(
+                    "prd.approved",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": prd_id,
+                        "approver": "approver",
+                    },
+                    target_id=prd_id,
+                )
+            )
+            source_v2_bytes = source_v2.encode()
+            backend.append(
+                _make_event(
+                    "prd.revised",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": prd_id,
+                        "revision": 2,
+                        "expected_status": "approved",
+                        "title": "Test Project v2",
+                        "is_default": is_default,
+                        "status": "approved",
+                        "summary": parsed["summary"],
+                        "goals": parsed["goals"],
+                        "non_goals": parsed["non_goals"],
+                        "acceptance_criteria": parsed["acceptance_criteria"],
+                        "risks": parsed["risks"],
+                        "open_questions": parsed["open_questions"],
+                        "requirements_added": [],
+                        "requirements_superseded": [],
+                        "requirements_unchanged": parsed["requirements"],
+                        "source_text": source_v2,
+                        "source_sha256": hashlib.sha256(source_v2_bytes).hexdigest(),
+                        "source_size_bytes": len(source_v2_bytes),
+                        "source_encoding": "utf-8",
+                        "source_revision": 2,
+                        "provenance_state": "available",
+                        "content_available": True,
+                    },
+                    target_id=prd_id,
+                )
+            )
+        finally:
+            backend.close()
+
+        # Convert the lifecycle events to their real pre-v21 byte shape. The
+        # final v20 projection retained approved status after the title-only
+        # revision; migration must demote it exactly as an empty replay does.
+        rewritten: list[str] = []
+        payloads_by_id: dict[str, str] = {}
+        for raw in events_path.read_text(encoding="utf-8").splitlines():
+            event = json.loads(raw)
+            if event["action"] == "prd.reviewed":
+                payload = event["payload_json"]
+                for key in (
+                    "binding_version",
+                    "expected_revision",
+                    "expected_status",
+                    "source_sha256",
+                    "material_sha256",
+                    "content_event_id",
+                ):
+                    payload.pop(key, None)
+            elif event["action"] == "prd.approved":
+                payload = event["payload_json"]
+                for key in (
+                    "binding_version",
+                    "expected_revision",
+                    "expected_status",
+                    "source_sha256",
+                    "material_sha256",
+                    "content_event_id",
+                    "review_event_id",
+                ):
+                    payload.pop(key, None)
+            payloads_by_id[event["id"]] = json.dumps(
+                event["payload_json"], separators=(",", ":")
+            )
+            rewritten.append(json.dumps(event, separators=(",", ":")))
+        events_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+        conn = sqlite3.connect(db_path)
+        try:
+            for event_id, payload_json in payloads_by_id.items():
+                conn.execute(
+                    "UPDATE events SET payload_json=? WHERE id=?",
+                    (payload_json, event_id),
+                )
+            conn.execute(
+                "UPDATE prds SET status='approved', material_sha256=NULL, "
+                "content_event_id=NULL, lifecycle_revision=NULL, "
+                "lifecycle_source_sha256=NULL, lifecycle_material_sha256=NULL, "
+                "lifecycle_content_event_id=NULL, review_event_id=NULL WHERE id=?",
+                (prd_id,),
+            )
+            conn.execute("PRAGMA user_version=20")
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated_backend = SqliteBackend(
+            db_path=str(db_path),
+            events_path=str(events_path),
+            clock=_make_clock(),
+        )
+        migrated_backend.initialize()
+        try:
+            migrated = migrated_backend.get_prd(prd_id)
+            assert migrated is not None
+            migrated_binding = (
+                migrated.status,
+                migrated.revision,
+                migrated.source_sha256,
+                migrated.material_sha256,
+                migrated.content_event_id,
+                migrated.lifecycle_revision,
+                migrated.review_event_id,
+            )
+            assert migrated.status.value == "draft"
+            migrated_backend.replay_from_empty(str(events_path))
+            replayed = migrated_backend.get_prd(prd_id)
+            assert replayed is not None
+            assert (
+                replayed.status,
+                replayed.revision,
+                replayed.source_sha256,
+                replayed.material_sha256,
+                replayed.content_event_id,
+                replayed.lifecycle_revision,
+                replayed.review_event_id,
+            ) == migrated_binding
+        finally:
+            migrated_backend.close()
+
     def test_replay_from_empty_reconstructs_state_exactly(self, tmp_path: Path) -> None:
         """Replay 3-5 events from events.jsonl; reconstructed state.db matches original.
 
