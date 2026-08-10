@@ -1282,11 +1282,17 @@ def _compensate_values(
                 or _working_tree_dirty(Path(plan.target_path))
             ):
                 return False
-            _mutate_git(
-                ["worktree", "remove", "--force", plan.target_path],
-                cwd,
-                code="worktree_compensation_failed",
-            )
+            try:
+                # Let Git perform its own final dirtiness check at removal
+                # time. A file created after our bounded observation must make
+                # cleanup refuse, never be erased by `--force`.
+                _mutate_git(
+                    ["worktree", "remove", plan.target_path],
+                    cwd,
+                    code="worktree_compensation_failed",
+                )
+            except ClaimPlanError:
+                return False
 
         return not any(
             item.branch_ref == branch_ref for item in _worktree_topology(cwd)

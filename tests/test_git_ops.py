@@ -1946,6 +1946,34 @@ class TestApplyClaimPlan:
         assert plan.target_path is not None
         assert not Path(plan.target_path).exists()
 
+    def test_worktree_write_after_clean_check_is_preserved(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = resolve_claim_plan(
+            "T011E4", "Late dirty worktree", cwd=git_repo, worktree=True
+        )
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        target = Path(plan.target_path or "")
+        external = target / "external-after-check.txt"
+        original_dirty = worktree_mod._working_tree_dirty
+        injected = False
+
+        def inject_after_clean(path: Path, **kwargs: object) -> bool:
+            nonlocal injected
+            dirty = original_dirty(path, **kwargs)  # type: ignore[arg-type]
+            if not dirty and not injected:
+                external.write_text("preserve\n", encoding="utf-8")
+                injected = True
+            return dirty
+
+        monkeypatch.setattr(worktree_mod, "_working_tree_dirty", inject_after_clean)
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert injected is True
+        assert target.is_dir()
+        assert external.read_text(encoding="utf-8") == "preserve\n"
+        assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
     def test_dirty_owned_worktree_is_preserved_during_compensation(
         self, git_repo: Path
     ) -> None:
