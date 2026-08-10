@@ -130,8 +130,24 @@ def _setup_project(b: SqliteBackend) -> None:
 
 
 def _make_prd_payload(status: str = "draft") -> dict[str, Any]:
+    from types import SimpleNamespace
+
+    from anvil.planning.prd_persistence import material_content_sha256
+
+    title = "Test Project"
+    source = f"# Project: {title}\n"
+    source_bytes = source.encode()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    exact = SimpleNamespace(
+        source_bytes=source_bytes,
+        markdown=source,
+        source_sha256=source_sha256,
+        source_size_bytes=len(source_bytes),
+        source_encoding="utf-8",
+    )
     return {
         "project_id": "proj-1",
+        "title": title,
         "status": status,
         "summary": "Test PRD.",
         "goals": ["Goal one."],
@@ -143,6 +159,14 @@ def _make_prd_payload(status: str = "draft") -> dict[str, Any]:
         "acceptance_criteria": ["AC one."],
         "risks": [],
         "open_questions": [],
+        "source_text": source,
+        "source_sha256": source_sha256,
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": 1,
+        "provenance_state": "available",
+        "content_available": True,
+        "material_sha256": material_content_sha256(exact, title),
     }
 
 

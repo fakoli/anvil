@@ -355,11 +355,14 @@ class _ReplayContentSnapshot(NamedTuple):
     open_questions: Any
     assumptions: Any
     source_sha256: Any
+    material_sha256: Any
     requirements_xor: int
     requirements_count: int
     requirement_delta: dict[str, int | None]
 
     def same_content_except_title(self, other: _ReplayContentSnapshot) -> bool:
+        if self.material_sha256 is not None and other.material_sha256 is not None:
+            return self.material_sha256 == other.material_sha256
         return (
             self.target_version == other.target_version
             and self.target_tag == other.target_tag
@@ -1153,6 +1156,7 @@ class SqliteBackend:
                 self._validate_git_log_before_append()
 
             # ---- Phase 1: validation (read-only) ----
+            draft = self._bind_live_prd_lifecycle_draft(conn, draft)
             action = draft.action
             dispatch = self._get_action_dispatch()
             if action not in dispatch:
@@ -1376,6 +1380,46 @@ class SqliteBackend:
                 self._remember_git_prd_content_head(event)
 
         return event
+
+    @staticmethod
+    def _bind_live_prd_lifecycle_draft(
+        conn: sqlite3.Connection,
+        draft: EventDraft,
+    ) -> EventDraft:
+        """Upgrade legacy-shaped live review calls to exact v21 facts.
+
+        Historical logs remain byte-identifiable by their missing binding and
+        demote during replay.  A current in-process caller using the old helper
+        shape receives the exact binding from the locked projection before its
+        event is canonicalized and written.
+        """
+        if draft.action not in {"prd.reviewed", "prd.approved"}:
+            return draft
+        payload = dict(draft.payload_json)
+        if payload.get("binding_version") is not None:
+            return draft
+        prd_id = str(payload.get("prd_id", DEFAULT_PRD_ID))
+        row = conn.execute(
+            "SELECT revision, status, source_sha256, material_sha256, "
+            "content_event_id, review_event_id FROM prds WHERE id = ?",
+            (prd_id,),
+        ).fetchone()
+        if row is None or any(row[index] is None for index in (2, 3, 4)):
+            return draft
+        payload.update({
+            "prd_id": prd_id,
+            "expected_revision": int(row[0]),
+            "expected_status": payload.get("expected_status") or str(row[1]),
+            "binding_version": 1,
+            "source_sha256": row[2],
+            "material_sha256": row[3],
+            "content_event_id": row[4],
+        })
+        if draft.action == "prd.approved":
+            if row[5] is None:
+                return draft
+            payload["review_event_id"] = row[5]
+        return draft.model_copy(update={"payload_json": payload})
 
     # ------------------------------------------------------------------
     # Replay
@@ -1932,6 +1976,7 @@ class SqliteBackend:
                     open_questions=payload.get("open_questions", []),
                     assumptions=payload.get("assumptions", []),
                     source_sha256=payload.get("source_sha256"),
+                    material_sha256=payload.get("material_sha256"),
                     requirements_xor=requirements_xor,
                     requirements_count=requirements_count,
                     requirement_delta=requirement_delta,
@@ -2398,6 +2443,30 @@ class SqliteBackend:
             ):
                 skip.add(event.id)
                 continue
+            if event.payload_json.get("binding_version") == 1:
+                base_payload = base.payload_json
+                if (
+                    event.payload_json.get("source_sha256")
+                    != base_payload.get("source_sha256")
+                    or event.payload_json.get("material_sha256")
+                    != base_payload.get("material_sha256")
+                    or event.payload_json.get("content_event_id") != base.id
+                ):
+                    skip.add(event.id)
+                    continue
+                if event.action == "prd.approved":
+                    review_event_id = event.payload_json.get("review_event_id")
+                    review_event = events_by_id.get(review_event_id)
+                    if (
+                        not isinstance(review_event_id, str)
+                        or review_event is None
+                        or review_event.action != "prd.reviewed"
+                        or review_event.id in skip
+                        or not descends(event, review_event.id)
+                        or review_event.payload_json.get("content_event_id") != base.id
+                    ):
+                        skip.add(event.id)
+                        continue
             # Material revisions with this exact content base must all descend
             # from a historical lifecycle fact. Otherwise the lifecycle event
             # is a stale sibling and cannot promote the winning revision.
@@ -4568,6 +4637,96 @@ class SqliteBackend:
             raise
         conn.execute("COMMIT")
 
+    def _m_to_v21(self, conn: sqlite3.Connection) -> None:
+        """v20 -> v21: exact material-content and lifecycle lineage bindings."""
+        from types import SimpleNamespace
+
+        from anvil.planning.prd_persistence import material_content_sha256
+        from anvil.planning.template import parse_prd
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(prds)")}
+            additions = (
+                ("material_sha256", "TEXT"),
+                ("content_event_id", "TEXT"),
+                (
+                    "lifecycle_revision",
+                    "INTEGER CHECK (lifecycle_revision IS NULL OR "
+                    "lifecycle_revision >= 1)",
+                ),
+                ("lifecycle_source_sha256", "TEXT"),
+                ("lifecycle_material_sha256", "TEXT"),
+                ("lifecycle_content_event_id", "TEXT"),
+                ("review_event_id", "TEXT"),
+            )
+            for column, definition in additions:
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE prds ADD COLUMN {column} {definition}")
+
+            content_events = conn.execute(
+                "SELECT id, payload_json FROM events "
+                "WHERE action IN ('prd.parsed', 'prd.revised') ORDER BY rowid"
+            ).fetchall()
+            rows = conn.execute(
+                "SELECT id, source_bytes, source_sha256, source_size_bytes, "
+                "source_encoding FROM prds"
+            ).fetchall()
+            for prd_id, raw_bytes, source_sha256, source_size, source_encoding in rows:
+                if raw_bytes is None or source_sha256 is None:
+                    continue
+                source_bytes = bytes(raw_bytes)
+                try:
+                    markdown = source_bytes.decode("utf-8", errors="strict")
+                    parsed = parse_prd(
+                        markdown,
+                        prd_id="prd" if prd_id == DEFAULT_PRD_ID else prd_id,
+                    )
+                    if parsed.errors:
+                        continue
+                    source = SimpleNamespace(
+                        source_bytes=source_bytes,
+                        markdown=markdown,
+                        source_sha256=source_sha256,
+                        source_size_bytes=source_size,
+                        source_encoding=source_encoding,
+                    )
+                    material = material_content_sha256(source, parsed.prd.title)
+                except (UnicodeDecodeError, ValueError):
+                    continue
+                content_event_id: str | None = None
+                for event_id, payload_json in content_events:
+                    try:
+                        payload = json.loads(payload_json)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if payload.get("prd_id", DEFAULT_PRD_ID) != prd_id:
+                        continue
+                    if payload.get("source_sha256") == source_sha256:
+                        content_event_id = event_id
+                if content_event_id is not None:
+                    conn.execute(
+                        "UPDATE prds SET material_sha256 = ?, content_event_id = ? "
+                        "WHERE id = ?",
+                        (material, content_event_id, prd_id),
+                    )
+
+            # No pre-v21 lifecycle event carried the exact content/review
+            # binding. Preserve those events in the log, but do not project a
+            # review or approval that cannot be proven against current content.
+            conn.execute(
+                "UPDATE prds SET status = 'draft', last_reviewed_at = NULL, "
+                "last_reviewed_by = NULL, lifecycle_revision = NULL, "
+                "lifecycle_source_sha256 = NULL, lifecycle_material_sha256 = NULL, "
+                "lifecycle_content_event_id = NULL, review_event_id = NULL "
+                "WHERE status IN ('reviewed', 'approved')"
+            )
+            conn.execute("DELETE FROM reviews WHERE target_kind = 'prd'")
+        except BaseException:
+            self._safe_rollback(conn)
+            raise
+        conn.execute("COMMIT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -4587,6 +4746,7 @@ class SqliteBackend:
         (17, _m_to_v18),
         (18, _m_to_v19),
         (19, _m_to_v20),
+        (20, _m_to_v21),
     ]
 
     @staticmethod
@@ -6303,6 +6463,10 @@ class SqliteBackend:
                     "re-parse against "
                     "current state"
                 )
+        self._validate_prd_material_binding(
+            payload,
+            current=payload.expected_absent is True,
+        )
         requirements = self._validate_requirement_payloads(
             payload.requirements,
             action="prd.parsed",
@@ -6385,6 +6549,10 @@ class SqliteBackend:
         Each Requirement was already validated by ``_check_prd_parsed``; the
         ``model_validate`` calls here are an infallible rebuild.
         """
+        self._validate_prd_material_binding(
+            payload,
+            current=payload.expected_absent is True,
+        )
         # New first-parse events are create-if-absent facts. Live appends are
         # rejected by _check_prd_parsed when the producer's absence snapshot is
         # stale. Replay intentionally skips checks, so make the write itself
@@ -6454,10 +6622,13 @@ class SqliteBackend:
                  is_default, revision,
                  source_bytes, source_sha256, source_size_bytes,
                  source_encoding, source_revision, provenance_state,
-                 content_available, created_at, updated_at)
+                 content_available, material_sha256, content_event_id,
+                 lifecycle_revision, lifecycle_source_sha256,
+                 lifecycle_material_sha256, lifecycle_content_event_id,
+                 review_event_id, created_at, updated_at)
             VALUES
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 1,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
                 title = excluded.title,
@@ -6481,6 +6652,13 @@ class SqliteBackend:
                 source_revision = excluded.source_revision,
                 provenance_state = excluded.provenance_state,
                 content_available = excluded.content_available,
+                material_sha256 = excluded.material_sha256,
+                content_event_id = excluded.content_event_id,
+                lifecycle_revision = excluded.lifecycle_revision,
+                lifecycle_source_sha256 = excluded.lifecycle_source_sha256,
+                lifecycle_material_sha256 = excluded.lifecycle_material_sha256,
+                lifecycle_content_event_id = excluded.lifecycle_content_event_id,
+                review_event_id = excluded.review_event_id,
                 updated_at = excluded.updated_at
             """,
             (
@@ -6500,6 +6678,8 @@ class SqliteBackend:
                 payload.target_tag,
                 1 if payload.is_default else 0,
                 *source_values,
+                payload.material_sha256,
+                event.id,
                 now,
                 now,
             ),
@@ -6538,6 +6718,37 @@ class SqliteBackend:
             conn.execute("RELEASE prd_requirements_replace")
             raise
         conn.execute("RELEASE prd_requirements_replace")
+
+    @staticmethod
+    def _validate_prd_material_binding(
+        payload: PrdParsedPayload | PrdRevisedPayload,
+        *,
+        current: bool,
+    ) -> None:
+        """Recompute exact material identity in both live and replay writes."""
+        if payload.material_sha256 is None:
+            if current:
+                raise ValueError("current PRD content event requires a material digest")
+            return
+        if payload.source_text is None or payload.source_sha256 is None:
+            raise ValueError("material digest requires available exact PRD source")
+        from types import SimpleNamespace
+
+        from anvil.planning.prd_persistence import material_content_sha256
+
+        source_bytes = payload.source_text.encode("utf-8", errors="strict")
+        actual = material_content_sha256(
+            SimpleNamespace(
+                source_bytes=source_bytes,
+                markdown=payload.source_text,
+                source_sha256=payload.source_sha256,
+                source_size_bytes=len(source_bytes),
+                source_encoding="utf-8",
+            ),
+            payload.title,
+        )
+        if actual != payload.material_sha256:
+            raise ValueError("PRD material digest does not match exact source bytes")
 
     @staticmethod
     def _prd_source_projection_values(
@@ -6594,8 +6805,16 @@ class SqliteBackend:
              (plain INSERT). Rejecting up front keeps lineage append-only.
         """
         _ = event
+        self._validate_prd_material_binding(
+            payload,
+            current=payload.lineage_version == 1,
+        )
         row = conn.execute(
-            "SELECT revision, status FROM prds WHERE id = ?", (payload.prd_id,)
+            "SELECT revision, status, source_sha256, material_sha256, "
+            "content_event_id, lifecycle_revision, lifecycle_source_sha256, "
+            "lifecycle_material_sha256, lifecycle_content_event_id "
+            "FROM prds WHERE id = ?",
+            (payload.prd_id,),
         ).fetchone()
         if row is None:
             raise EventRejected(
@@ -6627,6 +6846,29 @@ class SqliteBackend:
                 f"prepared (observed {payload.expected_status!r}, current "
                 f"{current_status!r}); re-parse against current state"
             )
+        if payload.lineage_version == 1:
+            parent = (
+                payload.parent_revision,
+                payload.parent_source_sha256,
+                payload.parent_material_sha256,
+                payload.parent_content_event_id,
+            )
+            current_parent = (int(row[0]), row[2], row[3], row[4])
+            if parent != current_parent:
+                raise EventRejected(
+                    "prd.revised: causal parent changed after the revision was prepared"
+                )
+            expected_lifecycle = (
+                payload.expected_lifecycle_revision,
+                payload.expected_lifecycle_source_sha256,
+                payload.expected_lifecycle_material_sha256,
+                payload.expected_lifecycle_content_event_id,
+            )
+            current_lifecycle = (row[5], row[6], row[7], row[8])
+            if expected_lifecycle != current_lifecycle:
+                raise EventRejected(
+                    "prd.revised: lifecycle binding changed after the revision was prepared"
+                )
         requirements_added = self._validate_requirement_payloads(
             payload.requirements_added,
             action="prd.revised",
@@ -6727,6 +6969,10 @@ class SqliteBackend:
         The whole body runs inside a SAVEPOINT so a failure mid-revision leaves
         no partial state within the outer transaction.
         """
+        self._validate_prd_material_binding(
+            payload,
+            current=payload.lineage_version == 1,
+        )
         prd_id: str = payload.prd_id
         new_revision: int = payload.revision
         source_values = self._prd_source_projection_values(payload)
@@ -6742,7 +6988,10 @@ class SqliteBackend:
         ]
 
         current_assumptions_row = conn.execute(
-            "SELECT assumptions, status FROM prds WHERE id = ?",
+            "SELECT assumptions, status, source_sha256, material_sha256, "
+            "content_event_id, lifecycle_revision, lifecycle_source_sha256, "
+            "lifecycle_material_sha256, lifecycle_content_event_id, review_event_id "
+            "FROM prds WHERE id = ?",
             (prd_id,),
         ).fetchone()
         current_assumptions = (
@@ -6764,12 +7013,44 @@ class SqliteBackend:
         # revision prepared from draft/reviewed from regressing an approval.
         # Legacy events (expected_status=None) keep their old payload-authority
         # semantics exactly, including historical demotions.
-        material_change = bool(
-            superseded_objects or revised_assumptions != current_assumptions
-        )
+        if payload.lineage_version == 1:
+            material_change = payload.material_sha256 != current_assumptions_row[3]
+        else:
+            material_change = bool(
+                superseded_objects or revised_assumptions != current_assumptions
+            )
         status = payload.status
+        lifecycle_values: tuple[Any, Any, Any, Any] = (None, None, None, None)
+        review_event_id: str | None = None
         if material_change:
             status = "draft"
+        elif payload.lineage_version == 1 and current_assumptions_row is not None:
+            current_status = str(current_assumptions_row[1])
+            parent_binding = (
+                int(payload.parent_revision or 0),
+                payload.parent_source_sha256,
+                payload.parent_material_sha256,
+                payload.parent_content_event_id,
+            )
+            current_lifecycle = (
+                current_assumptions_row[5],
+                current_assumptions_row[6],
+                current_assumptions_row[7],
+                current_assumptions_row[8],
+            )
+            if current_status in {"reviewed", "approved"} and (
+                current_lifecycle == parent_binding
+            ):
+                status = current_status
+                lifecycle_values = (
+                    payload.revision,
+                    payload.source_sha256,
+                    payload.material_sha256,
+                    event.id,
+                )
+                review_event_id = current_assumptions_row[9]
+            else:
+                status = "draft"
         elif payload.expected_status is not None and current_assumptions_row is not None:
             current_status = str(current_assumptions_row[1])
             lifecycle_rank = {"draft": 0, "reviewed": 1, "approved": 2}
@@ -6807,6 +7088,13 @@ class SqliteBackend:
                        source_revision = ?,
                        provenance_state = ?,
                        content_available = ?,
+                       material_sha256 = ?,
+                       content_event_id = ?,
+                       lifecycle_revision = ?,
+                       lifecycle_source_sha256 = ?,
+                       lifecycle_material_sha256 = ?,
+                       lifecycle_content_event_id = ?,
+                       review_event_id = ?,
                        updated_at = ?
                  WHERE id = ?
                 """,
@@ -6825,6 +7113,10 @@ class SqliteBackend:
                     payload.target_tag,
                     new_revision,
                     *source_values,
+                    payload.material_sha256,
+                    event.id,
+                    *lifecycle_values,
+                    review_event_id,
                     now,
                     prd_id,
                 ),
@@ -6928,7 +7220,9 @@ class SqliteBackend:
         if payload.expected_revision is None and payload.expected_status is None:
             return
         row = conn.execute(
-            "SELECT revision, status FROM prds WHERE id = ?", (payload.prd_id,)
+            "SELECT revision, status, source_sha256, material_sha256, "
+            "content_event_id FROM prds WHERE id = ?",
+            (payload.prd_id,),
         ).fetchone()
         if payload.expected_revision is not None and (
             row is None or int(row[0]) != payload.expected_revision
@@ -6947,6 +7241,18 @@ class SqliteBackend:
                 "prd.reviewed: PRD lifecycle changed after review was prepared "
                 f"(observed status {payload.expected_status!r}, "
                 f"current {current_status!r})"
+            )
+        if payload.binding_version == 1 and (
+            row is None
+            or (row[2], row[3], row[4])
+            != (
+                payload.source_sha256,
+                payload.material_sha256,
+                payload.content_event_id,
+            )
+        ):
+            raise EventRejected(
+                "prd.reviewed: exact PRD content binding changed after review was prepared"
             )
 
     def _write_prd_reviewed(
@@ -6977,15 +7283,39 @@ class SqliteBackend:
         reviewer: str = payload.reviewer
         timestamp: str = event.timestamp.isoformat()
 
+        if payload.binding_version is None:
+            conn.execute(
+                "UPDATE prds SET status = 'draft', last_reviewed_at = NULL, "
+                "last_reviewed_by = NULL, lifecycle_revision = NULL, "
+                "lifecycle_source_sha256 = NULL, "
+                "lifecycle_material_sha256 = NULL, "
+                "lifecycle_content_event_id = NULL, review_event_id = NULL "
+                "WHERE project_id = ? AND id = ?",
+                (project_id, prd_id),
+            )
+            return
+
         # Scope to project_id AND id so a multi-PRD project mutates only the
         # named PRD. Pre-v7 replay: prd_id='default' matches the single migrated
         # row, so the result is byte-identical to the old project_id-only UPDATE.
         status_clause = (
             "" if payload.expected_status is None else " AND status = ?"
         )
+        lifecycle_values = (
+            (
+                payload.expected_revision,
+                payload.source_sha256,
+                payload.material_sha256,
+                payload.content_event_id,
+                event.id,
+            )
+            if payload.binding_version == 1
+            else (None, None, None, None, None)
+        )
         parameters: tuple[Any, ...] = (
             timestamp,
             reviewer,
+            *lifecycle_values,
             timestamp,
             project_id,
             prd_id,
@@ -6998,6 +7328,11 @@ class SqliteBackend:
                SET status = 'reviewed',
                    last_reviewed_at = ?,
                    last_reviewed_by = ?,
+                   lifecycle_revision = ?,
+                   lifecycle_source_sha256 = ?,
+                   lifecycle_material_sha256 = ?,
+                   lifecycle_content_event_id = ?,
+                   review_event_id = ?,
                    updated_at = ?
              WHERE project_id = ? AND id = ?
             """ + status_clause,
@@ -7015,7 +7350,11 @@ class SqliteBackend:
         if payload.expected_revision is None and payload.expected_status is None:
             return
         row = conn.execute(
-            "SELECT revision, status FROM prds WHERE id = ?", (payload.prd_id,)
+            "SELECT revision, status, source_sha256, material_sha256, "
+            "content_event_id, lifecycle_revision, lifecycle_source_sha256, "
+            "lifecycle_material_sha256, lifecycle_content_event_id, review_event_id "
+            "FROM prds WHERE id = ?",
+            (payload.prd_id,),
         ).fetchone()
         if payload.expected_revision is not None and (
             row is None or int(row[0]) != payload.expected_revision
@@ -7034,6 +7373,25 @@ class SqliteBackend:
                 "prd.approved: PRD lifecycle changed after approval was prepared "
                 f"(observed status {payload.expected_status!r}, "
                 f"current {current_status!r})"
+            )
+        if payload.binding_version == 1 and (
+            row is None
+            or (
+                row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]
+            )
+            != (
+                payload.source_sha256,
+                payload.material_sha256,
+                payload.content_event_id,
+                payload.expected_revision,
+                payload.source_sha256,
+                payload.material_sha256,
+                payload.content_event_id,
+                payload.review_event_id,
+            )
+        ):
+            raise EventRejected(
+                "prd.approved: reviewed content binding no longer matches current PRD"
             )
 
     def _write_prd_approved(
@@ -7060,15 +7418,39 @@ class SqliteBackend:
         event_id: str = event.id
         timestamp: str = event.timestamp.isoformat()
 
+        if payload.binding_version is None:
+            conn.execute(
+                "UPDATE prds SET status = 'draft', last_reviewed_at = NULL, "
+                "last_reviewed_by = NULL, lifecycle_revision = NULL, "
+                "lifecycle_source_sha256 = NULL, "
+                "lifecycle_material_sha256 = NULL, "
+                "lifecycle_content_event_id = NULL, review_event_id = NULL "
+                "WHERE project_id = ? AND id = ?",
+                (project_id, prd_id),
+            )
+            return
+
         # Replay intentionally bypasses validation. Current events therefore
         # enforce their lifecycle CAS in the projector too; a stale union-merged
         # approval becomes an audit-only event and cannot create an approval row.
         if payload.expected_status is not None:
             current = conn.execute(
-                "SELECT status FROM prds WHERE project_id = ? AND id = ?",
+                "SELECT status, revision, source_sha256, material_sha256, "
+                "content_event_id, review_event_id FROM prds "
+                "WHERE project_id = ? AND id = ?",
                 (project_id, prd_id),
             ).fetchone()
             if current is None or str(current[0]) != payload.expected_status:
+                return
+            if payload.binding_version == 1 and (
+                int(current[1]), current[2], current[3], current[4], current[5]
+            ) != (
+                payload.expected_revision,
+                payload.source_sha256,
+                payload.material_sha256,
+                payload.content_event_id,
+                payload.review_event_id,
+            ):
                 return
 
         # Scope to project_id AND id (see _write_prd_reviewed). Pre-v7 replay:
@@ -7107,9 +7489,15 @@ class SqliteBackend:
         payload_json: dict[str, Any],
     ) -> Event:
         """Materialize one deterministic internal event for projection handlers."""
-        outer_id = getattr(event, "id", "pending")
         digest = hashlib.sha256(
-            f"{outer_id}\0{index}\0{action}".encode()
+            b"anvil.planning-batch-nested.v1\0"
+            + canonical_json_bytes({
+                "index": index,
+                "action": action,
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "payload_json": payload_json,
+            })
         ).hexdigest()[:12]
         return Event(
             id=f"E-{digest}",

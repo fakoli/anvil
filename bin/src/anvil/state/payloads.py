@@ -88,6 +88,9 @@ class _PrdSourcePayload(BaseModel):
     source_sha256: StrictStr | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    material_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     source_size_bytes: StrictInt | None = Field(
         default=None,
         ge=0,
@@ -224,6 +227,23 @@ class PrdRevisedPayload(_PrdSourcePayload):
     # the revision. The backend checks it transactionally before writing so a
     # concurrent review/approval cannot be overwritten by stale parse state.
     expected_status: Literal["draft", "reviewed", "approved"] | None = None
+    lineage_version: Literal[1] | None = None
+    parent_revision: StrictInt | None = Field(default=None, ge=1)
+    parent_source_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    parent_material_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    parent_content_event_id: StrictStr | None = None
+    expected_lifecycle_revision: StrictInt | None = Field(default=None, ge=1)
+    expected_lifecycle_source_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    expected_lifecycle_material_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    expected_lifecycle_content_event_id: StrictStr | None = None
     # Scalar PRD fields (mirror PrdParsedPayload) — describe the revised PRD row.
     title: str = ""
     target_version: str | None = None
@@ -262,6 +282,32 @@ class PrdRevisedPayload(_PrdSourcePayload):
             raise ValueError(
                 "prd.revised source provenance must bind the event revision"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_causal_lineage_binding(self) -> PrdRevisedPayload:
+        if self.lineage_version is None:
+            return self
+        parent = (
+            self.parent_revision,
+            self.parent_source_sha256,
+            self.parent_material_sha256,
+            self.parent_content_event_id,
+        )
+        if any(value is None for value in parent):
+            raise ValueError("v1 PRD revision lineage requires the exact parent binding")
+        lifecycle = (
+            self.expected_lifecycle_revision,
+            self.expected_lifecycle_source_sha256,
+            self.expected_lifecycle_material_sha256,
+            self.expected_lifecycle_content_event_id,
+        )
+        if any(value is not None for value in lifecycle) and any(
+            value is None for value in lifecycle
+        ):
+            raise ValueError("PRD lifecycle lineage must be complete or absent")
+        if self.material_sha256 is None:
+            raise ValueError("v1 PRD revision lineage requires a material digest")
         return self
 
     @model_validator(mode="after")
@@ -330,8 +376,31 @@ class PrdReviewedPayload(BaseModel):
     # revision. Review/approval do not increment revision, so revision alone
     # cannot detect a same-revision transition. None preserves old event logs.
     expected_status: Literal["draft"] | None = None
+    binding_version: Literal[1] | None = None
+    source_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    material_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    content_event_id: StrictStr | None = None
     reviewer: str
     notes: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_lifecycle_binding(self) -> PrdReviewedPayload:
+        if self.binding_version == 1 and any(
+            value is None
+            for value in (
+                self.expected_revision,
+                self.expected_status,
+                self.source_sha256,
+                self.material_sha256,
+                self.content_event_id,
+            )
+        ):
+            raise ValueError("v1 PRD review requires the exact content binding")
+        return self
 
 
 class PrdApprovedPayload(BaseModel):
@@ -347,7 +416,32 @@ class PrdApprovedPayload(BaseModel):
     prd_id: str = DEFAULT_PRD_ID
     expected_revision: int | None = Field(default=None, ge=1)
     expected_status: Literal["reviewed"] | None = None
+    binding_version: Literal[1] | None = None
+    source_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    material_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    content_event_id: StrictStr | None = None
+    review_event_id: StrictStr | None = None
     approver: str
+
+    @model_validator(mode="after")
+    def _validate_lifecycle_binding(self) -> PrdApprovedPayload:
+        if self.binding_version == 1 and any(
+            value is None
+            for value in (
+                self.expected_revision,
+                self.expected_status,
+                self.source_sha256,
+                self.material_sha256,
+                self.content_event_id,
+                self.review_event_id,
+            )
+        ):
+            raise ValueError("v1 PRD approval requires the exact reviewed binding")
+        return self
 
 
 class PrdDecisionResolvedPayload(BaseModel):

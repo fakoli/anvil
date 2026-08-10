@@ -720,6 +720,25 @@ def prd_review(
             )
             raise typer.Exit(code=1)
 
+        try:
+            canonical_source = ingest_prd_source_for_id(state_dir, resolved_prd_id)
+        except PrdSourceIngestError as exc:
+            typer.echo(f"Error: cannot verify canonical PRD source: {exc.message}", err=True)
+            raise typer.Exit(code=1) from exc
+        if (
+            not prd_model.content_available
+            or prd_model.source_bytes != canonical_source.source_bytes
+            or prd_model.source_sha256 != canonical_source.source_sha256
+            or prd_model.material_sha256 is None
+            or prd_model.content_event_id is None
+        ):
+            typer.echo(
+                "Error: canonical PRD source is not the exact parsed revision. "
+                "Copy/reparse any custom source into the managed PRD source, then retry.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
         # Stamp prd_id into the event payload ONLY for a named (non-default)
         # PRD. The default PRD omits the key so the payload stays byte-identical
         # to the pre-multi-PRD event (the payload defaults prd_id='default').
@@ -749,6 +768,11 @@ def prd_review(
                         "project_id": project_id,
                         "expected_revision": prd_model.revision,
                         "expected_status": prd_model.status.value,
+                        "binding_version": 1,
+                        "source_sha256": prd_model.source_sha256,
+                        "material_sha256": prd_model.material_sha256,
+                        "content_event_id": prd_model.content_event_id,
+                        "review_event_id": prd_model.review_event_id,
                         "approver": reviewer,
                     }
                 ),
@@ -780,6 +804,10 @@ def prd_review(
                         "project_id": project_id,
                         "expected_revision": prd_model.revision,
                         "expected_status": prd_model.status.value,
+                        "binding_version": 1,
+                        "source_sha256": prd_model.source_sha256,
+                        "material_sha256": prd_model.material_sha256,
+                        "content_event_id": prd_model.content_event_id,
                         "reviewer": reviewer,
                         "notes": notes,
                     }

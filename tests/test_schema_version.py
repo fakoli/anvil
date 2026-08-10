@@ -44,7 +44,7 @@ def _init(tmp_path: Path) -> None:
 def test_get_schema_version_matches_constant() -> None:
     """The public accessor returns the current SCHEMA_VERSION constant."""
     assert get_schema_version() == SCHEMA_VERSION
-    assert get_schema_version() == 20
+    assert get_schema_version() == 21
 
 
 def test_backend_get_schema_version_matches_constant(tmp_path: Path) -> None:
@@ -103,7 +103,7 @@ def test_v19_migration_adds_nullable_task_and_bundle_git_metadata(
     )
     migrated.initialize()
     try:
-        assert migrated.get_schema_version() == 20
+        assert migrated.get_schema_version() == 21
         conn = migrated._require_conn()  # noqa: SLF001
         for table in ("claims", "bundle_claims"):
             columns = {

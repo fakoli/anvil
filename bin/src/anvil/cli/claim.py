@@ -208,6 +208,21 @@ def claim(
                     fail("claim", f"bundle '{task_id}' not found.", code="not_found")
                 typer.echo(f"Error: bundle '{task_id}' not found.", err=True)
                 raise typer.Exit(code=1)
+            from anvil.planning.prd_persistence import (
+                PrdClaimBindingError,
+                require_canonical_prd_claim_binding,
+            )
+
+            try:
+                require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(execution_bundle.prd_id),
+                )
+            except PrdClaimBindingError as exc:
+                if json_output:
+                    fail("claim", str(exc), code="prd_source_unapproved")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             bundle_manager = BundleManager(
                 backend,
                 clock,
@@ -257,6 +272,10 @@ def claim(
                 raise typer.Exit(code=1) from exc
             try:
                 with backend.claim_operation_lock():
+                    require_canonical_prd_claim_binding(
+                        state_dir,
+                        backend.get_prd(execution_bundle.prd_id),
+                    )
                     revalidate_claim_plan(plan, cwd=resolved_cwd)
                     bundle_result = bundle_manager.claim(
                         task_id,
@@ -287,6 +306,11 @@ def claim(
             except ClaimPlanError as exc:
                 if json_output:
                     fail("claim", str(exc), code=exc.code)
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            except PrdClaimBindingError as exc:
+                if json_output:
+                    fail("claim", str(exc), code="prd_source_unapproved")
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             except BundleError as exc:
@@ -333,6 +357,21 @@ def claim(
                 fail("claim", f"task '{task_id}' not found.", code="not_found")
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
             raise typer.Exit(code=1)
+        from anvil.planning.prd_persistence import (
+            PrdClaimBindingError,
+            require_canonical_prd_claim_binding,
+        )
+
+        try:
+            require_canonical_prd_claim_binding(
+                state_dir,
+                backend.get_prd(task.prd_id),
+            )
+        except PrdClaimBindingError as exc:
+            if json_output:
+                fail("claim", str(exc), code="prd_source_unapproved")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         cross_prd_warning: str | None = None
         # T007: if the caller intentionally scoped the claim loop to a PRD
@@ -504,6 +543,10 @@ def claim(
 
         try:
             with backend.claim_operation_lock():
+                require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(task.prd_id),
+                )
                 revalidate_claim_plan(plan, cwd=resolved_cwd)
                 result = manager.claim(
                     task_id,
@@ -535,6 +578,11 @@ def claim(
         except ClaimPlanError as exc:
             if json_output:
                 fail("claim", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except PrdClaimBindingError as exc:
+            if json_output:
+                fail("claim", str(exc), code="prd_source_unapproved")
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
         except ClaimError as exc:

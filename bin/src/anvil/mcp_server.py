@@ -1331,6 +1331,8 @@ def claim_task(
             revalidate_claim_plan,
         )
 
+        _require_actor(claimed_by)
+
         _reap_stale(backend)
 
         # worktree_isolation parity with the CLI (review finding: the policy
@@ -1385,6 +1387,18 @@ def claim_task(
         task = backend.get_task(task_id)
         if task is None:
             raise ToolError(f"Task '{task_id}' not found.")
+        from anvil.planning.prd_persistence import (
+            PrdClaimBindingError,
+            require_canonical_prd_claim_binding,
+        )
+
+        try:
+            require_canonical_prd_claim_binding(
+                state_dir,
+                backend.get_prd(task.prd_id),
+            )
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
 
         try:
             plan = resolve_claim_plan(
@@ -1398,6 +1412,10 @@ def claim_task(
             metadata = claim_git_metadata(plan)
             mutation_tracker = ClaimGitMutationTracker(plan)
             with backend.claim_operation_lock():
+                require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(task.prd_id),
+                )
                 revalidate_claim_plan(plan, cwd=project_dir)
                 result = manager.claim(
                     task_id,
@@ -1427,6 +1445,8 @@ def claim_task(
                 )
         except ClaimPlanError as exc:
             raise ToolError(f"{exc.code}: {exc}") from exc
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -2989,7 +3009,12 @@ def review_prd(
             PRD, byte-identical to pre-T019 on a single-PRD project.
         cwd:      Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _DEFAULT_PRD_IDS, canonical_prd_id
+    from anvil.cli._helpers import (
+        _DEFAULT_PRD_IDS,
+        PrdSourceIngestError,
+        canonical_prd_id,
+        ingest_prd_source_for_id,
+    )
     from anvil.clock import SystemClock
     from anvil.state.backend import EventRejected
     from anvil.state.models import EventDraft
@@ -3012,6 +3037,23 @@ def review_prd(
         if prd is None:
             raise ToolError(
                 "No PRD found in state. Run parse_prd first.",
+            )
+        try:
+            canonical_source = ingest_prd_source_for_id(state_dir, resolved_prd_id)
+        except PrdSourceIngestError as exc:
+            raise ToolError(
+                f"Cannot verify canonical PRD source: {exc.message}"
+            ) from None
+        if (
+            not prd.content_available
+            or prd.source_bytes != canonical_source.source_bytes
+            or prd.source_sha256 != canonical_source.source_sha256
+            or prd.material_sha256 is None
+            or prd.content_event_id is None
+        ):
+            raise ToolError(
+                "Canonical PRD source is not the exact parsed revision. "
+                "Copy/reparse any custom source into the managed PRD source, then retry."
             )
         from_status = prd.status.value
         project = backend.get_project()
@@ -3038,6 +3080,11 @@ def review_prd(
                     "project_id": project_id,
                     "expected_revision": prd.revision,
                     "expected_status": prd.status.value,
+                    "binding_version": 1,
+                    "source_sha256": prd.source_sha256,
+                    "material_sha256": prd.material_sha256,
+                    "content_event_id": prd.content_event_id,
+                    "review_event_id": prd.review_event_id,
                     "approver": reviewer,
                 }
             )
@@ -3055,6 +3102,10 @@ def review_prd(
                     "project_id": project_id,
                     "expected_revision": prd.revision,
                     "expected_status": prd.status.value,
+                    "binding_version": 1,
+                    "source_sha256": prd.source_sha256,
+                    "material_sha256": prd.material_sha256,
+                    "content_event_id": prd.content_event_id,
                     "reviewer": reviewer,
                     "notes": notes,
                 }
@@ -4572,6 +4623,21 @@ def claim_bundle(
             cwd=cwd,
             new_claim=True,
         )
+        bundle = backend.get_bundle(bundle_id)
+        if bundle is None:
+            raise ToolError(f"bundle_error: Bundle '{bundle_id}' not found.")
+        from anvil.planning.prd_persistence import (
+            PrdClaimBindingError,
+            require_canonical_prd_claim_binding,
+        )
+
+        try:
+            require_canonical_prd_claim_binding(
+                state_dir,
+                backend.get_prd(bundle.prd_id),
+            )
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
         try:
             plan = resolve_claim_plan(
                 bundle_id,
@@ -4584,6 +4650,10 @@ def claim_bundle(
             metadata = claim_git_metadata(plan)
             mutation_tracker = ClaimGitMutationTracker(plan)
             with backend.claim_operation_lock():
+                require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(bundle.prd_id),
+                )
                 revalidate_claim_plan(plan, cwd=project_dir)
                 result = manager.claim(
                     bundle_id,
@@ -4611,6 +4681,8 @@ def claim_bundle(
                 )
         except ClaimPlanError as exc:
             raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         return BundleClaimResponse(

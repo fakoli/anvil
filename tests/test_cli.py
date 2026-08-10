@@ -17,6 +17,7 @@ import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from click.testing import Result
@@ -1816,6 +1817,15 @@ A project without goals.
                 interleaved = True
                 winner = dict(draft.payload_json)
                 winner["title"] = "Concurrent Winner"
+                winner_source = str(winner["source_text"]).replace(
+                    "# Project: CLI Test Project",
+                    "# Project: Concurrent Winner",
+                    1,
+                )
+                winner["source_text"] = winner_source
+                winner_bytes = winner_source.encode()
+                winner["source_sha256"] = hashlib.sha256(winner_bytes).hexdigest()
+                winner["source_size_bytes"] = len(winner_bytes)
                 real_append(
                     self,
                     EventDraft(
@@ -1827,33 +1837,12 @@ A project without goals.
                         payload_json=winner,
                     ),
                 )
-                real_append(
+                _append_bound_review_and_approval(
                     self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-reviewer",
-                        action="prd.reviewed",
-                        target_kind="prd",
-                        target_id=draft.target_id,
-                        payload_json={
-                            "project_id": draft.payload_json["project_id"],
-                            "reviewer": "concurrent-reviewer",
-                        },
-                    ),
-                )
-                real_append(
-                    self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-approver",
-                        action="prd.approved",
-                        target_kind="prd",
-                        target_id=draft.target_id,
-                        payload_json={
-                            "project_id": draft.payload_json["project_id"],
-                            "approver": "concurrent-approver",
-                        },
-                    ),
+                    real_append,
+                    draft,
+                    project_id=str(draft.payload_json["project_id"]),
+                    actor="concurrent-human",
                 )
             return real_append(self, draft)
 
@@ -2288,6 +2277,79 @@ def _events_of_action(tmp_path: Path, action: str) -> list[dict]:  # type: ignor
     return out
 
 
+def _append_bound_review_and_approval(
+    backend: object,
+    append_fn: object,
+    draft: object,
+    *,
+    project_id: str,
+    actor: str,
+) -> None:
+    """Append current v21 review/approval facts in deterministic race tests."""
+    from typing import cast
+
+    from anvil.state.models import EventDraft
+    from anvil.state.sqlite import SqliteBackend
+
+    typed_backend = cast(SqliteBackend, backend)
+    typed_append = cast(Any, append_fn)
+    typed_draft = cast(EventDraft, draft)
+    prd = typed_backend.get_prd("default")
+    assert prd is not None
+    binding = {
+        "project_id": project_id,
+        "prd_id": "default",
+        "expected_revision": prd.revision,
+        "source_sha256": prd.source_sha256,
+        "material_sha256": prd.material_sha256,
+        "content_event_id": prd.content_event_id,
+        "binding_version": 1,
+    }
+    review = typed_append(
+        typed_backend,
+        EventDraft(
+            timestamp=typed_draft.timestamp,
+            actor=actor,
+            action="prd.reviewed",
+            target_kind="prd",
+            target_id=project_id,
+            payload_json={
+                **binding,
+                "expected_status": "draft",
+                "reviewer": actor,
+            },
+        ),
+    )
+    assert review is not None
+    typed_append(
+        typed_backend,
+        EventDraft(
+            timestamp=typed_draft.timestamp,
+            actor=actor,
+            action="prd.approved",
+            target_kind="prd",
+            target_id=project_id,
+            payload_json={
+                **binding,
+                "expected_status": "reviewed",
+                "review_event_id": review.id,
+                "approver": actor,
+            },
+        ),
+    )
+
+
+def _event_records_of_action(tmp_path: Path, action: str) -> list[dict]:  # type: ignore[type-arg]
+    """Return complete event envelopes for one action, in log order."""
+    return [
+        event
+        for line in _events_text(tmp_path).splitlines()
+        if line.strip()
+        for event in [json.loads(line)]
+        if event.get("action") == action
+    ]
+
+
 class TestPrdList:
     def test_prd_list_text_and_json(self, tmp_path: Path) -> None:
         """`anvil prd list` lists the PRDs (text + --json); the default is marked.
@@ -2716,13 +2778,8 @@ class TestPrdReparse:
         assert persisted.source_bytes == winner_source
         assert (persisted.revision, persisted.source_bytes) == winner_projection
 
-    def test_reparse_pure_additive_keeps_approved_status(self, tmp_path: Path) -> None:
-        """A PURE-ADDITIVE re-parse (nothing superseded) must KEEP the PRD's
-        reviewed/approved status. Regression for the silent-demotion bug: the
-        prd.revised payload carried result.prd.status (a fresh parse is always
-        'draft'), so EVERY re-parse demoted an approved PRD to draft and dropped
-        the claim gate. The handler demotes only when a requirement is superseded;
-        the payload must therefore carry the CURRENT stored status."""
+    def test_reparse_pure_additive_demotes_approved_status(self, tmp_path: Path) -> None:
+        """Every non-title source change invalidates prior approval."""
         from anvil.cli._helpers import _open_backend
 
         _do_init(tmp_path)
@@ -2749,9 +2806,9 @@ class TestPrdReparse:
         finally:
             backend.close()
         assert prd is not None and prd.revision == 2
-        assert prd.status.value == "approved", (
-            "pure-additive re-parse must NOT demote an approved PRD to draft"
-        )
+        assert prd.status.value == "draft"
+        assert prd.lifecycle_revision is None
+        assert prd.review_event_id is None
 
     def test_title_only_default_reparse_updates_title_and_keeps_approved_status(
         self, tmp_path: Path
@@ -2783,6 +2840,10 @@ class TestPrdReparse:
         assert revised[0]["prd_id"] == "default"
         assert revised[0]["title"] == "Renamed CLI Test Project"
         assert revised[0]["status"] == "approved"
+        assert revised[0]["lineage_version"] == 1
+        assert revised[0]["parent_revision"] == 1
+        assert revised[0]["parent_source_sha256"] != revised[0]["source_sha256"]
+        assert revised[0]["parent_material_sha256"] == revised[0]["material_sha256"]
         assert revised[0]["requirements_added"] == []
         assert revised[0]["requirements_superseded"] == []
 
@@ -2795,6 +2856,11 @@ class TestPrdReparse:
         assert prd.title == "Renamed CLI Test Project"
         assert prd.revision == 2
         assert prd.status.value == "approved"
+        assert prd.lifecycle_revision == 2
+        assert prd.lifecycle_source_sha256 == prd.source_sha256
+        assert prd.lifecycle_material_sha256 == prd.material_sha256
+        assert prd.lifecycle_content_event_id == prd.content_event_id
+        assert prd.review_event_id is not None
 
     @pytest.mark.parametrize(
         ("unsafe_title", "expected_error", "forbidden_output"),
@@ -3031,9 +3097,14 @@ class TestPrdReparse:
         conn = sqlite3.connect(str(scratch_db))
         try:
             replay_rows = {
-                row[0]: (row[1], row[2], row[3])
+                row[0]: tuple(row[1:])
                 for row in conn.execute(
-                    "SELECT id, title, status, revision FROM prds"
+                    """SELECT id, title, status, revision, source_sha256,
+                              material_sha256, content_event_id,
+                              lifecycle_revision, lifecycle_source_sha256,
+                              lifecycle_material_sha256,
+                              lifecycle_content_event_id, review_event_id
+                       FROM prds"""
                 ).fetchall()
             }
         finally:
@@ -3043,11 +3114,27 @@ class TestPrdReparse:
                 default_after.title,
                 default_after.status.value,
                 default_after.revision,
+                default_after.source_sha256,
+                default_after.material_sha256,
+                default_after.content_event_id,
+                default_after.lifecycle_revision,
+                default_after.lifecycle_source_sha256,
+                default_after.lifecycle_material_sha256,
+                default_after.lifecycle_content_event_id,
+                default_after.review_event_id,
             ),
             "v0.2": (
                 named_after.title,
                 named_after.status.value,
                 named_after.revision,
+                named_after.source_sha256,
+                named_after.material_sha256,
+                named_after.content_event_id,
+                named_after.lifecycle_revision,
+                named_after.lifecycle_source_sha256,
+                named_after.lifecycle_material_sha256,
+                named_after.lifecycle_content_event_id,
+                named_after.review_event_id,
             ),
         }
 
@@ -3073,14 +3160,10 @@ class TestPrdReparse:
         assert len(named_parsed) == 1
         assert _events_of_action(tmp_path, "prd.revised") == []
 
-        # Re-parse the named PRD → prd.revised for v0.2 only.
+        # Byte-identical re-parse is an exact no-op for v0.2 only.
         second_named = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
         assert second_named.exit_code == 0, second_named.output
-        revised = _events_of_action(tmp_path, "prd.revised")
-        assert len(revised) == 1
-        assert revised[0]["prd_id"] == "v0.2"
-        assert revised[0]["is_default"] is False
-        assert revised[0]["revision"] == 2
+        assert _events_of_action(tmp_path, "prd.revised") == []
 
     def test_reparse_migrated_v6_default_prd_supersedes_not_wipes(
         self, tmp_path: Path
@@ -3236,7 +3319,6 @@ class TestPrdReparse:
         review+approval interleaved immediately before its append. Lifecycle
         transitions do not increment revision, so this proves the status CAS."""
         from anvil.cli._helpers import _open_backend
-        from anvil.state.models import EventDraft
         from anvil.state.sqlite import SqliteBackend
 
         _do_init(tmp_path)
@@ -3251,33 +3333,12 @@ class TestPrdReparse:
             if draft.action == "prd.revised" and not interleaved:
                 interleaved = True
                 project_id = draft.payload_json["project_id"]
-                real_append(
+                _append_bound_review_and_approval(
                     self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-reviewer",
-                        action="prd.reviewed",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "reviewer": "concurrent-reviewer",
-                        },
-                    ),
-                )
-                real_append(
-                    self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-approver",
-                        action="prd.approved",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "approver": "concurrent-approver",
-                        },
-                    ),
+                    real_append,
+                    draft,
+                    project_id=str(project_id),
+                    actor="concurrent-human",
                 )
             return real_append(self, draft)
 
@@ -3312,7 +3373,6 @@ class TestPrdReparse:
     ) -> None:
         """CLI review binds both revision and draft lifecycle status."""
         from anvil.cli._helpers import _open_backend
-        from anvil.state.models import EventDraft
         from anvil.state.sqlite import SqliteBackend
 
         _do_init(tmp_path)
@@ -3328,37 +3388,12 @@ class TestPrdReparse:
                 assert draft.payload_json["expected_revision"] == 1
                 assert draft.payload_json["expected_status"] == "draft"
                 project_id = draft.payload_json["project_id"]
-                real_append(
+                _append_bound_review_and_approval(
                     self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-reviewer",
-                        action="prd.reviewed",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "expected_revision": 1,
-                            "expected_status": "draft",
-                            "reviewer": "concurrent-reviewer",
-                        },
-                    ),
-                )
-                real_append(
-                    self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-approver",
-                        action="prd.approved",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "expected_revision": 1,
-                            "expected_status": "reviewed",
-                            "approver": "concurrent-approver",
-                        },
-                    ),
+                    real_append,
+                    draft,
+                    project_id=str(project_id),
+                    actor="concurrent-human",
                 )
             return real_append(self, draft)
 
@@ -3518,6 +3553,15 @@ class TestPrdReview:
         result = _invoke_cmd(tmp_path, ["prd", "review"])
         assert result.exit_code == 0, f"prd review failed: {result.output}"
         assert "reviewed" in result.output.lower()
+        review = _events_of_action(tmp_path, "prd.reviewed")[-1]
+        content = _events_of_action(tmp_path, "prd.parsed")[-1]
+        assert review["binding_version"] == 1
+        assert review["expected_revision"] == 1
+        assert review["source_sha256"] == content["source_sha256"]
+        assert review["material_sha256"] == content["material_sha256"]
+        assert review["content_event_id"] == _event_records_of_action(
+            tmp_path, "prd.parsed"
+        )[-1]["id"]
 
     def test_prd_review_approve_reviewed_to_approved(self, tmp_path: Path) -> None:
         """After review, run prd review --approve → PRD moves to approved."""
@@ -3529,6 +3573,13 @@ class TestPrdReview:
         result = _invoke_cmd(tmp_path, ["prd", "review", "--approve"])
         assert result.exit_code == 0, f"prd review --approve failed: {result.output}"
         assert "approved" in result.output.lower()
+        approval = _events_of_action(tmp_path, "prd.approved")[-1]
+        review_event = _event_records_of_action(tmp_path, "prd.reviewed")[-1]
+        assert approval["binding_version"] == 1
+        assert approval["review_event_id"] == review_event["id"]
+        assert approval["content_event_id"] == review_event["payload_json"][
+            "content_event_id"
+        ]
 
     def test_prd_review_fails_without_parsed_prd(self, tmp_path: Path) -> None:
         """prd review without a parsed PRD → exit 1 with helpful error."""
@@ -3538,6 +3589,30 @@ class TestPrdReview:
         assert result.exit_code == 1
         combined = result.output + (result.stderr if hasattr(result, "stderr") and result.stderr else "")
         assert "prd" in combined.lower() or "parse" in combined.lower()
+
+    def test_custom_source_must_be_copied_to_managed_source_before_review(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        custom = tmp_path / "custom-prd.md"
+        custom.write_text(_MINIMAL_PRD_CONTENT, encoding="utf-8", newline="")
+        parsed = _invoke_cmd(
+            tmp_path,
+            ["prd", "parse", "--file", str(custom), "--prd", "default"],
+        )
+        assert parsed.exit_code == 0, parsed.output
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before = events_path.read_bytes()
+
+        refused = _invoke_cmd(tmp_path, ["prd", "review"])
+        assert refused.exit_code == 1
+        assert "canonical PRD source" in refused.output
+        assert events_path.read_bytes() == before
+
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
 
 
 # ---------------------------------------------------------------------------
@@ -5762,6 +5837,54 @@ def _git_current_branch(tmp_path: Path) -> str:
 
 
 class TestClaimCommand:
+    def test_new_claim_refuses_canonical_source_drift_before_state_or_git(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+        before_branch = _git_current_branch(tmp_path)
+        source = (tmp_path / ".anvil" / "prd.md").read_text(encoding="utf-8")
+        _write_prd(tmp_path, source + "\n<!-- unparsed drift -->\n")
+
+        refused = _invoke_cmd(
+            tmp_path,
+            ["claim", task_id, "--actor", "drift-agent", "--json"],
+        )
+
+        assert refused.exit_code == 1
+        payload = json.loads(refused.output)
+        assert payload["error"]["code"] == "prd_source_unapproved"
+        assert events_path.read_bytes() == before_events
+        assert _git_current_branch(tmp_path) == before_branch
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+
+    def test_existing_claim_can_renew_after_canonical_source_drift(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        claimed = _invoke_cmd(
+            tmp_path,
+            ["claim", task_id, "--actor", "continuing-agent", "--json"],
+        )
+        assert claimed.exit_code == 0, claimed.output
+        claim_id = json.loads(claimed.output)["data"]["claim"]["id"]
+        source = (tmp_path / ".anvil" / "prd.md").read_text(encoding="utf-8")
+        _write_prd(tmp_path, source + "\n<!-- drift during active work -->\n")
+
+        renewed = _invoke_cmd(
+            tmp_path,
+            ["renew", claim_id, "--actor", "continuing-agent", "--json"],
+        )
+        assert renewed.exit_code == 0, renewed.output
+
     def test_attestation_is_accepted_and_consumed_by_next_renewal(
         self, tmp_path: Path
     ) -> None:
@@ -9478,6 +9601,9 @@ class TestT019PrdScopedCliCommands:
         """`prd review --prd v0.2` transitions ONLY the v0.2 PRD (draft ->
         reviewed); the default PRD (already approved) is untouched."""
         _seed_two_prd_project(tmp_path)
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+        assert parsed.exit_code == 0, parsed.output
         result = _invoke_cmd(tmp_path, ["prd", "review", "--prd", "v0.2"])
         assert result.exit_code == 0, result.output
 

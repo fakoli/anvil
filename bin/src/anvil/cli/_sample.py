@@ -28,7 +28,9 @@ Design notes
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from anvil.state.backend import EventRejected
@@ -267,6 +269,10 @@ def _seed_pipeline_from_prd_unbatched(
     """
     from anvil.clock import SystemClock
     from anvil.planning.inference import BundlePlanningError, infer_all
+    from anvil.planning.prd_persistence import (
+        material_content_sha256,
+        source_binding,
+    )
     from anvil.planning.scoring import require_complete_score, score_task
     from anvil.planning.template import parse_prd
     from anvil.state.models import EventDraft
@@ -288,6 +294,16 @@ def _seed_pipeline_from_prd_unbatched(
             f"({len(parsed.errors)} error(s)): {detail}. "
             + parse_error_hint
         )
+
+    source_bytes = prd_text.encode("utf-8")
+    source = SimpleNamespace(
+        source_bytes=source_bytes,
+        markdown=prd_text,
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        source_size_bytes=len(source_bytes),
+        source_encoding="utf-8",
+    )
+    material_sha256 = material_content_sha256(source, parsed.prd.title)
 
     # Path identity is the only host-sensitive part of seeding.  Complete it
     # before the first PRD/feature/task event append so loader, mapping,
@@ -328,6 +344,7 @@ def _seed_pipeline_from_prd_unbatched(
         "risks": parsed.prd.risks,
         "open_questions": parsed.prd.open_questions,
         "assumptions": [item.model_dump() for item in parsed.prd.assumptions],
+        "material_sha256": material_sha256,
     }
     if existing_prd is None:
         content_action = "prd.parsed"
@@ -336,6 +353,7 @@ def _seed_pipeline_from_prd_unbatched(
             "expected_absent": True,
             "status": parsed.prd.status.value,
             "requirements": new_requirements,
+            **source_binding(source, 1),
         }
     else:
         live_requirements = backend.list_requirements(prd_id=stored_prd_id)
@@ -385,7 +403,31 @@ def _seed_pipeline_from_prd_unbatched(
                 for item in live_requirements
                 if item.id not in new_by_id
             ],
+            **source_binding(source, existing_prd.revision + 1),
         }
+        if (
+            existing_prd.content_available
+            and existing_prd.source_sha256 is not None
+            and existing_prd.material_sha256 is not None
+            and existing_prd.content_event_id is not None
+        ):
+            content_payload.update({
+                "lineage_version": 1,
+                "parent_revision": existing_prd.revision,
+                "parent_source_sha256": existing_prd.source_sha256,
+                "parent_material_sha256": existing_prd.material_sha256,
+                "parent_content_event_id": existing_prd.content_event_id,
+                "expected_lifecycle_revision": existing_prd.lifecycle_revision,
+                "expected_lifecycle_source_sha256": (
+                    existing_prd.lifecycle_source_sha256
+                ),
+                "expected_lifecycle_material_sha256": (
+                    existing_prd.lifecycle_material_sha256
+                ),
+                "expected_lifecycle_content_event_id": (
+                    existing_prd.lifecycle_content_event_id
+                ),
+            })
     try:
         backend.append(
             EventDraft(
@@ -415,6 +457,10 @@ def _seed_pipeline_from_prd_unbatched(
                         "project_id": project_id,
                         "expected_revision": current_prd.revision,
                         "expected_status": "draft",
+                        "binding_version": 1,
+                        "source_sha256": current_prd.source_sha256,
+                        "material_sha256": current_prd.material_sha256,
+                        "content_event_id": current_prd.content_event_id,
                         "reviewer": actor,
                         "notes": review_notes,
                     },
@@ -434,6 +480,11 @@ def _seed_pipeline_from_prd_unbatched(
                         "project_id": project_id,
                         "expected_revision": current_prd.revision,
                         "expected_status": "reviewed",
+                        "binding_version": 1,
+                        "source_sha256": current_prd.source_sha256,
+                        "material_sha256": current_prd.material_sha256,
+                        "content_event_id": current_prd.content_event_id,
+                        "review_event_id": current_prd.review_event_id,
                         "approver": actor,
                     },
                 )
