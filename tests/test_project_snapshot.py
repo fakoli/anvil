@@ -274,6 +274,15 @@ def _read_error_schema() -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_output_schema() -> dict[str, object]:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "bin/src/anvil/_data/contracts/provider-reads/v1/"
+        "project-snapshot-output.schema.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_project_snapshot_cli_success_is_closed_json_and_read_only(
     cli_populated: tuple[Path, Path],
 ) -> None:
@@ -304,6 +313,7 @@ def test_project_snapshot_cli_success_is_closed_json_and_read_only(
     assert len(data["payload"]["prds"]) == 2
     assert len(data["payload"]["features"]) == 2
     assert len(data["payload"]["tasks"]) == 2
+    Draft202012Validator(_read_output_schema()).validate(data)
     wire = result.stdout.encode("utf-8")
     for secret in (
         b"PROJECT_DESCRIPTION_SECRET",

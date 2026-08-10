@@ -1537,7 +1537,7 @@ None.
   "tag": "v0.6.4",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 20,
+  "schema_version": 21,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],

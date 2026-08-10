@@ -35,7 +35,7 @@
     "schema_id": "anvil.state.project-snapshot.v1",
     "tasks": []
   },
-  "schema_version": 20,
+  "schema_version": 21,
   "snapshot_digest": "7783f9dd27bb5effb40e705c2386213ab5e693661b2da7e377ca801bafc52c75",
   "truncated": false
 }
