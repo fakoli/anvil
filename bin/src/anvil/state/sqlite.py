@@ -6549,7 +6549,7 @@ class SqliteBackend:
         Each Requirement was already validated by ``_check_prd_parsed``; the
         ``model_validate`` calls here are an infallible rebuild.
         """
-        self._validate_prd_material_binding(
+        material_sha256 = self._resolved_prd_material_sha256(
             payload,
             current=payload.expected_absent is True,
         )
@@ -6678,7 +6678,7 @@ class SqliteBackend:
                 payload.target_tag,
                 1 if payload.is_default else 0,
                 *source_values,
-                payload.material_sha256,
+                material_sha256,
                 event.id,
                 now,
                 now,
@@ -6720,16 +6720,23 @@ class SqliteBackend:
         conn.execute("RELEASE prd_requirements_replace")
 
     @staticmethod
-    def _validate_prd_material_binding(
+    def _resolved_prd_material_sha256(
         payload: PrdParsedPayload | PrdRevisedPayload,
         *,
         current: bool,
-    ) -> None:
-        """Recompute exact material identity in both live and replay writes."""
+    ) -> str | None:
+        """Return validated or replay-derived exact PRD material identity.
+
+        Current v21 producers must supply the digest. Historical v18-v20
+        content events can carry complete exact-source provenance without the
+        later material field; derive it deterministically during replay so an
+        empty rebuild matches the v20→v21 migration.
+        """
         if payload.material_sha256 is None:
             if current:
                 raise ValueError("current PRD content event requires a material digest")
-            return
+            if payload.provenance_state != "available":
+                return None
         if payload.source_text is None or payload.source_sha256 is None:
             raise ValueError("material digest requires available exact PRD source")
         from types import SimpleNamespace
@@ -6747,8 +6754,18 @@ class SqliteBackend:
             ),
             payload.title,
         )
-        if actual != payload.material_sha256:
+        if payload.material_sha256 is not None and actual != payload.material_sha256:
             raise ValueError("PRD material digest does not match exact source bytes")
+        return actual
+
+    @staticmethod
+    def _validate_prd_material_binding(
+        payload: PrdParsedPayload | PrdRevisedPayload,
+        *,
+        current: bool,
+    ) -> None:
+        """Recompute exact material identity in both live and replay checks."""
+        SqliteBackend._resolved_prd_material_sha256(payload, current=current)
 
     @staticmethod
     def _prd_source_projection_values(
@@ -6969,7 +6986,7 @@ class SqliteBackend:
         The whole body runs inside a SAVEPOINT so a failure mid-revision leaves
         no partial state within the outer transaction.
         """
-        self._validate_prd_material_binding(
+        material_sha256 = self._resolved_prd_material_sha256(
             payload,
             current=payload.lineage_version == 1,
         )
@@ -7014,7 +7031,7 @@ class SqliteBackend:
         # Legacy events (expected_status=None) keep their old payload-authority
         # semantics exactly, including historical demotions.
         if payload.lineage_version == 1:
-            material_change = payload.material_sha256 != current_assumptions_row[3]
+            material_change = material_sha256 != current_assumptions_row[3]
         else:
             material_change = bool(
                 superseded_objects or revised_assumptions != current_assumptions
@@ -7045,7 +7062,7 @@ class SqliteBackend:
                 lifecycle_values = (
                     payload.revision,
                     payload.source_sha256,
-                    payload.material_sha256,
+                    material_sha256,
                     event.id,
                 )
                 review_event_id = current_assumptions_row[9]
@@ -7113,7 +7130,7 @@ class SqliteBackend:
                     payload.target_tag,
                     new_revision,
                     *source_values,
-                    payload.material_sha256,
+                    material_sha256,
                     event.id,
                     *lifecycle_values,
                     review_event_id,

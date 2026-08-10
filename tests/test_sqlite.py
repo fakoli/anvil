@@ -510,6 +510,114 @@ class TestSchemaMismatch:
 
 
 class TestAuditGuarantee:
+    @pytest.mark.parametrize(
+        ("prd_id", "is_default"),
+        [("default", True), ("named-release", False)],
+    )
+    def test_v20_exact_source_migration_matches_empty_v21_replay_material(
+        self,
+        tmp_path: Path,
+        prd_id: str,
+        is_default: bool,
+    ) -> None:
+        """Legacy exact-source events derive identical v21 material lineage."""
+        events_path = str(tmp_path / "events.jsonl")
+        db_path = str(tmp_path / "state.db")
+        backend = _make_backend(tmp_path, _make_clock())
+        try:
+            backend.append(_make_project_event())
+            payload = _make_prd_parsed_payload()
+            payload.pop("material_sha256")
+            source = """\
+# Project: Test Project
+
+## Summary
+
+A test PRD summary.
+
+## Goals
+
+- Goal one.
+
+## Requirements
+
+- R001: The system does X.
+"""
+            source_bytes = source.encode("utf-8")
+            payload.update({
+                "prd_id": prd_id,
+                "is_default": is_default,
+                "source_text": source,
+                "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "source_size_bytes": len(source_bytes),
+            })
+            backend.append(
+                _make_event(
+                    "prd.parsed",
+                    payload,
+                    target_id=prd_id,
+                )
+            )
+        finally:
+            backend.close()
+
+        # Model the exact v20 projection: complete v18 source provenance and
+        # content event in the immutable log, but no v21 material columns or
+        # trustworthy lifecycle binding. Existing columns are nulled rather
+        # than dropped so this test remains portable across SQLite builds.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE prds SET status = 'approved', material_sha256 = NULL, "
+                "content_event_id = NULL WHERE id = ?",
+                (prd_id,),
+            )
+            conn.execute("PRAGMA user_version = 20")
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated_backend = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        migrated_backend.initialize()
+        try:
+            migrated = migrated_backend.get_prd(prd_id)
+            assert migrated is not None
+            migrated_binding = (
+                migrated.status,
+                migrated.revision,
+                migrated.source_sha256,
+                migrated.material_sha256,
+                migrated.content_event_id,
+                migrated.lifecycle_revision,
+                migrated.lifecycle_source_sha256,
+                migrated.lifecycle_material_sha256,
+                migrated.lifecycle_content_event_id,
+            )
+            assert migrated.status.value == "draft"
+            assert migrated.material_sha256 is not None
+            assert migrated.content_event_id == "E000002"
+            migrated_backend.replay_from_empty(events_path)
+            replayed = migrated_backend.get_prd(prd_id)
+            assert replayed is not None
+            replayed_binding = (
+                replayed.status,
+                replayed.revision,
+                replayed.source_sha256,
+                replayed.material_sha256,
+                replayed.content_event_id,
+                replayed.lifecycle_revision,
+                replayed.lifecycle_source_sha256,
+                replayed.lifecycle_material_sha256,
+                replayed.lifecycle_content_event_id,
+            )
+            assert replayed_binding == migrated_binding
+        finally:
+            migrated_backend.close()
+
     def test_replay_from_empty_reconstructs_state_exactly(self, tmp_path: Path) -> None:
         """Replay 3-5 events from events.jsonl; reconstructed state.db matches original.
 
