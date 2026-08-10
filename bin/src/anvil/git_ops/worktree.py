@@ -36,6 +36,7 @@ from anvil.state.models import ClaimGitMetadata
 
 _MAX_GIT_OBSERVATION_BYTES = 8 * 1024 * 1024
 _GIT_OBSERVATION_POLL_SECONDS = 0.01
+_MAX_REF_TRANSACTION_OUTPUT_BYTES = 64 * 1024
 
 __all__ = [
     "ClaimGitPlan",
@@ -1246,82 +1247,272 @@ def _compensate_values(
     if not plan.git_metadata_available or plan.branch is None or plan.claim_start_sha is None:
         return
     branch_ref = f"refs/heads/{plan.branch}"
+    caller = Path(plan.caller_worktree_path or cwd)
+
+    def owns_branch() -> bool:
+        return _branch_ownership_matches(
+            plan,
+            cwd=cwd,
+            ownership_token=ownership_token,
+            branch_identity=branch_identity,
+            branch_reflog_state=branch_reflog_state,
+            branch_marker_created=branch_marker_created,
+        )
+
+    def clean_owned_artifacts_while_locked() -> bool:
+        if worktree_created:
+            if (
+                plan.target_path is None
+                or worktree_identity is None
+                or _worktree_identity(plan) != worktree_identity
+            ):
+                return False
+            owner = next(
+                (
+                    item
+                    for item in _worktree_topology(cwd)
+                    if _path_key(item.path) == _path_key(plan.target_path)
+                ),
+                None,
+            )
+            if (
+                owner is None
+                or owner.branch_ref != branch_ref
+                or owner.head_sha != plan.claim_start_sha
+                or _working_tree_dirty(Path(plan.target_path))
+            ):
+                return False
+            _mutate_git(
+                ["worktree", "remove", "--force", plan.target_path],
+                cwd,
+                code="worktree_compensation_failed",
+            )
+
+        return not any(
+            item.branch_ref == branch_ref for item in _worktree_topology(cwd)
+        )
+
+    def restore_owned_checkout() -> None:
+        owns_checkout = bool(
+            checkout_identity is not None
+            and _checkout_identity(plan, cwd) == checkout_identity
+        )
+        if caller_checkout_changed and owns_checkout:
+            if plan.caller_head_ref is not None:
+                restore_name = plan.caller_head_ref.removeprefix("refs/heads/")
+                _mutate_git(
+                    ["checkout", "--no-guess", restore_name],
+                    caller,
+                    code="checkout_compensation_failed",
+                )
+            elif plan.caller_head_sha is not None:
+                _mutate_git(
+                    ["checkout", "--detach", plan.caller_head_sha],
+                    caller,
+                    code="checkout_compensation_failed",
+                )
+
+    if branch_created and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
+        # Checkout needs to update HEAD while it still points at the claim
+        # branch, which Git refuses once that branch ref is transaction-locked.
+        # Restore it first; the prepared delete below then closes the destructive
+        # same-SHA replacement window for the worktree/ref cleanup itself.
+        if owns_branch():
+            restore_owned_checkout()
+        _delete_owned_branch_transaction(
+            plan,
+            cwd=cwd,
+            owner_check=owns_branch,
+            on_locked=clean_owned_artifacts_while_locked,
+        )
+    elif owns_branch():
+        restore_owned_checkout()
+        clean_owned_artifacts_while_locked()
+    if branch_marker_created and ownership_token is not None:
+        _remove_branch_marker(ownership_token, plan, cwd)
+
+
+def _branch_ownership_matches(
+    plan: ClaimGitPlan,
+    *,
+    cwd: Path,
+    ownership_token: str | None,
+    branch_identity: tuple[int, int, int] | None,
+    branch_reflog_state: tuple[int, str] | None,
+    branch_marker_created: bool,
+) -> bool:
     current_reflog_state = _branch_reflog_state(plan, cwd)
     current_reflog_count = _branch_reflog_entry_count(plan, cwd)
+    current_branch_identity = _branch_identity(plan)
     marker_matches = bool(
         branch_marker_created
         and ownership_token is not None
         and _branch_marker_matches(ownership_token, plan, cwd)
     )
     if branch_reflog_state is not None and current_reflog_state is not None:
-        owns_branch = current_reflog_state == branch_reflog_state
-    elif branch_reflog_state is not None:
-        # Expiring a reflog leaves a zero-entry log and is compatible with the
-        # invocation's durable marker. A delete/recreate ABA creates a fresh
-        # entry (often with an empty message), so it must not fall back to the
-        # marker merely because the original state tuple no longer parses.
-        owns_branch = current_reflog_count == 0 and marker_matches
-    elif branch_identity is not None and _branch_identity(plan) is not None:
-        owns_branch = _branch_identity(plan) == branch_identity
-    else:
-        owns_branch = marker_matches
-    owns_worktree = bool(
-        worktree_identity is not None
-        and _worktree_identity(plan) == worktree_identity
-        and owns_branch
-    )
-    if worktree_created and owns_worktree and plan.target_path is not None:
-        owner = next(
-            (
-                item
-                for item in _worktree_topology(cwd)
-                if _path_key(item.path) == _path_key(plan.target_path)
-            ),
-            None,
+        return current_reflog_state == branch_reflog_state
+    if branch_reflog_state is not None and current_reflog_count not in (None, 0):
+        # A recreated branch can have a fresh reflog that lacks a parseable
+        # message. Its non-zero entry count is still a continuity mismatch.
+        return False
+    if branch_identity is not None and current_branch_identity is not None:
+        # A still-loose ref is an independent continuity witness. Preserve a
+        # replacement whenever its filesystem identity differs, even if the
+        # repository disables ordinary reflog updates.
+        return current_branch_identity == branch_identity
+    if branch_reflog_state is not None:
+        # Normal packing/reftable maintenance removes the loose-ref witness;
+        # normal reflog expiry leaves an exact zero-entry observation. Only
+        # then may the invocation's durable marker carry ownership forward.
+        return current_reflog_count == 0 and marker_matches
+    return marker_matches
+
+
+def _delete_owned_branch_transaction(
+    plan: ClaimGitPlan,
+    *,
+    cwd: Path,
+    owner_check: Callable[[], bool],
+    on_locked: Callable[[], bool],
+) -> bool:
+    """Delete an owned branch only after lock-scoped continuity revalidation."""
+    if plan.branch is None or plan.claim_start_sha is None:
+        return False
+    branch_ref = f"refs/heads/{plan.branch}"
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    process: subprocess.Popen[bytes] | None = None
+    prepared = False
+    with tempfile.TemporaryDirectory(prefix="anvil-ref-transaction-") as temp:
+        stdout_path = Path(temp) / "stdout"
+        stderr_path = Path(temp) / "stderr"
+        try:
+            with stdout_path.open("wb") as stdout_file, stderr_path.open(
+                "wb"
+            ) as stderr_file:
+                process = subprocess.Popen(
+                    ["git", "update-ref", "--stdin"],
+                    cwd=str(cwd),
+                    stdin=subprocess.PIPE,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    env=env,
+                )
+            if process.stdin is None:
+                raise ClaimPlanError(
+                    "branch_compensation_failed", "Git ref transaction is unavailable"
+                )
+            request = (
+                "start\n"
+                f"delete {branch_ref} {plan.claim_start_sha}\n"
+                "prepare\n"
+            ).encode("ascii")
+            process.stdin.write(request)
+            process.stdin.flush()
+            prepared = _wait_for_ref_transaction_prepare(
+                process, stdout_path=stdout_path, stderr_path=stderr_path
+            )
+            if not prepared:
+                return False
+            if not owner_check() or not on_locked():
+                _finish_ref_transaction(
+                    process,
+                    command=b"abort\n",
+                    expected=b"abort: ok\n",
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                )
+                prepared = False
+                return False
+            _finish_ref_transaction(
+                process,
+                command=b"commit\n",
+                expected=b"commit: ok\n",
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+            prepared = False
+            return True
+        except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+            raise ClaimPlanError(
+                "branch_compensation_failed", "Git ref transaction failed"
+            ) from exc
+        finally:
+            if process is not None and process.poll() is None:
+                if prepared and process.stdin is not None:
+                    try:
+                        process.stdin.write(b"abort\n")
+                        process.stdin.flush()
+                    except OSError:
+                        pass
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
+def _wait_for_ref_transaction_prepare(
+    process: subprocess.Popen[bytes],
+    *,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> bool:
+    deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if _ref_transaction_output_too_large(stdout_path, stderr_path):
+            raise ClaimPlanError(
+                "branch_compensation_failed", "Git ref transaction output is too large"
+            )
+        output = stdout_path.read_bytes() if stdout_path.exists() else b""
+        if b"prepare: ok\n" in output:
+            return True
+        if process.poll() is not None:
+            return False
+        time.sleep(_GIT_OBSERVATION_POLL_SECONDS)
+    raise subprocess.TimeoutExpired(process.args, _GIT_TIMEOUT_SECONDS)
+
+
+def _finish_ref_transaction(
+    process: subprocess.Popen[bytes],
+    *,
+    command: bytes,
+    expected: bytes,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> None:
+    if process.stdin is None:
+        raise ClaimPlanError(
+            "branch_compensation_failed", "Git ref transaction input is unavailable"
         )
-        if (
-            owner is not None
-            and owner.branch_ref == branch_ref
-            and owner.head_sha == plan.claim_start_sha
-            and not _working_tree_dirty(Path(plan.target_path))
-        ):
-            _mutate_git(
-                ["worktree", "remove", "--force", plan.target_path],
-                cwd,
-                code="worktree_compensation_failed",
-            )
-    caller = Path(plan.caller_worktree_path or cwd)
-    owns_checkout = bool(
-        checkout_identity is not None
-        and _checkout_identity(plan, cwd) == checkout_identity
-    )
-    if caller_checkout_changed and owns_checkout:
-        if plan.caller_head_ref is not None:
-            restore_name = plan.caller_head_ref.removeprefix("refs/heads/")
-            _mutate_git(
-                ["checkout", "--no-guess", restore_name],
-                caller,
-                code="checkout_compensation_failed",
-            )
-        elif plan.caller_head_sha is not None:
-            _mutate_git(
-                ["checkout", "--detach", plan.caller_head_sha],
-                caller,
-                code="checkout_compensation_failed",
-            )
-    if branch_created and owns_branch and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
-        branch_owner = next(
-            (item for item in _worktree_topology(cwd) if item.branch_ref == branch_ref),
-            None,
+    process.stdin.write(command)
+    process.stdin.flush()
+    process.stdin.close()
+    process.wait(timeout=_GIT_TIMEOUT_SECONDS)
+    if _ref_transaction_output_too_large(stdout_path, stderr_path):
+        raise ClaimPlanError(
+            "branch_compensation_failed", "Git ref transaction output is too large"
         )
-        if branch_owner is None:
-            _mutate_git(
-                ["update-ref", "-d", branch_ref, plan.claim_start_sha],
-                cwd,
-                code="branch_compensation_failed",
-            )
-    if branch_marker_created and ownership_token is not None:
-        _remove_branch_marker(ownership_token, plan, cwd)
+    output = stdout_path.read_bytes() if stdout_path.exists() else b""
+    if process.returncode != 0 or expected not in output:
+        raise ClaimPlanError(
+            "branch_compensation_failed", "Git ref transaction was refused"
+        )
+
+
+def _ref_transaction_output_too_large(stdout_path: Path, stderr_path: Path) -> bool:
+    try:
+        return (
+            stdout_path.stat().st_size + stderr_path.stat().st_size
+            > _MAX_REF_TRANSACTION_OUTPUT_BYTES
+        )
+    except OSError:
+        return True
 
 
 def finalize_claim_plan_tracker(

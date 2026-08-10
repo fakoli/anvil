@@ -1868,6 +1868,84 @@ class TestApplyClaimPlan:
 
         assert _ref_exists(git_repo, branch_ref)
 
+    @pytest.mark.parametrize("isolated", [False, True])
+    def test_disabled_reflog_aba_preserves_distinct_loose_ref(
+        self, git_repo: Path, isolated: bool
+    ) -> None:
+        _git(git_repo, "config", "core.logAllRefUpdates", "false")
+        plan = resolve_claim_plan(
+            "T011E2" if isolated else "T011E1",
+            "Disabled reflog ABA",
+            cwd=git_repo,
+            worktree=isolated,
+        )
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        branch_ref = f"refs/heads/{plan.branch}"
+        original_identity = worktree_mod._branch_identity(plan)
+
+        _git(git_repo, "update-ref", "-d", branch_ref, plan.claim_start_sha or "")
+        for index in range(16):
+            _git(
+                git_repo,
+                "update-ref",
+                f"refs/heads/agent/anvil-aba-identity-filler-{index}",
+                plan.claim_start_sha or "",
+                "",
+            )
+        _git(git_repo, "update-ref", branch_ref, plan.claim_start_sha or "", "")
+
+        assert original_identity is not None
+        assert worktree_mod._branch_identity(plan) != original_identity
+
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert _ref_exists(git_repo, branch_ref)
+        if isolated:
+            assert plan.target_path is not None
+            assert Path(plan.target_path).is_dir()
+
+    def test_branch_delete_revalidates_while_ref_is_locked(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = resolve_claim_plan(
+            "T011E3", "Locked branch compensation", cwd=git_repo, worktree=True
+        )
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        branch_ref = f"refs/heads/{plan.branch}"
+        original_check = worktree_mod._branch_ownership_matches
+        race_attempted = False
+        check_count = 0
+
+        def race_while_locked(*args: object, **kwargs: object) -> bool:
+            nonlocal check_count, race_attempted
+            check_count += 1
+            if check_count == 2:
+                race_attempted = True
+                result = subprocess.run(
+                    [
+                        "git",
+                        "update-ref",
+                        "-d",
+                        branch_ref,
+                        plan.claim_start_sha or "",
+                    ],
+                    cwd=git_repo,
+                    capture_output=True,
+                    check=False,
+                )
+                assert result.returncode != 0
+            return original_check(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            worktree_mod, "_branch_ownership_matches", race_while_locked
+        )
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert race_attempted is True
+        assert not _ref_exists(git_repo, branch_ref)
+        assert plan.target_path is not None
+        assert not Path(plan.target_path).exists()
+
     def test_dirty_owned_worktree_is_preserved_during_compensation(
         self, git_repo: Path
     ) -> None:
