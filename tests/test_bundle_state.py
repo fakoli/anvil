@@ -25,6 +25,7 @@ from anvil.state.models import (
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
+from tests.conftest import append_exact_approved_prd
 
 _T0 = datetime(2026, 7, 11, 18, 0, tzinfo=UTC)
 
@@ -77,19 +78,18 @@ def _seed(backend: SqliteBackend, *, second_prd: bool = False) -> None:
     )
     for prd_id in (["release", "other"] if second_prd else ["release"]):
         requirement_id = f"{prd_id}:R001"
-        backend.append(
-            _event(
-                "prd.parsed",
-                {
-                    "project_id": "proj",
-                    "prd_id": prd_id,
-                    "title": prd_id,
-                    "is_default": False,
-                    "status": "approved",
-                    "summary": "Bundle test.",
-                    "goals": ["Test bundles."],
-                    "non_goals": [],
-                    "requirements": [
+        append_exact_approved_prd(
+            backend,
+            timestamp=_T0,
+            project_id="proj",
+            prd_id=prd_id,
+            title=prd_id,
+            parsed_payload={
+                "is_default": False,
+                "summary": "Bundle test.",
+                "goals": ["Test bundles."],
+                "non_goals": [],
+                "requirements": [
                         {
                             "id": requirement_id,
                             "prd_id": prd_id,
@@ -98,14 +98,11 @@ def _seed(backend: SqliteBackend, *, second_prd: bool = False) -> None:
                             "source_paragraph": None,
                             "derived": False,
                         }
-                    ],
-                    "acceptance_criteria": ["Bundle persists."],
-                    "risks": [],
-                    "open_questions": [],
-                },
-                target_kind="prd",
-                target_id=prd_id,
-            )
+                ],
+                "acceptance_criteria": ["Bundle persists."],
+                "risks": [],
+                "open_questions": [],
+            },
         )
         feature_id = f"{prd_id}:F001"
         backend.append(

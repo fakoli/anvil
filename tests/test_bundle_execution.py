@@ -21,6 +21,7 @@ from anvil.state.models import BundleStatus, Event, EventDraft, ReviewDecision
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
+from tests.conftest import append_exact_approved_prd
 
 _NOW = datetime(2026, 7, 11, 18, 0, tzinfo=UTC)
 
@@ -154,21 +155,18 @@ def _seed(
             },
         )
     )
-    backend.append(
-        _event(
-            "prd.parsed",
-            "prd",
-            "release",
-            {
-                "project_id": "proj",
-                "prd_id": "release",
-                "title": "Release",
-                "is_default": False,
-                "status": "approved",
-                "summary": "",
-                "goals": [],
-                "non_goals": [],
-                "requirements": [
+    append_exact_approved_prd(
+        backend,
+        timestamp=_NOW,
+        project_id="proj",
+        prd_id="release",
+        title="Release",
+        parsed_payload={
+            "is_default": False,
+            "summary": "",
+            "goals": [],
+            "non_goals": [],
+            "requirements": [
                     {
                         "id": "release:R001",
                         "prd_id": "release",
@@ -185,11 +183,11 @@ def _seed(
                         "source_paragraph": None,
                         "derived": False,
                     }
-                ],
-                "acceptance_criteria": [],
-                "risks": [],
-                "open_questions": [],
-                "assumptions": [
+            ],
+            "acceptance_criteria": [],
+            "risks": [],
+            "open_questions": [],
+            "assumptions": [
                     {
                         "id": "A001",
                         "statement": "Use the existing repository conventions.",
@@ -208,9 +206,8 @@ def _seed(
                         "rationale": "It applies only outside this bundle.",
                         "requirement_ids": ["release:R002"],
                     },
-                ],
-            },
-        )
+            ],
+        },
     )
     task_ids = ["release:T001", "release:T002"]
     if external_dependency_status is not None:

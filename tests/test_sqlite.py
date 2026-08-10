@@ -2571,8 +2571,8 @@ class TestHandlePrdRevised:
         finally:
             b.close()
 
-    def test_pure_additive_revision_keeps_status(self, tmp_path: Path) -> None:
-        """A pure-additive revision (no superseded) keeps the payload's status."""
+    def test_pure_additive_unbound_revision_demotes_status(self, tmp_path: Path) -> None:
+        """A lineage-unbound content revision cannot preserve review authority."""
         b = _make_backend(tmp_path)
         try:
             self._parse_two_reqs(b)
@@ -2584,7 +2584,7 @@ class TestHandlePrdRevised:
                 ),
             )
             prd = b.get_prd()
-            assert prd.status == "reviewed"
+            assert prd.status == "draft"
             assert prd.revision == 2
             assert {r.id for r in b.list_requirements()} == {"R001", "R002", "R003"}
             lineage = _requirements_lineage(str(tmp_path / "state.db"))

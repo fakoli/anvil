@@ -1230,7 +1230,11 @@ class TestScanCommand:
                 "UPDATE requirements SET revision_superseded = 2 WHERE id = 'R001'"
             )
             conn.execute(
-                "UPDATE prds SET revision = 2, status = 'approved' WHERE is_default = 1"
+                "UPDATE prds SET revision = 2, source_revision = 2, "
+                "status = 'draft', lifecycle_revision = NULL, "
+                "lifecycle_source_sha256 = NULL, lifecycle_material_sha256 = NULL, "
+                "lifecycle_content_event_id = NULL, review_event_id = NULL "
+                "WHERE is_default = 1"
             )
             conn.commit()
         finally:
@@ -1269,7 +1273,11 @@ class TestScanCommand:
                 (huge_id,),
             )
             conn.execute(
-                "UPDATE prds SET revision = 2, status = 'approved' WHERE is_default = 1"
+                "UPDATE prds SET revision = 2, source_revision = 2, "
+                "status = 'draft', lifecycle_revision = NULL, "
+                "lifecycle_source_sha256 = NULL, lifecycle_material_sha256 = NULL, "
+                "lifecycle_content_event_id = NULL, review_event_id = NULL "
+                "WHERE is_default = 1"
             )
             conn.commit()
         finally:
@@ -1375,7 +1383,11 @@ class TestScanCommand:
                 (boundary_id, 2 if boundary_retired else None),
             )
             conn.execute(
-                "UPDATE prds SET revision = 2, status = 'approved' WHERE is_default = 1"
+                "UPDATE prds SET revision = 2, source_revision = 2, "
+                "status = 'draft', lifecycle_revision = NULL, "
+                "lifecycle_source_sha256 = NULL, lifecycle_material_sha256 = NULL, "
+                "lifecycle_content_event_id = NULL, review_event_id = NULL "
+                "WHERE is_default = 1"
             )
             conn.commit()
         finally:

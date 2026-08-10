@@ -9,10 +9,119 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from anvil.clock import FrozenClock
+
+
+def append_exact_approved_prd(
+    backend: Any,
+    *,
+    timestamp: datetime,
+    project_id: str,
+    prd_id: str,
+    title: str,
+    parsed_payload: dict[str, Any],
+) -> None:
+    """Append one current parse -> review -> approval test lineage."""
+    import hashlib
+
+    from anvil.planning.prd_persistence import material_content_sha256
+    from anvil.state.models import EventDraft
+
+    source = f"# Project: {title}\n"
+    source_bytes = source.encode()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    material_sha256 = material_content_sha256(
+        SimpleNamespace(
+            source_bytes=source_bytes,
+            markdown=source,
+            source_sha256=source_sha256,
+            source_size_bytes=len(source_bytes),
+            source_encoding="utf-8",
+        ),
+        title,
+    )
+    parsed = {
+        **parsed_payload,
+        "project_id": project_id,
+        "prd_id": prd_id,
+        "title": title,
+        "status": "draft",
+        "expected_absent": True,
+        "source_text": source,
+        "source_sha256": source_sha256,
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": 1,
+        "provenance_state": "available",
+        "content_available": True,
+        "material_sha256": material_sha256,
+    }
+    content_event = backend.append(
+        EventDraft(
+            timestamp=timestamp,
+            actor="seed",
+            action="prd.parsed",
+            target_kind="prd",
+            target_id=prd_id,
+            payload_json=parsed,
+        )
+    )
+    assert content_event is not None
+    review_event = backend.append(
+        EventDraft(
+            timestamp=timestamp,
+            actor="reviewer",
+            action="prd.reviewed",
+            target_kind="prd",
+            target_id=prd_id,
+            payload_json={
+                "project_id": project_id,
+                "prd_id": prd_id,
+                "reviewer": "reviewer",
+                "binding_version": 1,
+                "expected_revision": 1,
+                "expected_status": "draft",
+                "source_sha256": source_sha256,
+                "material_sha256": material_sha256,
+                "content_event_id": content_event.id,
+            },
+        )
+    )
+    assert review_event is not None
+    backend.append(
+        EventDraft(
+            timestamp=timestamp,
+            actor="approver",
+            action="prd.approved",
+            target_kind="prd",
+            target_id=prd_id,
+            payload_json={
+                "project_id": project_id,
+                "prd_id": prd_id,
+                "approver": "approver",
+                "binding_version": 1,
+                "expected_revision": 1,
+                "expected_status": "reviewed",
+                "source_sha256": source_sha256,
+                "material_sha256": material_sha256,
+                "content_event_id": content_event.id,
+                "review_event_id": review_event.id,
+            },
+        )
+    )
+    state_dir = Path(backend._events_path).parent  # noqa: SLF001
+    source_path = (
+        state_dir / "prd.md"
+        if prd_id == "default"
+        else state_dir / "prds" / f"{prd_id}.md"
+    )
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(source_bytes)
 
 
 def _explicitly_selects_live_github_args(args: Sequence[str]) -> bool:

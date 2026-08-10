@@ -20,6 +20,7 @@ from anvil.clock import SystemClock
 from anvil.state.models import EventDraft
 from anvil.state.sqlite import SqliteBackend
 from anvil.workflows.tasks import create_workflow_task, submit_workflow_evidence
+from tests.conftest import append_exact_approved_prd
 
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=UTC)
 _N_THREADS = 8
@@ -46,13 +47,30 @@ def _setup_prd(b: SqliteBackend) -> None:
                {"id": "proj-1", "name": "P", "description": "",
                 "created_at": _T0.isoformat(), "updated_at": _T0.isoformat()}, "project"))
     b.append(ev("state.initialized", {}, "project"))
-    b.append(ev("prd.parsed",
-               {"project_id": "proj-1", "status": "draft", "summary": "S.",
-                "goals": ["G."], "non_goals": [],
-                "requirements": [{"id": "R001", "prd_section": "requirements",
-                                  "text": "R.", "source_paragraph": None, "derived": False}],
-                "acceptance_criteria": ["AC."], "risks": [], "open_questions": []}, "prd"))
-    b.append(ev("prd.reviewed", {"project_id": "proj-1", "reviewer": "a"}, "prd"))
+    append_exact_approved_prd(
+        b,
+        timestamp=_T0,
+        project_id="proj-1",
+        prd_id="default",
+        title="P",
+        parsed_payload={
+            "summary": "S.",
+            "goals": ["G."],
+            "non_goals": [],
+            "requirements": [
+                {
+                    "id": "R001",
+                    "prd_section": "requirements",
+                    "text": "R.",
+                    "source_paragraph": None,
+                    "derived": False,
+                }
+            ],
+            "acceptance_criteria": ["AC."],
+            "risks": [],
+            "open_questions": [],
+        },
+    )
 
 
 @dataclass

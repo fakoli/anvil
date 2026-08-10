@@ -9,6 +9,7 @@ import pickle
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, BinaryIO
 
 import pytest
@@ -30,6 +31,7 @@ from anvil.cli._helpers import (
     validate_prd_id,
 )
 from anvil.clock import FrozenClock
+from anvil.planning.prd_persistence import material_content_sha256
 from anvil.read_contracts import PrdScopedRefV1
 from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.models import PRD, EventDraft
@@ -49,6 +51,35 @@ def _available_source_fields(source_bytes: bytes, revision: int) -> dict[str, An
         "source_revision": revision,
         "provenance_state": "available",
         "content_available": True,
+    }
+
+
+def _source_title(source_bytes: bytes) -> str:
+    heading = source_bytes.decode("utf-8").splitlines()[0].lstrip("# ")
+    return heading.removeprefix("Project:").strip()
+
+
+def _current_source_fields(
+    source_bytes: bytes,
+    revision: int,
+    *,
+    title: str | None = None,
+) -> dict[str, Any]:
+    markdown = source_bytes.decode("utf-8")
+    resolved_title = title or _source_title(source_bytes)
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    return {
+        **_available_source_fields(source_bytes, revision),
+        "material_sha256": material_content_sha256(
+            SimpleNamespace(
+                source_bytes=source_bytes,
+                markdown=markdown,
+                source_sha256=source_sha256,
+                source_size_bytes=len(source_bytes),
+                source_encoding="utf-8",
+            ),
+            resolved_title,
+        ),
     }
 
 
@@ -106,6 +137,7 @@ def _append_available_projection_parse(
     *,
     prd_id: str = "release",
 ) -> str:
+    title = _source_title(source_bytes)
     event = backend.append(
         _projection_event(
             "prd.parsed",
@@ -113,10 +145,10 @@ def _append_available_projection_parse(
                 "project_id": "project",
                 "prd_id": prd_id,
                 "expected_absent": True,
-                "title": "Release",
+                "title": title,
                 "is_default": False,
                 "status": "draft",
-                **_available_source_fields(source_bytes, 1),
+                **_current_source_fields(source_bytes, 1, title=title),
             },
             target_kind="prd",
             target_id=prd_id,
@@ -481,7 +513,7 @@ def test_projection_model_defaults_legacy_provenance_to_unavailable() -> None:
     assert prd.source_revision is None
 
 
-def test_schema_v18_migration_preserves_lifecycle_tasks_and_marks_legacy_unavailable(
+def test_schema_v18_migration_preserves_tasks_and_demotes_unbound_lifecycle(
     tmp_path: Path,
 ) -> None:
     state_dir = tmp_path / "migration"
@@ -494,7 +526,6 @@ def test_schema_v18_migration_preserves_lifecycle_tasks_and_marks_legacy_unavail
                 {
                     "project_id": "project",
                     "prd_id": "release",
-                    "expected_absent": True,
                     "title": "Release",
                     "is_default": False,
                 },
@@ -615,7 +646,7 @@ def test_schema_v18_migration_preserves_lifecycle_tasks_and_marks_legacy_unavail
         assert migrated.get_schema_version() == SCHEMA_VERSION == 21
         prd = migrated.get_prd("release")
         assert prd is not None
-        assert prd.status.value == "approved"
+        assert prd.status.value == "draft"
         assert prd.revision == 4
         assert prd.provenance_state == "legacy_unbound"
         assert prd.content_available is False
@@ -685,8 +716,8 @@ def test_revision_projection_atomically_replaces_source_binding(
                     "revision": 2,
                     "expected_status": "approved",
                     "status": "approved",
-                    "title": "Release revised",
-                    **_available_source_fields(revised, 2),
+                    "title": _source_title(revised),
+                    **_current_source_fields(revised, 2),
                 },
                 target_kind="prd",
                 target_id="release",
@@ -695,7 +726,7 @@ def test_revision_projection_atomically_replaces_source_binding(
         )
         prd = backend.get_prd("release")
         assert prd is not None
-        assert prd.status.value == "approved"
+        assert prd.status.value == "draft"
         assert prd.revision == prd.source_revision == 2
         assert prd.source_bytes == revised
         assert prd.source_sha256 == hashlib.sha256(revised).hexdigest()
@@ -751,7 +782,8 @@ def test_projection_validation_and_storage_failure_preserve_prior_binding(
             "revision": 2,
             "expected_status": "draft",
             "status": "draft",
-            **_available_source_fields(revised, 2),
+            "title": _source_title(revised),
+            **_current_source_fields(revised, 2),
         }
         invalid["source_sha256"] = "0" * 64
         with pytest.raises(EventRejected, match="payload validation"):
@@ -777,7 +809,8 @@ def test_projection_validation_and_storage_failure_preserve_prior_binding(
             "revision": 2,
             "expected_status": "draft",
             "status": "draft",
-            **_available_source_fields(revised, 2),
+            "title": _source_title(revised),
+            **_current_source_fields(revised, 2),
         }
         with pytest.raises(TransactionAborted, match="log line remains"):
             backend.append(
@@ -1607,8 +1640,8 @@ def test_events_only_replay_reconstructs_each_byte_distinct_revision(
                     "revision": 2,
                     "expected_status": "draft",
                     "status": "draft",
-                    "title": "Release revised",
-                    **_available_source_fields(revision_two, 2),
+                    "title": _source_title(revision_two),
+                    **_current_source_fields(revision_two, 2),
                 },
                 target_kind="prd",
                 target_id="release",
@@ -1707,7 +1740,6 @@ def test_legacy_replay_marks_source_content_unavailable_without_digest(
                 {
                     "project_id": "project",
                     "prd_id": "legacy",
-                    "expected_absent": True,
                     "title": "Legacy",
                     "is_default": False,
                     "status": "draft",
