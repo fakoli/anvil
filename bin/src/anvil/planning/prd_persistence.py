@@ -40,11 +40,22 @@ PRD_TITLE_SENTINEL = "<ANVIL-PRD-TITLE-V1>"
 
 
 class ExactPrdSource(Protocol):
-    source_bytes: bytes
-    markdown: str
-    source_sha256: str
-    source_size_bytes: int
-    source_encoding: str
+    """Read-only exact source view accepted by the persistence service."""
+
+    @property
+    def source_bytes(self) -> bytes: ...
+
+    @property
+    def markdown(self) -> str: ...
+
+    @property
+    def source_sha256(self) -> str: ...
+
+    @property
+    def source_size_bytes(self) -> int: ...
+
+    @property
+    def source_encoding(self) -> str: ...
 
 
 class PrdRevisionError(ValueError):
