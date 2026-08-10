@@ -867,6 +867,54 @@ class TestBundleTools:
         _add_task(state_dir, task_id="T002", likely_files=["src/two.py"])
         _add_task(state_dir, task_id="T003", likely_files=["src/three.py"])
 
+    def test_claim_bundle_releases_when_source_changes_during_linearization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.git_ops as git_ops
+        from anvil.cli._helpers import prd_source_path
+
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        source_path = prd_source_path(tmp_path / ".anvil", "default")
+        original = git_ops.revalidate_claim_plan
+
+        def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
+            original(plan, cwd=cwd)
+            source_path.write_bytes(
+                source_path.read_bytes() + b"\n<!-- concurrent bundle drift -->\n"
+            )
+
+        monkeypatch.setattr(
+            git_ops, "revalidate_claim_plan", drift_after_git_revalidation
+        )
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001", "T002"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                await client.call_tool(
+                    "claim_bundle",
+                    {"bundle_id": "B001", "actor": "coordinator"},
+                )
+
+        with pytest.raises(ToolError, match="prd_source_unapproved"):
+            _run(run())
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM bundle_claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+
     def test_create_read_claim_packet_and_progress(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2419,6 +2467,48 @@ class TestClaimTask:
             "--attestation-file",
             "<path>",
         ]
+
+    def test_claim_releases_when_source_changes_during_linearization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.git_ops as git_ops
+        from anvil.cli._helpers import prd_source_path
+
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="approved")
+        monkeypatch.chdir(tmp_path)
+        source_path = prd_source_path(state_dir, "default")
+        original = git_ops.revalidate_claim_plan
+
+        def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
+            original(plan, cwd=cwd)
+            source_path.write_bytes(
+                source_path.read_bytes() + b"\n<!-- concurrent task drift -->\n"
+            )
+
+        monkeypatch.setattr(
+            git_ops, "revalidate_claim_plan", drift_after_git_revalidation
+        )
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "claim_task",
+                    {"task_id": "T001", "claimed_by": "agent-x"},
+                )
+
+        with pytest.raises(ToolError, match="prd_source_unapproved"):
+            _run(run())
+        with sqlite3.connect(state_dir / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id='T001'"
+            ).fetchone()[0] == "ready"
 
     def test_happy_path_returns_claim_response(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)

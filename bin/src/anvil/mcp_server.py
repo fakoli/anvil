@@ -1426,6 +1426,17 @@ def claim_task(
                     operation_locked=True,
                 )
                 try:
+                    require_canonical_prd_claim_binding(
+                        state_dir,
+                        backend.get_prd(task.prd_id),
+                    )
+                except BaseException:
+                    manager.release(
+                        result.claim.id,
+                        reason="canonical PRD source changed during claim",
+                    )
+                    raise
+                try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
                 except BaseException:
                     try:
@@ -4661,6 +4672,17 @@ def claim_bundle(
                     ),
                     git_metadata=metadata,
                 )
+                try:
+                    require_canonical_prd_claim_binding(
+                        state_dir,
+                        backend.get_prd(bundle.prd_id),
+                    )
+                except BaseException:
+                    manager.release(
+                        bundle_id,
+                        reason="canonical PRD source changed during claim",
+                    )
+                    raise
                 try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
                 except BaseException:

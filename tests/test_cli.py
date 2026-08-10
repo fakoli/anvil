@@ -5864,6 +5864,99 @@ class TestClaimCommand:
                 "SELECT COUNT(*) FROM claims WHERE status='active'"
             ).fetchone()[0] == 0
 
+    def test_new_claim_releases_when_source_changes_during_linearization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.git_ops as git_ops
+
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        before_branch = _git_current_branch(tmp_path)
+        source_path = tmp_path / ".anvil" / "prd.md"
+        original = git_ops.revalidate_claim_plan
+
+        def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
+            original(plan, cwd=cwd)
+            source_path.write_bytes(
+                source_path.read_bytes() + b"\n<!-- concurrent source drift -->\n"
+            )
+
+        monkeypatch.setattr(
+            git_ops, "revalidate_claim_plan", drift_after_git_revalidation
+        )
+
+        refused = _invoke_cmd(
+            tmp_path,
+            ["claim", task_id, "--actor", "race-agent", "--json"],
+        )
+
+        assert refused.exit_code == 1
+        assert json.loads(refused.output)["error"]["code"] == "prd_source_unapproved"
+        assert _git_current_branch(tmp_path) == before_branch
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()[0] == "ready"
+
+    def test_new_bundle_claim_releases_when_source_changes_during_linearization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.git_ops as git_ops
+
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        created = _invoke_cmd(
+            tmp_path,
+            [
+                "bundle",
+                "create",
+                "B001",
+                task_id,
+                "--prd",
+                "default",
+                "--coordinator",
+                "coordinator",
+                "--actor",
+                "planner",
+                "--json",
+            ],
+        )
+        assert created.exit_code == 0, created.output
+        before_branch = _git_current_branch(tmp_path)
+        source_path = tmp_path / ".anvil" / "prd.md"
+        original = git_ops.revalidate_claim_plan
+
+        def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
+            original(plan, cwd=cwd)
+            source_path.write_bytes(
+                source_path.read_bytes() + b"\n<!-- concurrent bundle drift -->\n"
+            )
+
+        monkeypatch.setattr(
+            git_ops, "revalidate_claim_plan", drift_after_git_revalidation
+        )
+
+        refused = _invoke_cmd(
+            tmp_path,
+            ["claim", "B001", "--bundle", "--actor", "coordinator", "--json"],
+        )
+
+        assert refused.exit_code == 1
+        assert json.loads(refused.output)["error"]["code"] == "prd_source_unapproved"
+        assert _git_current_branch(tmp_path) == before_branch
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM bundle_claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+
     def test_existing_claim_can_renew_after_canonical_source_drift(
         self, tmp_path: Path
     ) -> None:
