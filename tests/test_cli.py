@@ -2524,6 +2524,62 @@ class TestPrdList:
 
 
 class TestPrdReparse:
+    def test_byte_identical_prd_revision_is_exact_source_noop(
+        self, tmp_path: Path
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+        from anvil.planning.prd_persistence import (
+            PROVIDER_PRD_CONTENT_OPERATION,
+            PROVIDER_READS_MERGE_COMMIT,
+        )
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            before = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert before is not None
+        events_before = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
+
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"]["action"] == "unchanged"
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == events_before
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            after = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert after is not None
+        assert (
+            after.revision,
+            after.source_revision,
+            after.source_sha256,
+            after.status,
+            after.updated_at,
+        ) == (
+            before.revision,
+            before.source_revision,
+            before.source_sha256,
+            before.status,
+            before.updated_at,
+        )
+        assert PROVIDER_PRD_CONTENT_OPERATION == (
+            "state.prd.content",
+            1,
+            "anvil.state.prd-content.v1",
+        )
+        assert PROVIDER_READS_MERGE_COMMIT == (
+            "09914b40ffa56900cb47e6990fd62b5e42b212fc"
+        )
+
     def test_first_parse_emits_parsed_reparse_emits_revised_with_diff(
         self, tmp_path: Path
     ) -> None:

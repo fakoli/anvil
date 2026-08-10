@@ -39,6 +39,7 @@ repo. No ``.db`` file is tracked.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -937,6 +938,102 @@ def _build_two_prd_multi_revision(
         prd_id="v0.2",
     ))
     return b
+
+
+def test_prd_revision_digest_status_replays_exact_source_binding(
+    tmp_path: Path,
+) -> None:
+    normal_dir = tmp_path / "normal-source"
+    replay_dir = tmp_path / "replay-source"
+    normal_dir.mkdir()
+    replay_dir.mkdir()
+    normal = _make_backend(normal_dir)
+    replay = _make_backend(replay_dir)
+    source_v1 = "# Project: Exact\r\n\r\n## Summary\r\nCafe\u0301\r\n".encode()
+    source_v2 = "# Project: Exact\r\n\r\n## Summary\r\nCafé 🚀\r\n".encode()
+
+    def binding(source: bytes, revision: int) -> dict[str, Any]:
+        return {
+            "source_text": source.decode(),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "source_size_bytes": len(source),
+            "source_encoding": "utf-8",
+            "source_revision": revision,
+            "provenance_state": "available",
+            "content_available": True,
+        }
+
+    try:
+        normal.append(EventDraft(
+            timestamp=_T0,
+            actor="test",
+            action="project.created",
+            target_kind="project",
+            target_id="proj-source",
+            payload_json={
+                "id": "proj-source",
+                "name": "Exact source",
+                "description": "",
+                "created_at": _T0.isoformat(),
+                "updated_at": _T0.isoformat(),
+            },
+        ))
+        normal.append(_prd_event(
+            "prd.parsed",
+            {
+                "project_id": "proj-source",
+                "prd_id": DEFAULT_PRD_ID,
+                "is_default": True,
+                "status": "draft",
+                "summary": "v1",
+                "requirements": [_req_dict("R001", "one")],
+                **binding(source_v1, 1),
+            },
+            prd_id=DEFAULT_PRD_ID,
+        ))
+        normal.append(_prd_event(
+            "prd.revised",
+            {
+                "project_id": "proj-source",
+                "prd_id": DEFAULT_PRD_ID,
+                "revision": 2,
+                "expected_status": "draft",
+                "is_default": True,
+                "status": "draft",
+                "summary": "v2",
+                "requirements_added": [],
+                "requirements_superseded": [],
+                "requirements_unchanged": [_req_dict("R001", "one")],
+                **binding(source_v2, 2),
+            },
+            prd_id=DEFAULT_PRD_ID,
+        ))
+        replay.replay_from_empty(str(normal_dir / "events.jsonl"))
+        live = normal.get_prd(DEFAULT_PRD_ID)
+        rebuilt = replay.get_prd(DEFAULT_PRD_ID)
+        assert live is not None and rebuilt is not None
+        assert (
+            rebuilt.revision,
+            rebuilt.source_revision,
+            rebuilt.source_sha256,
+            rebuilt.source_bytes,
+            rebuilt.status,
+        ) == (
+            live.revision,
+            live.source_revision,
+            live.source_sha256,
+            live.source_bytes,
+            live.status,
+        ) == (
+            2,
+            2,
+            hashlib.sha256(source_v2).hexdigest(),
+            source_v2,
+            models.PRDStatus.draft,
+        )
+    finally:
+        normal.close()
+        replay.close()
 
 
 def test_two_prd_replay_byte_equivalence(tmp_path: Path) -> None:

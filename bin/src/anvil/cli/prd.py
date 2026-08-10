@@ -339,6 +339,10 @@ def prd_parse(
     """
     from anvil.clock import SystemClock
     from anvil.planning.diagnostics import format_parse_error, parse_diagnostic_report
+    from anvil.planning.prd_persistence import (
+        PrdRevisionError,
+        build_prd_persistence_plan,
+    )
     from anvil.planning.template import parse_prd
 
     state_dir = _resolve_state_dir(cwd)
@@ -371,18 +375,6 @@ def prd_parse(
         typer.echo(f"Error: {detail}{suffix}", err=True)
         raise typer.Exit(code=1) from exc
     markdown = source.markdown
-
-    def source_binding(revision: int) -> dict[str, object]:
-        """Bind this invocation's one exact source read to its PRD revision."""
-        return {
-            "source_text": source.markdown,
-            "source_sha256": source.source_sha256,
-            "source_size_bytes": source.source_size_bytes,
-            "source_encoding": source.source_encoding,
-            "source_revision": revision,
-            "provenance_state": "available",
-            "content_available": True,
-        }
 
     result = parse_prd(markdown, prd_id=parse_prd_id)
 
@@ -428,197 +420,34 @@ def prd_parse(
         raise typer.Exit(code=1)
 
     backend = _open_backend(state_dir)
-    revised = False
+    persistence_action = "parsed"
     effective_status = result.prd.status.value
     try:
         clock = SystemClock()
-        now = clock.now()
         project_id = _get_project_id(backend)
-
-        # ``result.prd.id`` is already the STORED model id (``_model_prd_id``
-        # collapses the default-PRD sentinels to ``'default'``), so it is the id
-        # every persisted row carries — use it for the existence lookup and the
-        # diff partition filter, not the raw ``parse_prd_id`` sentinel.
         stored_prd_id = result.prd.id
-        existing_prd = backend.get_prd(stored_prd_id)
         is_default_prd = parse_prd_id in _DEFAULT_PRD_IDS
-
-        # Keep revision projections as validated Requirement models until the
-        # final event serialization boundary. This makes every id statically a
-        # string and prevents heterogeneous anonymous dictionaries from
-        # weakening diff/refusal logic.
-        new_requirements = list(result.requirements)
-
-        if existing_prd is None:
-            # FIRST parse of this prd_id → create-if-absent prd.parsed.
-            payload: dict[str, object] = {
-                "project_id": project_id,
-                "expected_absent": True,
-                "title": result.prd.title,
-                "status": result.prd.status.value,
-                "summary": result.prd.summary,
-                "goals": result.prd.goals,
-                "non_goals": result.prd.non_goals,
-                "requirements": [
-                    requirement.model_dump(mode="json")
-                    for requirement in new_requirements
-                ],
-                "acceptance_criteria": result.prd.acceptance_criteria,
-                "risks": result.prd.risks,
-                "open_questions": result.prd.open_questions,
-                "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                **source_binding(1),
-            }
-
-            # Named PRD: stamp the partition so the backend writes ONLY this PRD's
-            # rows (the prd.parsed handler scopes its DELETE/UPSERT by prd_id),
-            # leaving other PRDs' requirements untouched. The default PRD omits
-            # only the partition identity keys (PrdParsedPayload defaults
-            # prd_id='default', is_default=True). New events carry canonical
-            # title metadata for both default and named PRDs; old events that
-            # omit title remain replay-compatible through the payload default.
-            #
-            # Gate on the RESOLVED parse_prd_id, not the raw ``--prd`` flag: the
-            # reserved sentinels ``--prd default`` / ``--prd prd`` are legitimate
-            # spellings of the DEFAULT PRD (per ``_DEFAULT_PRD_IDS`` /
-            # ``prd_source_path`` / ``parse_prd``), so they must take the default
-            # (no-stamp) branch. Stamping is_default=False for them would INSERT
-            # an ``id='default'`` row with is_default=0, breaking the
-            # ux_prds_default invariant and making the default PRD invisible to
-            # every is_default=1 consumer (get_prd() no-arg, default_prd_id(),
-            # planning, claim gating).
-            if not is_default_prd:
-                payload["prd_id"] = stored_prd_id
-                payload["is_default"] = False
-                payload["target_version"] = result.prd.target_version
-                payload["target_tag"] = result.prd.target_tag
-
-            draft = EventDraft(
-                timestamp=now,
-                actor="anvil-cli",
-                action="prd.parsed",
-                target_kind="prd",
-                target_id=project_id,
-                payload_json=payload,
-            )
-        else:
-            # RE-parse of an existing prd_id → prd.revised (non-destructive
-            # supersede). Diff the freshly parsed requirements against the PRD's
-            # current LIVE rows so prior requirements are SUPERSEDED (lineage
-            # retained), not DELETED. The backend's _check_prd_revised enforces
-            # the diff against the on-disk live set, so we compute it from the
-            # same source: list_requirements(prd_id=...) defaults to the live
-            # set (revision_superseded IS NULL).
-            revised = True
-            live_reqs = backend.list_requirements(prd_id=stored_prd_id)
-            live_by_id = {r.id: r for r in live_reqs}
-            # ``all`` ids (live + superseded) — an id that was retired in a prior
-            # revision cannot be re-ADDED (the requirements PK is the single id
-            # column; _check_prd_revised rejects it). Such an id, reappearing in
-            # the new parse, is carried as unchanged against its live row when
-            # live, else left out of the diff.
-            all_reqs = backend.list_requirements(
-                prd_id=stored_prd_id, include_superseded=True
-            )
-            all_ids = {r.id for r in all_reqs}
-            new_by_id = {requirement.id: requirement for requirement in new_requirements}
-
-            # A new parse that re-lists an id retired in a PRIOR revision (in
-            # all_ids but NOT live) would fall into NO diff bucket — added
-            # excludes it (id ∈ all_ids), unchanged/superseded only cover live
-            # rows — so the requirement would be SILENTLY dropped while the
-            # command still printed "Revised" and exited 0. The single ``id`` PK
-            # means lineage cannot be revived, so fail loudly with an actionable
-            # message instead of losing the edit.
-            readded_retired = sorted(
-                rid
-                for rid in new_by_id
-                if rid in all_ids and rid not in live_by_id
-            )
-            if readded_retired:
-                from anvil.planning.diagnostics import format_identifier_summary
-
-                ids = format_identifier_summary(readded_retired)
-                message = (
-                    f"requirement id(s) {ids} were superseded in an earlier "
-                    "revision and cannot be re-added (ids are permanent "
-                    "lineage). Use a fresh id for the restored requirement."
-                )
-                if json_output:
-                    fail("prd parse", message, code="invalid_revision")
-                typer.echo(
-                    f"Error: {message}",
-                    err=True,
-                )
-                raise typer.Exit(code=1)
-
-            requirements_added = [
-                requirement
-                for requirement in new_requirements
-                if requirement.id not in all_ids
-            ]
-            requirements_unchanged = [
-                new_by_id[rid] for rid in live_by_id if rid in new_by_id
-            ]
-            requirements_superseded = [
-                r
-                for r in live_reqs
-                if r.id not in new_by_id
-            ]
-
-            new_revision = existing_prd.revision + 1
-
-            revised_payload: dict[str, object] = {
-                "project_id": project_id,
-                "prd_id": stored_prd_id,
-                "revision": new_revision,
-                "expected_status": existing_prd.status.value,
-                "is_default": existing_prd.is_default,
-                # Title is parsed source metadata just like summary/goals. A
-                # title-only revision updates it while the status below stays
-                # anchored to the current lifecycle state.
-                "title": result.prd.title,
-                "target_version": existing_prd.target_version,
-                "target_tag": existing_prd.target_tag,
-                # Carry the CURRENT stored status, NOT result.prd.status: a freshly
-                # parsed PRD is always 'draft' (template.parse_prd never reads a
-                # status), so using it would silently demote a reviewed/approved PRD
-                # on every re-parse. A pure-additive revision keeps this status; the
-                # handler demotes to 'draft' only when a requirement is superseded.
-                "status": existing_prd.status.value,
-                "summary": result.prd.summary,
-                "goals": result.prd.goals,
-                "non_goals": result.prd.non_goals,
-                "acceptance_criteria": result.prd.acceptance_criteria,
-                "risks": result.prd.risks,
-                "open_questions": result.prd.open_questions,
-                "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                "requirements_added": [
-                    requirement.model_dump(mode="json")
-                    for requirement in requirements_added
-                ],
-                "requirements_superseded": [
-                    requirement.model_dump(mode="json")
-                    for requirement in requirements_superseded
-                ],
-                "requirements_unchanged": [
-                    requirement.model_dump(mode="json")
-                    for requirement in requirements_unchanged
-                ],
-                **source_binding(new_revision),
-            }
-
-            draft = EventDraft(
-                timestamp=now,
-                actor="anvil-cli",
-                action="prd.revised",
-                target_kind="prd",
-                target_id=stored_prd_id,
-                payload_json=revised_payload,
-            )
-
         try:
-            backend.append(draft)
+            persistence = build_prd_persistence_plan(
+                backend,
+                result,
+                source,
+                project_id=project_id,
+                is_default=is_default_prd,
+                actor="anvil-cli",
+                clock=clock,
+            )
+        except PrdRevisionError as exc:
+            message = str(exc)
+            if json_output:
+                fail("prd parse", message, code="invalid_revision")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from exc
+        persistence_action = persistence.action
+        effective_status = persistence.status
+        try:
+            if persistence.draft is not None:
+                backend.append(persistence.draft)
         except EventRejected as exc:
             # Current create/revision events carry optimistic preconditions.
             # A concurrent first parse, re-parse, review, or approval can make
@@ -628,19 +457,24 @@ def prd_parse(
                 fail("prd parse", message, code="event_rejected")
             typer.echo(f"Error: {message}", err=True)
             raise typer.Exit(code=1) from exc
-        persisted_prd = backend.get_prd(stored_prd_id)
-        if persisted_prd is not None:
-            effective_status = persisted_prd.status.value
+        if persistence.draft is not None:
+            persisted_prd = backend.get_prd(stored_prd_id)
+            if persisted_prd is not None:
+                effective_status = persisted_prd.status.value
     finally:
         backend.close()
 
-    verb = "Revised" if revised else "Parsed"
+    verb = {
+        "parsed": "Parsed",
+        "revised": "Revised",
+        "unchanged": "Unchanged",
+    }[persistence_action]
     if json_output:
         emit_success(
             "prd parse",
             {
                 "prd_id": result.prd.id,
-                "action": "revised" if revised else "parsed",
+                "action": persistence_action,
                 "prd_status": effective_status,
                 "requirement_count": len(result.requirements),
                 "feature_count": len(result.features),

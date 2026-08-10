@@ -4907,6 +4907,43 @@ class TestGetProjectStatus:
 
 
 class TestParsePrd:
+    def test_byte_identical_prd_revision_is_exact_source_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        _run(parse())
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        response = _run(parse())
+        assert response["prd_status"] == "draft"
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert _events_with_action(state_dir, "prd.revised") == []
+
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.revision == prd.source_revision == 1
+        assert prd.source_sha256 == hashlib.sha256(
+            (state_dir / "prd.md").read_bytes()
+        ).hexdigest()
+
     def test_provenance_is_byte_identical_to_cli_for_same_revisions(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
