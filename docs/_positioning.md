@@ -44,7 +44,8 @@ gates, separate `apply` rhythms — all backed by a single state store
 (`.anvil/state.db` + `events.jsonl`), not one database per PRD. A PRD is
 a release/milestone-scoped, separately-gated, revisable plan carrying a target
 version/tag: it gates the claimability of the tasks *it* owns (a task is
-claimable once its owning PRD is reviewed/approved, independent of sibling PRDs),
+claimable once its owning PRD is approved for its exact current material,
+independent of sibling PRDs),
 yet conflict detection deliberately spans every workspace so two tasks in
 different PRDs that touch the same file are still single-winner-coordinated. The
 single-PRD project is the one-workspace default — a lone `default` PRD owning

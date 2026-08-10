@@ -29,9 +29,10 @@ A single project holds **several release-scoped PRDs** in one `state.db` and one
 target version/tag (a release or milestone); its requirements, features, and
 tasks are partitioned by an owning `prd_id`. The single-PRD project is just the
 degenerate case — one `default` PRD owning every row. Because each PRD gates
-independently, the `prd_status_gate` keys on the **task's owning PRD**: a task is
-claimable as soon as *its* PRD is reviewed/approved, even while a sibling PRD is
-still `draft`. Conflict detection, by contrast, spans **all** PRDs — two tasks in
+independently, the effective claim gate keys on the **task's owning PRD**: a
+task is claimable only after its PRD is approved for its exact current
+source/material lineage, even while a sibling PRD is still `draft`. Conflict
+detection, by contrast, spans **all** PRDs — two tasks in
 different PRDs that touch the same file land in one conflict group, so the
 single-winner guarantee holds across the whole project, not per-PRD. See
 [`_positioning.md`](_positioning.md) for the per-PRD-as-scoped-stack framing.
@@ -247,7 +248,7 @@ stateDiagram-v2
     proposed --> drafted: task_proposed_to_drafted
     drafted --> reviewed: task_drafted_to_reviewed<br/>gate: acceptance_criteria<br/>+ verification.commands
     reviewed --> ready: task_reviewed_to_ready
-    ready --> claimed: task_ready_to_claimed<br/>gate: PRD reviewed or approved
+    ready --> claimed: task_ready_to_claimed<br/>gate: exact current PRD approval
 
     claimed --> in_progress: task_claimed_to_in_progress
     in_progress --> blocked: task_in_progress_to_blocked<br/>(reason required)
@@ -297,7 +298,7 @@ Three named gates appear in the transition module; each raises
 | Gate | Where it fires | What it checks |
 |---|---|---|
 | `readiness_gate` | drafted → reviewed | `task.acceptance_criteria` and `task.verification.commands` must both be non-empty |
-| `prd_status_gate` | ready → claimed | The task's **owning** PRD (resolved via `task.prd_id`) must be in `reviewed` or `approved` (refuses while `draft`). A task in an approved PRD is claimable while a sibling in a draft PRD is refused |
+| `prd_status_gate` plus canonical claim binding | ready → claimed | The task's **owning** PRD (resolved via `task.prd_id`) must be `approved`, and that approval must bind the exact persisted revision, source digest, canonical material digest, and content event. A material reparse demotes the PRD to `draft`; active claims are not revoked. |
 | `evidence_gate` | needs_review → accepted | Every item in `task.verification.required_evidence` must appear as a substring of at least one Evidence field. Computed and reported at apply time, but enforced only when `strict_evidence` resolves true — the default path approves regardless |
 
 ### Who drives each transition

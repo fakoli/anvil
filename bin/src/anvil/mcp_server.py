@@ -1303,7 +1303,7 @@ def claim_task(
     """Acquire an exclusive lease on task_id for claimed_by.
 
     Reaps stale claims first; refuses (ToolError) unless the task's OWNING PRD
-    is reviewed/approved (enforced by ClaimManager's per-PRD gate, T011/T012).
+    is approved and bound to its exact canonical source/material lineage.
     lease_duration_seconds defaults to 900 (15 min).
 
     Honors the worktree_isolation policy (config.yaml): under ``require`` this
@@ -1367,12 +1367,10 @@ def claim_task(
                         "collide; prefer `anvil claim --worktree` (CLI)."
                     )
 
-        # The PRD gate is enforced inside ClaimManager.claim() via
-        # get_prd_for_task (T011/T012): the task's OWNING PRD must be reviewed or
-        # approved. Its ClaimError is translated to ToolError below, so the MCP
-        # and CLI paths apply the IDENTICAL per-PRD gate. (A duplicated inline
-        # pre-check on the global get_prd() lived here pre-T012; it resolved the
-        # default PRD and so disagreed with the per-PRD gate under multi-PRD.)
+        # ClaimManager retains the task-to-owning-PRD transition check. The
+        # stronger canonical-source approval check runs immediately before this
+        # block and again under the claim operation lock, so CLI and MCP refuse
+        # reviewed, stale, or unbound PRDs identically.
         lease_minutes = max(1, lease_duration_seconds // 60)
         project_dir = _resolve_project_dir(Path(cwd) if cwd else None)
         manager = ClaimManager(

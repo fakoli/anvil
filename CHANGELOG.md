@@ -8,6 +8,17 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Revision-bound PRD approval and canonical source lineage (#180).** Parsed
+  and revised PRDs now persist a domain-separated canonical material digest and
+  exact content-event identity. Review and approval bind that revision, source,
+  material, and content event; live append, Git replay, CLI, and MCP refuse
+  stale or mismatched lineage. Title-only revisions may retain lifecycle state,
+  while any other material change returns the PRD to `draft`. New task and
+  bundle claims require an exact current approval; active claims are unaffected.
+  Historical unbound review/approval remains in the audit log but migrates
+  conservatively to `draft`, requiring explicit parse/review/approve. This adds
+  schema version 21; the command and envelope surface remains API version 14.
+
 - **Transactional task and bundle claim Git wiring (#180).** Claims now freeze
   and persist the selected local base, exact claim-start ref and commit, branch,
   canonical repository root, and shared or isolated target before Git mutation.

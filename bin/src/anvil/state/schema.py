@@ -85,6 +85,10 @@ Version history
   accounting category plus exact evidence/claim/attempt bindings.
 - v20: transactional claim Git bindings — task and bundle claims retain the
   validated selected base, exact claim start, branch, and canonical target.
+- v21: revision-bound PRD lifecycle — PRD projections retain a canonical
+  material digest, exact content-event identity, and the complete source/
+  material/content lineage reviewed or approved. Historical lifecycle state
+  without that binding is demoted to draft instead of being guessed.
 """
 
 from __future__ import annotations

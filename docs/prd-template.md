@@ -398,7 +398,16 @@ before planning continues. Assumption IDs are limited to 32 ASCII characters.
 A PRD may contain at most 100 assumptions; each
 statement is limited to 500 characters, each rationale to 1,000 characters,
 and each assumption to 100 requirement references. Changing an assumption in a
-revision returns an approved PRD to `draft` so the changed contract is reviewed.
+revision changes the canonical PRD material and returns an approved PRD to
+`draft` so the changed contract is reviewed.
+
+Anvil binds review and approval to the exact persisted source revision,
+source digest, canonical material digest, and content event. Canonical material
+is the PRD source with only the H1 project title replaced by a fixed sentinel;
+therefore a title-only revision can retain lifecycle status, while any other
+byte-level material change requires a fresh review and approval. Historical
+review/approval rows that predate this lineage remain auditable but migrate as
+unbound `draft`; Anvil never guesses that the current file was reviewed.
 
 These typed `A###` records are distinct from the read-only `anvil assumptions`
 command, which ranks requirement uncertainty and does not write PRD state.
