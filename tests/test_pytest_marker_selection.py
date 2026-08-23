@@ -97,7 +97,7 @@ def test_fast_selection_preserves_default_live_exclusion_and_partition() -> None
     assert fast_then_live == live
     assert default | live == slow | safe_fast | live
     assert len(slow) == 146
-    assert len(safe_fast) == 61
+    assert len(safe_fast) == 62
     assert len(live) == 3
 
 
