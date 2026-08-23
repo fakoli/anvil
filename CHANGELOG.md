@@ -66,6 +66,11 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
+- **Exact sample PRD source binding on Windows (#180).** `init --with-sample`
+  now publishes the embedded PRD as canonical UTF-8 bytes, verifies the exact
+  on-disk source before lifecycle approval, and keeps the first task claim from
+  being refused solely because Windows translated LF newlines to CRLF.
+
 - **Transactional claim and decision recovery (#180).** Task and bundle claims
   now release state on cancellation as well as ordinary Git errors, absorbed
   submodules resolve their real worktree root, and the supported local `.anvil`
