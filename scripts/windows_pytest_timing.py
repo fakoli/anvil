@@ -41,6 +41,14 @@ GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 CREATE_NEW = 1
 FILE_ATTRIBUTE_NORMAL = 0x80
+UNTRACKED_SCAN_EXCLUDES = (
+    ".anvil-build/**",
+    ".pytest_cache/**",
+    ".ruff_cache/**",
+    "artifacts/windows-pytest-timing-logs/**",
+    "bin/.venv/**",
+    "**/__pycache__/**",
+)
 
 
 def _utc_now() -> str:
@@ -155,7 +163,36 @@ def require_clean_git(
         for record in status.split(b"\0")
         if record
     }
-    if records - allowed_records:
+    untracked_command = ["git", "ls-files", "--others", "-z"]
+    for pattern in UNTRACKED_SCAN_EXCLUDES:
+        untracked_command.extend(("--exclude", pattern))
+    untracked = subprocess.run(
+        untracked_command,
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env=_controlled_environment(),
+    ).stdout
+    all_untracked_records = {
+        "?? " + record.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        for record in untracked.split(b"\0")
+        if record
+    }
+    flags = subprocess.run(
+        ("git", "ls-files", "-v", "-z"),
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env=_controlled_environment(),
+    ).stdout
+    unsafe_index_flags = [
+        record[:1]
+        for record in flags.split(b"\0")
+        if record and (record[:1].islower() or record.startswith(b"S "))
+    ]
+    if unsafe_index_flags:
+        raise RuntimeError("tracked_file_has_hidden_index_flag")
+    if (records | all_untracked_records) - allowed_records:
         raise RuntimeError("repository_not_fully_clean")
     identity = GitIdentity(commit=commit, tree=tree, index_tree=index_tree)
     if expected is not None and identity != expected:
@@ -635,7 +672,7 @@ def control_snapshot() -> dict[str, Any]:
     return snapshot
 
 
-def _junit_counts(path: Path) -> dict[str, int]:
+def _junit_evidence(path: Path) -> tuple[dict[str, int], str]:
     root = ET.parse(path).getroot()
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     # A testsuites root normally carries aggregate attributes.  Only sum leaf
@@ -647,7 +684,17 @@ def _junit_counts(path: Path) -> dict[str, int]:
         for key in ("tests", "failures", "errors", "skipped")
     }
     result["passed"] = result["tests"] - result["failures"] - result["errors"] - result["skipped"]
-    return result
+    testcase_ids = sorted(
+        "\x1f".join(
+            (
+                case.get("file", ""),
+                case.get("classname", ""),
+                case.get("name", ""),
+            )
+        )
+        for case in root.iter("testcase")
+    )
+    return result, _sha256_bytes(("\n".join(testcase_ids) + "\n").encode("utf-8"))
 
 
 def _distribution(values: Sequence[float]) -> dict[str, float | None]:
@@ -694,6 +741,7 @@ def _public_command(mode: str, workers: int, junit_relative: str, probe: bool) -
         "uv",
         "run",
         "--locked",
+        "--exact",
         "--project",
         "bin",
         "pytest",
@@ -870,13 +918,15 @@ def _run_one(
         repository_after_error = _safe_error(exc)
 
     counts: dict[str, int] | None = None
+    testcase_ids_sha256: str | None = None
     junit_error: str | None = None
     if config.probe and process_result["exit_code"] == 0:
         counts = {"tests": 1, "failures": 0, "errors": 0, "skipped": 0, "passed": 1}
+        testcase_ids_sha256 = _sha256_bytes(b"probe::test\n")
     elif junit_path.exists():
         try:
             validate_no_reparse_components(junit_path)
-            counts = _junit_counts(junit_path)
+            counts, testcase_ids_sha256 = _junit_evidence(junit_path)
         except Exception as exc:
             junit_error = _safe_error(exc)
     else:
@@ -920,6 +970,7 @@ def _run_one(
         "repository_after_error": repository_after_error,
         "junit_error": junit_error,
         "junit_counts": counts,
+        "junit_testcase_ids_sha256": testcase_ids_sha256,
         "collection_count_matches": count_matches,
         "control_before_fingerprint": control_before["fingerprint_sha256"],
         "control_after_fingerprint": control_after["fingerprint_sha256"],
@@ -941,15 +992,26 @@ def _metadata_probe(config: Configuration) -> dict[str, Any]:
     code = """
 import importlib.metadata as m,json,platform
 eps=m.entry_points(group='pytest11')
-plugins=[]
+plugins={}
 for ep in eps:
     dist=getattr(ep,'dist',None)
-    plugins.append({'entry_point':ep.name,'value':ep.value,'distribution':dist.metadata['Name'] if dist else None,'version':dist.version if dist else None})
-print(json.dumps({'python':platform.python_version(),'pytest':m.version('pytest'),'pytest_xdist':m.version('pytest-xdist'),'anvil_state':m.version('anvil-state'),'pytest11_plugins':sorted(plugins,key=lambda p:(p['distribution'] or '',p['entry_point'],p['value']))}))
+    if dist:
+        plugins[dist.metadata['Name']] = dist.version
+print(json.dumps({'python':platform.python_version(),'pytest':m.version('pytest'),'pytest_xdist':m.version('pytest-xdist'),'anvil_state':m.version('anvil-state'),'pytest11_plugin_distributions':[{'name':name,'version':plugins[name]} for name in sorted(plugins,key=str.lower)]}))
 """
     try:
         output = _run_text(
-            ("uv", "run", "--locked", "--project", "bin", "python", "-c", code),
+            (
+                "uv",
+                "run",
+                "--locked",
+                "--exact",
+                "--project",
+                "bin",
+                "python",
+                "-c",
+                code,
+            ),
             cwd=config.repo,
             timeout=120,
         )
@@ -964,7 +1026,7 @@ print(json.dumps({'python':platform.python_version(),'pytest':m.version('pytest'
             "pytest": None,
             "pytest_xdist": None,
             "anvil_state": None,
-            "pytest11_plugins": [],
+            "pytest11_plugin_distributions": [],
             "uv": None,
             "observable": False,
             "error": _safe_error(exc),
@@ -995,6 +1057,7 @@ def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
         "uv",
         "run",
         "--locked",
+        "--exact",
         "--project",
         "bin",
         "pytest",
@@ -1099,7 +1162,11 @@ def _artifact_base(config: Configuration, identity: GitIdentity) -> dict[str, An
             "uv_cache": ".anvil-build/windows-pytest-uv-cache",
             "controlled_environment_sha256": _sha256_json(_controlled_environment()),
             "pytest_addopts": "rejected_and_removed",
-            "dependency_resolution": "uv_run_locked",
+            "dependency_resolution": "uv_run_locked_exact",
+            "pytest_plugin_metadata": (
+                "locked_exact_distribution_names_and_versions_only"
+            ),
+            "control_observation": "snapshots_immediately_before_and_after_each_run",
             "raw_logs": f"{config.log_relative_root}/",
             "process_containment": "windows_job_kill_on_close_gated_before_assignment_zero_active_verified",
             "probe": config.probe,
@@ -1130,11 +1197,30 @@ def _finish_artifact(
         and all(run["junit_counts"] is not None for run in runs)
         and len(count_signatures) == 1
     )
+    testcase_hashes = {
+        run.get("junit_testcase_ids_sha256")
+        for run in runs
+        if run.get("junit_testcase_ids_sha256") is not None
+    }
+    junit_testcase_ids_identical = bool(
+        runs
+        and all(run.get("junit_testcase_ids_sha256") is not None for run in runs)
+        and len(testcase_hashes) == 1
+    )
+    collection_valid = bool(
+        artifact.get("collection")
+        and artifact["collection"].get("error") is None
+        and artifact["collection"].get("count", 0) > 0
+        and artifact["collection"].get("node_ids_sha256")
+        and artifact["collection"].get("source_files_sha256")
+    )
     timing_valid = bool(
         len(measured) == config.samples * 2
         and all(run["timing_valid"] for run in measured)
         and all(run["timing_valid"] for run in warmups)
         and junit_counts_identical
+        and junit_testcase_ids_identical
+        and collection_valid
         and artifact.get("repository_final_error") is None
     )
     environment_qualified = bool(
@@ -1179,6 +1265,10 @@ def _finish_artifact(
         reasons.append("timing_protocol_incomplete_or_invalid")
     if not junit_counts_identical:
         reasons.append("junit_counts_differ_across_runs")
+    if not junit_testcase_ids_identical:
+        reasons.append("junit_testcase_ids_differ_across_runs")
+    if not collection_valid:
+        reasons.append("collection_invalid")
     if artifact.get("repository_final_error") is not None:
         reasons.append("repository_integrity_failed_after_runs")
     if not environment_qualified:
@@ -1188,6 +1278,8 @@ def _finish_artifact(
         "descriptive_timing_valid": timing_valid,
         "environment_qualified": environment_qualified,
         "junit_counts_identical_across_runs": junit_counts_identical,
+        "junit_testcase_ids_identical_across_runs": junit_testcase_ids_identical,
+        "collection_valid": collection_valid,
         "insufficient_reasons": reasons,
         "serial_seconds": serial_distribution,
         "parallel_seconds": parallel_distribution,
@@ -1269,6 +1361,7 @@ def _execute_protocol(
                     "uv",
                     "run",
                     "--locked",
+                    "--exact",
                     "--project",
                     "bin",
                     "pytest",
@@ -1369,8 +1462,8 @@ def run(arguments: argparse.Namespace) -> int:
         os.path.normcase(str(config.output.resolve(strict=False))).encode("utf-8")
     )
     with ExitStack() as locks:
-        locks.enter_context(WindowsNamedMutex(f"Local\\AnvilPytestTiming-Repo-{repository_key}"))
-        locks.enter_context(WindowsNamedMutex(f"Local\\AnvilPytestTiming-Output-{output_key}"))
+        locks.enter_context(WindowsNamedMutex(f"Global\\AnvilPytestTiming-Repo-{repository_key}"))
+        locks.enter_context(WindowsNamedMutex(f"Global\\AnvilPytestTiming-Output-{output_key}"))
         require_clean_git(config.repo, identity)
         if config.output.exists():
             raise FileExistsError("output_reservation_violated")

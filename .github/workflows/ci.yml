@@ -80,6 +80,13 @@ jobs:
           -q
           --basetemp "${{ runner.temp }}/anvil-source-binding"
 
+      - name: Verify Windows timing-harness mechanics
+        run: >-
+          uv run --project bin --locked --python 3.11 pytest
+          tests/test_windows_pytest_timing.py
+          -q
+          --basetemp "${{ runner.temp }}/anvil-timing-harness"
+
   test:
     name: test (python 3.11)
     runs-on: ubuntu-latest

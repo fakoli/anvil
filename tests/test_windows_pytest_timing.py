@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -59,6 +60,58 @@ def _configuration_args(repo: Path, **overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
+def _qualified_artifact(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], timing.Configuration]:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    config = timing.Configuration(
+        repo=tmp_path,
+        output=artifacts / "result.json",
+        artifacts=artifacts,
+        cache=tmp_path / "cache",
+        log_root=artifacts / "logs",
+        log_relative_root="artifacts/logs",
+        warmups=0,
+        samples=1,
+        modes=("serial", "parallel"),
+        workers=2,
+        timeout_seconds=10,
+        expected_commit=None,
+        host_label="test-host",
+        probe=False,
+    )
+    counts = {"tests": 10, "failures": 0, "errors": 0, "skipped": 0, "passed": 10}
+    runs = [
+        {
+            "phase": "measured",
+            "mode": mode,
+            "pair": 1,
+            "order_in_pair": position,
+            "timing_valid": True,
+            "environment_qualified": True,
+            "elapsed_seconds": elapsed,
+            "junit_counts": counts,
+            "junit_testcase_ids_sha256": "same-workload",
+        }
+        for position, (mode, elapsed) in enumerate(
+            (("serial", 10.0), ("parallel", 5.0)), start=1
+        )
+    ]
+    artifact: dict[str, Any] = {
+        "versions": {"observable": True},
+        "controls": {"observable": True},
+        "collection": {
+            "error": None,
+            "count": 10,
+            "node_ids_sha256": "collected-nodes",
+            "source_files_sha256": "tracked-sources",
+        },
+        "runs": runs,
+    }
+    return artifact, config
+
+
 def test_clean_git_preflight_rejects_untracked_files(tmp_path: Path) -> None:
     repo = _clean_repo(tmp_path)
     identity = timing.require_clean_git(repo)
@@ -72,6 +125,34 @@ def test_clean_git_preflight_binds_commit_tree_and_index(tmp_path: Path) -> None
     repo = _clean_repo(tmp_path)
     identity = timing.require_clean_git(repo)
     (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="repository_not_fully_clean"):
+        timing.require_clean_git(repo, identity)
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_clean_git_rejects_index_flags_that_hide_worktree_bytes(
+    tmp_path: Path, flag: str
+) -> None:
+    repo = _clean_repo(tmp_path)
+    identity = timing.require_clean_git(repo)
+    _git(repo, "update-index", flag, "tracked.txt")
+    (repo / "tracked.txt").write_text("hidden change\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="tracked_file_has_hidden_index_flag"):
+        timing.require_clean_git(repo, identity)
+
+
+def test_clean_git_rejects_untracked_file_hidden_by_repo_exclude(tmp_path: Path) -> None:
+    repo = _clean_repo(tmp_path)
+    identity = timing.require_clean_git(repo)
+    (repo / ".git" / "info" / "exclude").write_text(
+        "/pytest.ini\n", encoding="utf-8"
+    )
+    (repo / "pytest.ini").write_text(
+        "[pytest]\naddopts = --ignore=tests/test_hidden.py\n", encoding="utf-8"
+    )
+    assert _git(repo, "status", "--porcelain") == ""
 
     with pytest.raises(RuntimeError, match="repository_not_fully_clean"):
         timing.require_clean_git(repo, identity)
@@ -124,7 +205,7 @@ def test_reparse_component_is_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows named mutex contract")
 def test_named_mutex_rejects_concurrent_owner() -> None:
-    name = f"Local\\AnvilPytestTiming-Test-{os.getpid()}"
+    name = f"Global\\AnvilPytestTiming-Test-{os.getpid()}"
     with timing.WindowsNamedMutex(name):
         with pytest.raises(RuntimeError, match="already_held"):
             with timing.WindowsNamedMutex(name):
@@ -285,6 +366,7 @@ def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
             "environment_qualified": False,
             "elapsed_seconds": 10.0,
             "junit_counts": base_counts,
+            "junit_testcase_ids_sha256": "same-workload",
         },
         {
             "phase": "measured",
@@ -295,11 +377,18 @@ def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
             "environment_qualified": False,
             "elapsed_seconds": 5.0,
             "junit_counts": base_counts,
+            "junit_testcase_ids_sha256": "same-workload",
         },
     ]
     artifact = {
         "versions": {"observable": True},
         "controls": {"observable": False},
+        "collection": {
+            "error": None,
+            "count": 10,
+            "node_ids_sha256": "collected-nodes",
+            "source_files_sha256": "tracked-sources",
+        },
         "runs": runs,
     }
 
@@ -347,11 +436,18 @@ def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
                     "skipped": 0,
                     "passed": tests,
                 },
+                "junit_testcase_ids_sha256": "same-workload",
             }
         )
     artifact = {
         "versions": {"observable": True},
         "controls": {"observable": True},
+        "collection": {
+            "error": None,
+            "count": 10,
+            "node_ids_sha256": "collected-nodes",
+            "source_files_sha256": "tracked-sources",
+        },
         "runs": runs,
     }
 
@@ -359,9 +455,40 @@ def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
     assert artifact["result"]["junit_counts_identical_across_runs"] is False
 
 
-def test_powershell_entrypoint_keeps_locked_public_protocol() -> None:
+def test_invalid_collection_cannot_qualify_threshold(tmp_path: Path) -> None:
+    artifact, config = _qualified_artifact(tmp_path)
+    artifact["collection"]["error"] = "CollectionNonzero"
+
+    assert timing._finish_artifact(config, artifact) == 1
+    assert artifact["result"]["collection_valid"] is False
+    assert artifact["result"]["threshold_met"] is None
+
+
+def test_equal_counts_with_different_testcase_ids_cannot_qualify(
+    tmp_path: Path,
+) -> None:
+    artifact, config = _qualified_artifact(tmp_path)
+    artifact["runs"][1]["junit_testcase_ids_sha256"] = "different-workload"
+
+    assert timing._finish_artifact(config, artifact) == 1
+    assert artifact["result"]["junit_testcase_ids_identical_across_runs"] is False
+    assert artifact["result"]["threshold_met"] is None
+
+
+def test_powershell_entrypoint_keeps_locked_exact_public_protocol() -> None:
     script = (ROOT / "scripts" / "measure-windows-pytest.ps1").read_text(encoding="utf-8")
     assert '[int]$Warmups = 1' in script
     assert '[int]$Samples = 5' in script
     assert '[string]$Modes = "serial,parallel"' in script
-    assert '"run", "--locked", "--project"' in script
+    assert '"run", "--locked", "--exact", "--project"' in script
+
+
+def test_windows_ci_runs_timing_harness_mechanics_separately() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "tests/test_cli.py::TestSampleSourceBindingContract" in workflow
+    assert "tests/test_windows_pytest_timing.py" in workflow
+    assert "anvil-source-binding" in workflow
+    assert "anvil-timing-harness" in workflow

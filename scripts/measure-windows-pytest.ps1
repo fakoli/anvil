@@ -38,7 +38,7 @@ if (-not [string]::IsNullOrEmpty($env:PYTEST_ADDOPTS)) {
 
 $repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $arguments = @(
-    "run", "--locked", "--project", (Join-Path $repoRoot "bin"),
+    "run", "--locked", "--exact", "--project", (Join-Path $repoRoot "bin"),
     "python", (Join-Path $PSScriptRoot "windows_pytest_timing.py"),
     "--repo", $repoRoot,
     "--warmups", "$Warmups",
