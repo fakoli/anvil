@@ -30,3 +30,13 @@ uv run --project bin pytest -m "not slow"
 The fast command is only a local test selection. It does not reduce the
 project's required test coverage or replace a complete serial run before a
 change is merged.
+
+For changes limited to the Windows sample source-binding repair, run its direct
+four-test contract:
+
+```powershell
+uv run --project bin pytest tests/test_cli.py::TestSampleSourceBindingContract -q
+```
+
+This focused contract is the recurring Windows CI gate. Changes to lifecycle,
+Git, replay, schema, or platform behavior still require the complete suite.

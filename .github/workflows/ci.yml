@@ -76,10 +76,7 @@ jobs:
           _TYPER_FORCE_DISABLE_TERMINAL: "1"
         run: >-
           uv run --project bin --locked --python 3.11 pytest
-          tests/test_cli.py::TestInitWithSample
-          tests/test_cli.py::TestClaimCommand::test_new_claim_refuses_canonical_source_drift_before_state_or_git
-          tests/test_git_ops.py::TestWorkspaceLayoutGitOps::test_claim_creates_branch_in_project_repo_under_workspace_layout
-          tests/test_git_ops.py::TestWorkspaceLayoutGitOps::test_claim_json_returns_branch_with_no_warnings_under_workspace_layout
+          tests/test_cli.py::TestSampleSourceBindingContract
           -q
           --basetemp "${{ runner.temp }}/anvil-issue-180"
 

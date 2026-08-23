@@ -10,6 +10,7 @@ wrong subprocess assumptions.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from anvil.sync.reconciliation import (
 # ---------------------------------------------------------------------------
 
 _T0 = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+GitRepoFactory = Callable[[Path], Path]
 
 
 def _make_clock(dt: datetime = _T0) -> FrozenClock:
@@ -64,16 +66,6 @@ def _git(cwd: Path, *args: str) -> None:
         raise RuntimeError(
             f"git {' '.join(args)} failed in {cwd}: {r.stderr or r.stdout}"
         )
-
-
-def _init_git_repo(repo: Path) -> None:
-    """Initialise a minimal git repo with one commit on ``main``."""
-    repo.mkdir(parents=True, exist_ok=True)
-    _git(repo, "init", "-q", "-b", "main")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "test")
-    # An empty commit so the branch has a HEAD.
-    _git(repo, "commit", "--allow-empty", "-q", "-m", "init")
 
 
 def _make_event(
@@ -229,8 +221,10 @@ class TestEmptyProject:
     """A fresh project with nothing in it produces an empty report."""
 
     @pytest.mark.slow
-    def test_empty_project_returns_empty_report(self, tmp_path: Path) -> None:
-        _init_git_repo(tmp_path)
+    def test_empty_project_returns_empty_report(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
+        git_repo_factory(tmp_path)
         b = _make_backend(tmp_path)
         try:
             engine = ReconciliationEngine(
@@ -266,8 +260,10 @@ class TestEmptyProject:
 class TestOrphanBranch:
     """``agent/t*-*`` branches whose task id is not in the SQLite store."""
 
-    def test_orphan_branch_detected_when_present(self, tmp_path: Path) -> None:
-        _init_git_repo(tmp_path)
+    def test_orphan_branch_detected_when_present(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
+        git_repo_factory(tmp_path)
         # Create an agent branch that does NOT correspond to any task.
         _git(tmp_path, "branch", "agent/t099-orphaned")
         b = _make_backend(tmp_path)
@@ -287,9 +283,9 @@ class TestOrphanBranch:
             b.close()
 
     def test_orphan_branch_not_detected_when_task_exists(
-        self, tmp_path: Path,
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory,
     ) -> None:
-        _init_git_repo(tmp_path)
+        git_repo_factory(tmp_path)
         _git(tmp_path, "branch", "agent/t001-my-task")
         b = _make_backend(tmp_path)
         try:
@@ -303,9 +299,11 @@ class TestOrphanBranch:
         finally:
             b.close()
 
-    def test_non_agent_branches_ignored(self, tmp_path: Path) -> None:
+    def test_non_agent_branches_ignored(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         """``main``, ``feature/foo``, ``release/v1`` are never orphan_branch."""
-        _init_git_repo(tmp_path)
+        git_repo_factory(tmp_path)
         _git(tmp_path, "branch", "feature/random")
         _git(tmp_path, "branch", "release/v1")
         b = _make_backend(tmp_path)
@@ -317,8 +315,10 @@ class TestOrphanBranch:
         finally:
             b.close()
 
-    def test_orphan_branch_fix_remediates(self, tmp_path: Path) -> None:
-        _init_git_repo(tmp_path)
+    def test_orphan_branch_fix_remediates(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
+        git_repo_factory(tmp_path)
         _git(tmp_path, "branch", "agent/t099-bye")
         b = _make_backend(tmp_path)
         try:
@@ -475,9 +475,11 @@ class TestOrphanWorktree:
         _git(repo, "worktree", "add", str(wt_path), branch)
         return wt_path
 
-    def test_orphan_worktree_detected_when_present(self, tmp_path: Path) -> None:
+    def test_orphan_worktree_detected_when_present(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         repo = tmp_path / "repo"
-        _init_git_repo(repo)
+        git_repo_factory(repo)
         self._add_worktree(repo, "agent/t099-bye", "wt-t099")
         b = _make_backend(repo)
         try:
@@ -493,9 +495,11 @@ class TestOrphanWorktree:
         finally:
             b.close()
 
-    def test_worktree_with_active_claim_not_flagged(self, tmp_path: Path) -> None:
+    def test_worktree_with_active_claim_not_flagged(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         repo = tmp_path / "repo"
-        _init_git_repo(repo)
+        git_repo_factory(repo)
         self._add_worktree(repo, "agent/t001-real", "wt-t001")
         b = _make_backend(repo)
         try:
@@ -509,9 +513,11 @@ class TestOrphanWorktree:
         finally:
             b.close()
 
-    def test_main_worktree_never_flagged(self, tmp_path: Path) -> None:
+    def test_main_worktree_never_flagged(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         """The main worktree on ``main`` is not an agent branch — never flagged."""
-        _init_git_repo(tmp_path)
+        git_repo_factory(tmp_path)
         b = _make_backend(tmp_path)
         try:
             engine = ReconciliationEngine(b, state_dir=tmp_path, clock=_make_clock())
@@ -521,9 +527,11 @@ class TestOrphanWorktree:
         finally:
             b.close()
 
-    def test_orphan_worktree_fix_remediates(self, tmp_path: Path) -> None:
+    def test_orphan_worktree_fix_remediates(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         repo = tmp_path / "repo"
-        _init_git_repo(repo)
+        git_repo_factory(repo)
         wt = self._add_worktree(repo, "agent/t099-bye", "wt-t099")
         b = _make_backend(repo)
         try:
@@ -1418,9 +1426,9 @@ class TestReconciliationReport:
 
     @pytest.mark.slow
     def test_summary_counts_match_discrepancy_histogram(
-        self, tmp_path: Path,
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory,
     ) -> None:
-        _init_git_repo(tmp_path)
+        git_repo_factory(tmp_path)
         _git(tmp_path, "branch", "agent/t101-a")
         _git(tmp_path, "branch", "agent/t102-b")
         pdir = tmp_path / ".anvil" / "packets"
@@ -1484,9 +1492,9 @@ class TestReconciliationReport:
 
     @pytest.mark.slow
     def test_discrepancies_sorted_deterministically(
-        self, tmp_path: Path,
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory,
     ) -> None:
-        _init_git_repo(tmp_path)
+        git_repo_factory(tmp_path)
         # Create branches out of alphabetical order.
         _git(tmp_path, "branch", "agent/t202-z")
         _git(tmp_path, "branch", "agent/t101-a")
@@ -1510,8 +1518,10 @@ class TestReconciliationReport:
 class TestDryRun:
     """``fix(dry_run=True)`` returns the action list without mutating."""
 
-    def test_dry_run_skips_all_actions(self, tmp_path: Path) -> None:
-        _init_git_repo(tmp_path)
+    def test_dry_run_skips_all_actions(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
+        git_repo_factory(tmp_path)
         _git(tmp_path, "branch", "agent/t099-bye")
         pdir = tmp_path / ".anvil" / "packets"
         pdir.mkdir(parents=True, exist_ok=True)
@@ -1541,9 +1551,9 @@ class TestDryRun:
             b.close()
 
     def test_dry_run_returns_same_action_kinds_as_real_run(
-        self, tmp_path: Path,
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory,
     ) -> None:
-        _init_git_repo(tmp_path)
+        git_repo_factory(tmp_path)
         _git(tmp_path, "branch", "agent/t099-bye")
         b = _make_backend(tmp_path)
         try:
@@ -1568,12 +1578,12 @@ class TestBestEffortFixLoop:
     """A single fix failure must not skip subsequent discrepancies."""
 
     def test_one_failed_fix_does_not_abort_others(
-        self, tmp_path: Path,
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory,
     ) -> None:
         # Set up two orphan branches; manually delete one before fix()
         # runs so the first git-branch-D fails (branch missing), but the
         # second still succeeds.
-        _init_git_repo(tmp_path)
+        git_repo_factory(tmp_path)
         _git(tmp_path, "branch", "agent/t101-a")
         _git(tmp_path, "branch", "agent/t102-b")
         b = _make_backend(tmp_path)
