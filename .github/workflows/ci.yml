@@ -71,14 +71,14 @@ jobs:
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Verify sample source binding and first claim
+      - name: Verify sample source-binding contract
         env:
           _TYPER_FORCE_DISABLE_TERMINAL: "1"
         run: >-
           uv run --project bin --locked --python 3.11 pytest
           tests/test_cli.py::TestSampleSourceBindingContract
           -q
-          --basetemp "${{ runner.temp }}/anvil-issue-180"
+          --basetemp "${{ runner.temp }}/anvil-source-binding"
 
   test:
     name: test (python 3.11)

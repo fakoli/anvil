@@ -1,6 +1,7 @@
 """Tests for anvil.git_ops.branch and anvil.git_ops.worktree.
 
-Uses real git (tmp git init per test) — no mocking.
+Uses independent real Git repositories copied from an immutable session
+template; format-specific cases still initialize their own repositories.
 
 Coverage target: git_ops/ >= 85%.
 """

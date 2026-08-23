@@ -40,3 +40,18 @@ uv run --project bin pytest tests/test_cli.py::TestSampleSourceBindingContract -
 
 This focused contract is the recurring Windows CI gate. Changes to lifecycle,
 Git, replay, schema, or platform behavior still require the complete suite.
+
+For the fixed native-Windows serial/parallel measurement, start from a clean,
+committed worktree, choose a public-safe host label, and leave the output path
+absent:
+
+```powershell
+$env:ANVIL_TIMING_HOST_LABEL = "windows-test-host"
+pwsh -NoProfile -File scripts/measure-windows-pytest.ps1 -Warmups 1 -Samples 5 -Modes serial,parallel -Output artifacts/windows-pytest-timing.json
+```
+
+The harness records every scheduled run and keeps raw logs in a Git-ignored
+directory. Run from an elevated shell when the timing result must be eligible
+for comparison; otherwise Windows hides Defender exclusions and the artifact
+keeps descriptive medians but exits nonzero with qualification and threshold
+evaluation explicitly unset.

@@ -2,9 +2,9 @@
 
 Coverage strategy: real local git tmpdirs (no mocks for git), real
 SqliteBackend (no in-memory stub), so every test exercises the actual
-subprocess + SQLite paths the engine uses in production. The cost is
-~50ms per test for git init/commit; the benefit is no false-green from
-wrong subprocess assumptions.
+subprocess + SQLite paths the engine uses in production. Each mutating test
+gets a physical copy of a committed session template, preserving isolation
+without repeating Git initialization and commit setup.
 """
 
 from __future__ import annotations
