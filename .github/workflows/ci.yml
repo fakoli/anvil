@@ -53,6 +53,36 @@ jobs:
           tests/test_installed_wheel.py
           -q
 
+  windows-source-binding:
+    name: windows sample source binding
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Verify sample source binding and first claim
+        env:
+          _TYPER_FORCE_DISABLE_TERMINAL: "1"
+        run: >-
+          uv run --project bin --locked pytest
+          tests/test_cli.py::TestInitWithSample
+          tests/test_cli.py::TestClaimCommand::test_new_claim_refuses_canonical_source_drift_before_state_or_git
+          tests/test_git_ops.py::TestWorkspaceLayoutGitOps::test_claim_creates_branch_in_project_repo_under_workspace_layout
+          tests/test_git_ops.py::TestWorkspaceLayoutGitOps::test_claim_json_returns_branch_with_no_warnings_under_workspace_layout
+          -q
+          --basetemp "${{ runner.temp }}/anvil-issue-180"
+
   test:
     name: test (python 3.11)
     runs-on: ubuntu-latest
