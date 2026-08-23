@@ -152,6 +152,11 @@ per broken link as `file:line: target`, and exit 1 when any are broken.
 - `pytest tests/test_check.py -v`
 """
 
+# Keep one canonical byte representation for both publication and lifecycle
+# approval.  Writing the text directly would let Windows translate LF to CRLF
+# while the seed pipeline continued hashing the LF-only embedded string.
+_SAMPLE_PRD_BYTES = SAMPLE_PRD.encode("utf-8")
+
 # The filename the sample PRD is written to inside .anvil/. Kept here
 # (rather than imported) so this module has no import cycle with init_status.
 _SAMPLE_PRD_FILENAME = "prd.md"
@@ -181,7 +186,7 @@ def write_sample_prd(state_dir: Path) -> Path:
     that owns the file.
     """
     prd_path = state_dir / _SAMPLE_PRD_FILENAME
-    prd_path.write_text(SAMPLE_PRD, encoding="utf-8")
+    prd_path.write_bytes(_SAMPLE_PRD_BYTES)
     return prd_path
 
 
@@ -190,6 +195,7 @@ def seed_sample_pipeline(
     *,
     actor: str = "anvil-cli",
     project_root: Path | None = None,
+    prd_path: Path | None = None,
 ) -> dict[str, Any]:
     """Drive parse → plan → score → review entirely offline against ``backend``.
 
@@ -209,9 +215,25 @@ def seed_sample_pipeline(
     :class:`SampleSeedError` if the embedded PRD fails to parse — that would be
     a packaging bug, surfaced cleanly rather than as a traceback.
     """
+    prd_text = SAMPLE_PRD
+    if prd_path is not None:
+        from anvil.cli._helpers import PrdSourceIngestError, ingest_prd_source
+
+        try:
+            published = ingest_prd_source(prd_path)
+        except PrdSourceIngestError as exc:
+            raise SampleSeedError(
+                f"cannot verify the published sample PRD: {exc}"
+            ) from None
+        if published.source_bytes != _SAMPLE_PRD_BYTES:
+            raise SampleSeedError(
+                "the published sample PRD changed before lifecycle approval"
+            )
+        prd_text = published.markdown
+
     return seed_pipeline_from_prd(
         backend,
-        SAMPLE_PRD,
+        prd_text,
         actor=actor,
         project_root=project_root,
         parse_error_hint=(

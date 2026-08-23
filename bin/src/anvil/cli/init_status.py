@@ -210,11 +210,12 @@ def init(
                 write_sample_prd,
             )
 
-            write_sample_prd(state_dir)
+            prd_path = write_sample_prd(state_dir)
             try:
                 seed_summary = seed_sample_pipeline(
                     backend,
                     project_root=project_dir,
+                    prd_path=prd_path,
                 )
             except SampleSeedError as exc:
                 typer.echo(f"Error: {exc}", err=True)
