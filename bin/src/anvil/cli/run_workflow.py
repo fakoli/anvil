@@ -76,13 +76,30 @@ def run_workflow(
         raise typer.Exit(code=1) from exc
 
     from anvil.clock import SystemClock
+    from anvil.planning.prd_persistence import (
+        PrdClaimBindingError,
+        require_canonical_prd_claim_binding,
+    )
 
     actor = os.environ.get("USER") or os.environ.get("USERNAME") or "agent"
     backend = _open_backend(state_dir)
     try:
-        records = _run_workflow(
-            backend, workflow, executor=_default_executor, actor=actor, clock=SystemClock()
-        )
+        try:
+            require_canonical_prd_claim_binding(state_dir, backend.get_prd())
+            records = _run_workflow(
+                backend,
+                workflow,
+                executor=_default_executor,
+                actor=actor,
+                clock=SystemClock(),
+                claim_pre_log_check=lambda: require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(),
+                ),
+            )
+        except PrdClaimBindingError as exc:
+            typer.echo(f"Error: prd_source_unapproved: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
     finally:
         backend.close()
 

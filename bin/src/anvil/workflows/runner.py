@@ -114,6 +114,7 @@ def run_workflow(
     clock: Clock,
     reviewer: str | None = None,
     fan_out_executor: FanOutExecutor | None = None,
+    claim_pre_log_check: Callable[[], None] | None = None,
 ) -> list[StepRecord]:
     """Run ``workflow`` to completion, returning one record per step (or per
     item for a ``fan_out`` step).
@@ -143,6 +144,7 @@ def run_workflow(
                     backend, step, items,
                     fan_out_executor=_item_exec,
                     actor=actor, clock=clock, reviewer=reviewer,
+                    claim_pre_log_check=claim_pre_log_check,
                 )
             )
             continue
@@ -158,7 +160,10 @@ def run_workflow(
             step_id=step.id,
         )
         mgr = ClaimManager(backend, clock, actor=actor)
-        claim = mgr.claim(task_id).claim
+        claim = mgr.claim(
+            task_id,
+            pre_log_check=claim_pre_log_check,
+        ).claim
 
         outcome = executor(step)
 

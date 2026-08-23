@@ -284,99 +284,26 @@ def build_prd_revision_draft(
     graph must commit together; otherwise a graph can claim an older revision
     while describing newer task text. Exact matches need no extra operation.
     """
-    from anvil.state.models import EventDraft
+    from anvil.planning.prd_persistence import build_prd_persistence_plan
 
-    stored_prd_id = parsed.prd.id
-    existing_prd = backend.get_prd(stored_prd_id)
+    existing_prd = backend.get_prd(parsed.prd.id)
     if existing_prd is None:
         raise ValueError("planning source has no persisted PRD")
-    if existing_prd.source_sha256 == source.source_sha256:
-        return None
     project = backend.get_project()
     if project is None:
         raise ValueError("planning source has no persisted project")
-
-    new_requirements = [
-        {
-            "id": requirement.id,
-            "prd_section": requirement.prd_section,
-            "text": requirement.text,
-            "source_paragraph": requirement.source_paragraph,
-            "derived": requirement.derived,
-        }
-        for requirement in parsed.requirements
-    ]
-    live_requirements = backend.list_requirements(prd_id=stored_prd_id)
-    live_by_id = {requirement.id: requirement for requirement in live_requirements}
-    all_requirements = backend.list_requirements(
-        prd_id=stored_prd_id,
-        include_superseded=True,
-    )
-    all_ids = {requirement.id for requirement in all_requirements}
-    new_by_id = {requirement["id"]: requirement for requirement in new_requirements}
-    readded_retired = sorted(
-        requirement_id
-        for requirement_id in new_by_id
-        if requirement_id in all_ids and requirement_id not in live_by_id
-    )
-    if readded_retired:
-        raise ValueError("planning source re-adds a retired requirement id")
-
-    revision = existing_prd.revision + 1
-    payload: dict[str, Any] = {
-        "project_id": project.id,
-        "prd_id": stored_prd_id,
-        "revision": revision,
-        "expected_status": existing_prd.status.value,
-        "is_default": existing_prd.is_default,
-        "title": parsed.prd.title,
-        "target_version": existing_prd.target_version,
-        "target_tag": existing_prd.target_tag,
-        "status": existing_prd.status.value,
-        "summary": parsed.prd.summary,
-        "goals": parsed.prd.goals,
-        "non_goals": parsed.prd.non_goals,
-        "acceptance_criteria": parsed.prd.acceptance_criteria,
-        "risks": parsed.prd.risks,
-        "open_questions": parsed.prd.open_questions,
-        "assumptions": [item.model_dump() for item in parsed.prd.assumptions],
-        "requirements_added": [
-            requirement
-            for requirement in new_requirements
-            if requirement["id"] not in all_ids
-        ],
-        "requirements_superseded": [
-            {
-                "id": requirement.id,
-                "prd_section": requirement.prd_section,
-                "text": requirement.text,
-                "source_paragraph": requirement.source_paragraph,
-                "derived": requirement.derived,
-            }
-            for requirement in live_requirements
-            if requirement.id not in new_by_id
-        ],
-        "requirements_unchanged": [
-            new_by_id[requirement_id]
-            for requirement_id in live_by_id
-            if requirement_id in new_by_id
-        ],
-        "source_text": source.markdown,
-        "source_sha256": source.source_sha256,
-        "source_size_bytes": source.source_size_bytes,
-        "source_encoding": source.source_encoding,
-        "source_revision": revision,
-        "provenance_state": "available",
-        "content_available": True,
-    }
-    return EventDraft(
-        timestamp=clock.now(),
+    plan = build_prd_persistence_plan(
+        backend,
+        parsed,
+        source,
+        project_id=project.id,
+        is_default=existing_prd.is_default,
         actor=actor,
-        action="prd.revised",
-        target_kind="prd",
-        target_id=stored_prd_id,
-        payload_json=payload,
+        clock=clock,
     )
+    if plan.action == "parsed":
+        raise ValueError("planning source has no persisted PRD")
+    return plan.draft
 
 
 def emit_planning_batch(

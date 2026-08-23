@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
@@ -124,6 +126,35 @@ steps:
         pass
 
 
+def test_runner_threads_claim_linearization_check_before_executor(
+    approved_backend, frozen_clock
+):  # type: ignore[no-untyped-def]
+    wf = parse_workflow(
+        'name: guarded\nsteps:\n  - id: guarded\n    run: "do guarded"\n'
+    )
+    executed = False
+
+    def executor(step):  # type: ignore[no-untyped-def]
+        nonlocal executed
+        executed = True
+        return StepOutcome(success=True)
+
+    def refuse() -> None:
+        raise RuntimeError("source changed at claim linearization")
+
+    with pytest.raises(RuntimeError, match="source changed"):
+        run_workflow(
+            approved_backend,
+            wf,
+            executor=executor,
+            actor="r",
+            clock=frozen_clock,
+            claim_pre_log_check=refuse,
+        )
+    assert executed is False
+    assert approved_backend.list_active_claims() == []
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -174,5 +205,46 @@ def test_cli_end_to_end_runs_workflow(tmp_path: Path):
         result = runner.invoke(app, ["run-workflow", "demo"], catch_exceptions=False)
         assert result.exit_code == 0, result.output
         assert "1 step(s) applied" in result.output
+    finally:
+        os.chdir(cwd)
+
+
+def test_cli_refuses_workflow_claim_after_unparsed_source_drift(tmp_path: Path):
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        runner.invoke(app, ["init", "--name", "Drift"], catch_exceptions=False)
+        source_path = Path(".anvil/prd.md")
+        source_path.write_text(
+            "# Project: Drift\n\n## Summary\n\nS.\n\n## Goals\n\n- G.\n\n"
+            "## Requirements\n\n- R001: r.\n",
+            encoding="utf-8",
+        )
+        assert runner.invoke(app, ["prd", "parse"]).exit_code == 0
+        assert runner.invoke(app, ["prd", "review"]).exit_code == 0
+        assert runner.invoke(app, ["prd", "review", "--approve"]).exit_code == 0
+        wf_dir = Path(".anvil/workflows")
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "demo.yaml").write_text(
+            'name: demo\nsteps:\n  - id: check\n    run: "verify"\n',
+            encoding="utf-8",
+        )
+        source_path.write_bytes(
+            source_path.read_bytes() + b"\n<!-- unparsed workflow drift -->\n"
+        )
+        before_events = Path(".anvil/events.jsonl").read_bytes()
+
+        result = runner.invoke(app, ["run-workflow", "demo"])
+
+        assert result.exit_code == 1
+        assert "prd_source_unapproved" in result.output
+        assert Path(".anvil/events.jsonl").read_bytes() == before_events
+        with sqlite3.connect(".anvil/state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE id LIKE 'WT-%'"
+            ).fetchone()[0] == 0
     finally:
         os.chdir(cwd)

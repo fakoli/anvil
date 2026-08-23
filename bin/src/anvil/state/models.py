@@ -1183,6 +1183,13 @@ class PRD(BaseModel):
     # explicitly; ``model_dump()`` must never leak raw source bytes.
     source_bytes: StrictBytes | None = Field(default=None, exclude=True, repr=False)
     source_sha256: StrictStr | None = Field(default=None, exclude=True)
+    material_sha256: StrictStr | None = Field(default=None, exclude=True)
+    content_event_id: StrictStr | None = Field(default=None, exclude=True)
+    lifecycle_revision: StrictInt | None = Field(default=None, ge=1, exclude=True)
+    lifecycle_source_sha256: StrictStr | None = Field(default=None, exclude=True)
+    lifecycle_material_sha256: StrictStr | None = Field(default=None, exclude=True)
+    lifecycle_content_event_id: StrictStr | None = Field(default=None, exclude=True)
+    review_event_id: StrictStr | None = Field(default=None, exclude=True)
     source_size_bytes: StrictInt | None = Field(
         default=None,
         ge=0,
@@ -1224,6 +1231,13 @@ class PRD(BaseModel):
         sensitive_fields = {
             "source_bytes",
             "source_sha256",
+            "material_sha256",
+            "content_event_id",
+            "lifecycle_revision",
+            "lifecycle_source_sha256",
+            "lifecycle_material_sha256",
+            "lifecycle_content_event_id",
+            "review_event_id",
             "source_size_bytes",
             "source_encoding",
             "source_revision",
@@ -1336,6 +1350,25 @@ class PRD(BaseModel):
             raise ValueError("source digest does not match exact source bytes")
         if self.source_revision != self.revision:
             raise ValueError("source provenance must bind the projected PRD revision")
+        lifecycle = (
+            self.lifecycle_revision,
+            self.lifecycle_source_sha256,
+            self.lifecycle_material_sha256,
+            self.lifecycle_content_event_id,
+        )
+        exact = (
+            self.revision,
+            self.source_sha256,
+            self.material_sha256,
+            self.content_event_id,
+        )
+        if any(value is not None for value in lifecycle):
+            if lifecycle != exact or self.review_event_id is None:
+                raise ValueError(
+                    "PRD lifecycle binding must match its exact content lineage"
+                )
+        elif self.review_event_id is not None:
+            raise ValueError("review event identity requires a lifecycle binding")
         return self
 
     @field_validator("last_reviewed_at", mode="after")

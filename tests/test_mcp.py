@@ -163,6 +163,7 @@ def _add_prd(
     *,
     prd_id: str = "default",
     is_default: int = 1,
+    write_source: bool = True,
 ) -> None:
     """Insert a PRD row directly via SQLite.
 
@@ -172,17 +173,71 @@ def _add_prd(
     that the no-arg ``get_prd()`` resolves. Pass ``prd_id`` + ``is_default=0`` to
     seed an additional NON-default PRD (e.g. a multi-PRD per-PRD-gate test).
     """
+    from types import SimpleNamespace
+
+    from anvil.cli._helpers import prd_source_path
+    from anvil.planning.prd_persistence import material_content_sha256
+
     db_path = str(state_dir / "state.db")
     iso = "2026-05-24T18:00:00+00:00"
+    title = "Test Project"
+    source_bytes = (
+        b"# Project: Test Project\n\n"
+        b"## Summary\nTest summary.\n\n"
+        b"## Goals\n- Test the project.\n\n"
+        b"## Non-Goals\n- None.\n\n"
+        b"## Requirements\n- R001: Work.\n\n"
+        b"## Acceptance Criteria\n- Work succeeds.\n\n"
+        b"## Risks\n- None.\n"
+    )
+    if write_source:
+        source_path = prd_source_path(state_dir, prd_id)
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(source_bytes)
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    material_sha256 = material_content_sha256(
+        SimpleNamespace(
+            source_bytes=source_bytes,
+            markdown=source_bytes.decode(),
+            source_sha256=source_sha256,
+            source_size_bytes=len(source_bytes),
+            source_encoding="utf-8",
+        ),
+        title,
+    )
+    content_event_id = f"E-TEST-CONTENT-{prd_id}"
+    lifecycle = (
+        (1, source_sha256, material_sha256, content_event_id, f"E-TEST-REVIEW-{prd_id}")
+        if status in {"reviewed", "approved"}
+        else (None, None, None, None, None)
+    )
     conn = sqlite3.connect(db_path)
     conn.execute("""
         INSERT OR REPLACE INTO prds
-        (id, project_id, status, summary, goals, non_goals, requirements,
+        (id, project_id, title, status, summary, goals, non_goals, requirements,
          acceptance_criteria, risks, open_questions,
-         is_default, created_at, updated_at)
-        VALUES (?, 'proj-test', ?, 'Test summary.', '[]', '[]', '[]',
-                '[]', '[]', '[]', ?, ?, ?)
-    """, (prd_id, status, is_default, iso, iso))
+         is_default, revision, source_bytes, source_sha256, source_size_bytes,
+         source_encoding, source_revision, provenance_state, content_available,
+         material_sha256, content_event_id, lifecycle_revision,
+         lifecycle_source_sha256, lifecycle_material_sha256,
+         lifecycle_content_event_id, review_event_id, created_at, updated_at)
+        VALUES (?, 'proj-test', ?, ?, 'Test summary.', '[]', '[]', '[]',
+                '[]', '[]', '[]', ?, 1, ?, ?, ?, 'utf-8', 1, 'available', 1,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        prd_id,
+        title,
+        status,
+        is_default,
+        source_bytes,
+        source_sha256,
+        len(source_bytes),
+        material_sha256,
+        content_event_id,
+        *lifecycle,
+        iso,
+        iso,
+    ))
     conn.commit()
     conn.close()
 
@@ -811,6 +866,63 @@ class TestBundleTools:
         _add_task(state_dir, task_id="T001", likely_files=["src/one.py"])
         _add_task(state_dir, task_id="T002", likely_files=["src/two.py"])
         _add_task(state_dir, task_id="T003", likely_files=["src/three.py"])
+
+    def test_claim_bundle_releases_when_source_changes_during_linearization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.git_ops as git_ops
+        from anvil.cli._helpers import prd_source_path
+
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        source_path = prd_source_path(tmp_path / ".anvil", "default")
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        original = git_ops.revalidate_claim_plan
+        before_events: bytes | None = None
+
+        def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
+            original(plan, cwd=cwd)
+            source_path.write_bytes(
+                source_path.read_bytes() + b"\n<!-- concurrent bundle drift -->\n"
+            )
+
+        monkeypatch.setattr(
+            git_ops, "revalidate_claim_plan", drift_after_git_revalidation
+        )
+
+        async def run() -> None:
+            nonlocal before_events
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001", "T002"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                before_events = events_path.read_bytes()
+                await client.call_tool(
+                    "claim_bundle",
+                    {"bundle_id": "B001", "actor": "coordinator"},
+                )
+
+        with pytest.raises(ToolError, match="prd_source_unapproved"):
+            _run(run())
+        assert before_events is not None
+        assert events_path.read_bytes() == before_events
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM bundle_claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM execution_bundles WHERE id='B001'"
+            ).fetchone()[0] == "planned"
 
     def test_create_read_claim_packet_and_progress(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2345,7 +2457,7 @@ class TestClaimTask:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> Any:
@@ -2365,11 +2477,55 @@ class TestClaimTask:
             "<path>",
         ]
 
+    def test_claim_releases_when_source_changes_during_linearization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.git_ops as git_ops
+        from anvil.cli._helpers import prd_source_path
+
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="approved")
+        monkeypatch.chdir(tmp_path)
+        source_path = prd_source_path(state_dir, "default")
+        before_events = (state_dir / "events.jsonl").read_bytes()
+        original = git_ops.revalidate_claim_plan
+
+        def drift_after_git_revalidation(plan, *, cwd):  # type: ignore[no-untyped-def]
+            original(plan, cwd=cwd)
+            source_path.write_bytes(
+                source_path.read_bytes() + b"\n<!-- concurrent task drift -->\n"
+            )
+
+        monkeypatch.setattr(
+            git_ops, "revalidate_claim_plan", drift_after_git_revalidation
+        )
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "claim_task",
+                    {"task_id": "T001", "claimed_by": "agent-x"},
+                )
+
+        with pytest.raises(ToolError, match="prd_source_unapproved"):
+            _run(run())
+        assert (state_dir / "events.jsonl").read_bytes() == before_events
+        with sqlite3.connect(state_dir / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE status='active'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM tasks WHERE id='T001'"
+            ).fetchone()[0] == "ready"
+
     def test_happy_path_returns_claim_response(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> Any:
@@ -2416,7 +2572,7 @@ class TestClaimTask:
                     "claimed_by": "agent-x",
                 })
 
-        with pytest.raises(ToolError, match="PRD must be in"):
+        with pytest.raises(ToolError, match="prd_source_unapproved|approve"):
             _run(run())
 
     def test_error_when_prd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2436,7 +2592,7 @@ class TestClaimTask:
         # Tightened from "missing|draft|PRD" (loose: only the bare 'PRD' substring
         # matched): the missing-PRD case now flows through ClaimManager Gate 3,
         # which raises "no PRD found" - pin that so a future reword can't pass silently.
-        with pytest.raises(ToolError, match="no PRD found"):
+        with pytest.raises(ToolError, match="prd_source_unapproved|unavailable"):
             _run(run())
 
     def test_claims_task_in_approved_nondefault_prd_via_mcp(
@@ -2470,7 +2626,7 @@ class TestClaimTask:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -2695,7 +2851,7 @@ class TestSubmitProgress:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -2959,7 +3115,7 @@ class TestSubmitCompletionEvidence:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         command = "pytest -q"
         _set_required_command_proof(state_dir, "T001", command)
         monkeypatch.chdir(tmp_path)
@@ -3104,7 +3260,7 @@ class TestSubmitCompletionEvidence:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         command = "pytest -q"
         _set_required_command_proof(state_dir, "T001", command)
         monkeypatch.chdir(tmp_path)
@@ -3155,7 +3311,7 @@ class TestSubmitCompletionEvidence:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         command = "pytest -q"
         _set_required_command_proof(state_dir, "T001", command)
         monkeypatch.chdir(tmp_path)
@@ -4459,7 +4615,7 @@ class TestConflictsAfterClaim:
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> Any:
@@ -4517,7 +4673,7 @@ class TestGetNextTaskPriorityOrdering:
         _add_task(state_dir, task_id="T_LOW",  status="ready", priority="low")
         _add_task(state_dir, task_id="T_MED",  status="ready", priority="medium")
         _add_task(state_dir, task_id="T_HIGH", status="ready", priority="high")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         results: list[str] = []
@@ -4725,6 +4881,68 @@ def _events_with_action(state_dir: Path, action: str) -> list[dict[str, Any]]:
     return out
 
 
+def _append_bound_review_and_approval(
+    backend: object,
+    append_fn: object,
+    draft: object,
+    *,
+    project_id: str,
+    actor: str,
+) -> None:
+    """Append current v21 review/approval facts in deterministic race tests."""
+    from typing import cast
+
+    from anvil.state.models import EventDraft
+    from anvil.state.sqlite import SqliteBackend
+
+    typed_backend = cast(SqliteBackend, backend)
+    typed_append = cast(Any, append_fn)
+    typed_draft = cast(EventDraft, draft)
+    prd = typed_backend.get_prd("default")
+    assert prd is not None
+    binding = {
+        "project_id": project_id,
+        "prd_id": "default",
+        "expected_revision": prd.revision,
+        "source_sha256": prd.source_sha256,
+        "material_sha256": prd.material_sha256,
+        "content_event_id": prd.content_event_id,
+        "binding_version": 1,
+    }
+    review = typed_append(
+        typed_backend,
+        EventDraft(
+            timestamp=typed_draft.timestamp,
+            actor=actor,
+            action="prd.reviewed",
+            target_kind="prd",
+            target_id=project_id,
+            payload_json={
+                **binding,
+                "expected_status": "draft",
+                "reviewer": actor,
+            },
+        ),
+    )
+    assert review is not None
+    typed_append(
+        typed_backend,
+        EventDraft(
+            timestamp=typed_draft.timestamp,
+            actor=actor,
+            action="prd.approved",
+            target_kind="prd",
+            target_id=project_id,
+            payload_json={
+                **binding,
+                "expected_status": "reviewed",
+                "review_event_id": review.id,
+                "approver": actor,
+            },
+        ),
+    )
+
+
 # ===========================================================================
 # Tool 14: init_project
 # ===========================================================================
@@ -4907,6 +5125,43 @@ class TestGetProjectStatus:
 
 
 class TestParsePrd:
+    def test_byte_identical_prd_revision_is_exact_source_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        _run(parse())
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        response = _run(parse())
+        assert response["prd_status"] == "draft"
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert _events_with_action(state_dir, "prd.revised") == []
+
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.revision == prd.source_revision == 1
+        assert prd.source_sha256 == hashlib.sha256(
+            (state_dir / "prd.md").read_bytes()
+        ).hexdigest()
+
     def test_provenance_is_byte_identical_to_cli_for_same_revisions(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5076,6 +5331,15 @@ class TestParsePrd:
                 interleaved = True
                 winner = dict(draft.payload_json)
                 winner["title"] = "Concurrent MCP Winner"
+                winner_source = str(winner["source_text"]).replace(
+                    "# Project: MCP Test Project",
+                    "# Project: Concurrent MCP Winner",
+                    1,
+                )
+                winner["source_text"] = winner_source
+                winner_bytes = winner_source.encode()
+                winner["source_sha256"] = hashlib.sha256(winner_bytes).hexdigest()
+                winner["source_size_bytes"] = len(winner_bytes)
                 real_append(
                     self,
                     EventDraft(
@@ -5087,24 +5351,13 @@ class TestParsePrd:
                         payload_json=winner,
                     ),
                 )
-                for action, identity_key in (
-                    ("prd.reviewed", "reviewer"),
-                    ("prd.approved", "approver"),
-                ):
-                    real_append(
-                        self,
-                        EventDraft(
-                            timestamp=draft.timestamp,
-                            actor="concurrent-human",
-                            action=action,
-                            target_kind="prd",
-                            target_id=draft.target_id,
-                            payload_json={
-                                "project_id": draft.payload_json["project_id"],
-                                identity_key: "concurrent-human",
-                            },
-                        ),
-                    )
+                _append_bound_review_and_approval(
+                    self,
+                    real_append,
+                    draft,
+                    project_id=str(draft.payload_json["project_id"]),
+                    actor="concurrent-human",
+                )
             return real_append(self, draft)
 
         monkeypatch.setattr(SqliteBackend, "append", create_and_approve_before_stale)
@@ -5564,7 +5817,6 @@ class TestParsePrd:
         _run(first_parse())
 
         from anvil.clock import SystemClock
-        from anvil.state.models import EventDraft
         from anvil.state.sqlite import SqliteBackend
 
         real_append = SqliteBackend.append
@@ -5575,33 +5827,12 @@ class TestParsePrd:
             if draft.action == "prd.revised" and not interleaved:
                 interleaved = True
                 project_id = draft.payload_json["project_id"]
-                real_append(
+                _append_bound_review_and_approval(
                     self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-reviewer",
-                        action="prd.reviewed",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "reviewer": "concurrent-reviewer",
-                        },
-                    ),
-                )
-                real_append(
-                    self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-approver",
-                        action="prd.approved",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "approver": "concurrent-approver",
-                        },
-                    ),
+                    real_append,
+                    draft,
+                    project_id=str(project_id),
+                    actor="concurrent-human",
                 )
             return real_append(self, draft)
 
@@ -5651,7 +5882,6 @@ class TestParsePrd:
 
         _run(first_parse())
         from anvil.clock import SystemClock
-        from anvil.state.models import EventDraft
         from anvil.state.sqlite import SqliteBackend
 
         real_append = SqliteBackend.append
@@ -5664,37 +5894,12 @@ class TestParsePrd:
                 assert draft.payload_json["expected_revision"] == 1
                 assert draft.payload_json["expected_status"] == "draft"
                 project_id = draft.payload_json["project_id"]
-                real_append(
+                _append_bound_review_and_approval(
                     self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-reviewer",
-                        action="prd.reviewed",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "expected_revision": 1,
-                            "expected_status": "draft",
-                            "reviewer": "concurrent-reviewer",
-                        },
-                    ),
-                )
-                real_append(
-                    self,
-                    EventDraft(
-                        timestamp=draft.timestamp,
-                        actor="concurrent-approver",
-                        action="prd.approved",
-                        target_kind="prd",
-                        target_id=project_id,
-                        payload_json={
-                            "project_id": project_id,
-                            "expected_revision": 1,
-                            "expected_status": "reviewed",
-                            "approver": "concurrent-approver",
-                        },
-                    ),
+                    real_append,
+                    draft,
+                    project_id=str(project_id),
+                    actor="concurrent-human",
                 )
             return real_append(self, draft)
 
@@ -8238,7 +8443,7 @@ class TestFindDecisions:
         """anvil initialized but prd.md missing → ToolError (matches
         parse_prd behaviour; see find_decisions docstring for rationale)."""
         state_dir = _init_state_dir(tmp_path)
-        _add_prd(state_dir)
+        _add_prd(state_dir, write_source=False)
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -8528,7 +8733,7 @@ class TestRequireActor:
         _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -8547,7 +8752,7 @@ class TestRequireActor:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -8567,7 +8772,7 @@ class TestRequireActor:
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -8596,7 +8801,7 @@ class TestRequireActor:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
-        _add_prd(state_dir, status="reviewed")
+        _add_prd(state_dir, status="approved")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> tuple[dict[str, Any], dict[str, Any]]:

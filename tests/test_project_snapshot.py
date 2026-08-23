@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -17,6 +18,7 @@ from typer.testing import CliRunner
 import anvil.project_snapshot as snapshot_module
 from anvil.cli import app
 from anvil.clock import FrozenClock
+from anvil.planning.prd_persistence import material_content_sha256
 from anvil.project_snapshot import ProjectSnapshotError, read_project_snapshot
 from anvil.read_contracts import (
     ProviderLimitNameV1,
@@ -71,9 +73,8 @@ def _prd_payload(
         "project_id": "project-1",
         "prd_id": prd_id,
         "is_default": prd_id == "default",
-        "expected_absent": True,
         "title": title,
-        "status": "approved",
+        "status": "draft",
         "summary": "SOURCE_SUMMARY_SECRET",
         "goals": [],
         "non_goals": [],
@@ -83,15 +84,25 @@ def _prd_payload(
         "open_questions": [],
     }
     if source is not None:
+        source_sha256 = hashlib.sha256(source).hexdigest()
+        exact = SimpleNamespace(
+            source_bytes=source,
+            markdown=source.decode("utf-8"),
+            source_sha256=source_sha256,
+            source_size_bytes=len(source),
+            source_encoding="utf-8",
+        )
         payload.update(
             {
+                "expected_absent": True,
                 "source_text": source.decode("utf-8"),
-                "source_sha256": hashlib.sha256(source).hexdigest(),
+                "source_sha256": source_sha256,
                 "source_size_bytes": len(source),
                 "source_encoding": "utf-8",
                 "source_revision": 1,
                 "provenance_state": "available",
                 "content_available": True,
+                "material_sha256": material_content_sha256(exact, title),
             }
         )
     return payload
@@ -263,6 +274,15 @@ def _read_error_schema() -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_output_schema() -> dict[str, object]:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "bin/src/anvil/_data/contracts/provider-reads/v1/"
+        "project-snapshot-output.schema.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_project_snapshot_cli_success_is_closed_json_and_read_only(
     cli_populated: tuple[Path, Path],
 ) -> None:
@@ -282,7 +302,7 @@ def test_project_snapshot_cli_success_is_closed_json_and_read_only(
     assert data["operation_version"] == 1
     assert data["output_schema_id"] == "anvil.state.project-snapshot.v1"
     assert data["api_version"] == "14"
-    assert data["schema_version"] == 20
+    assert data["schema_version"] == 21
     assert data["digest_algorithm"] == "sha256"
     assert data["truncated"] is False
     assert data["payload"]["schema_id"] == data["output_schema_id"]
@@ -293,6 +313,7 @@ def test_project_snapshot_cli_success_is_closed_json_and_read_only(
     assert len(data["payload"]["prds"]) == 2
     assert len(data["payload"]["features"]) == 2
     assert len(data["payload"]["tasks"]) == 2
+    Draft202012Validator(_read_output_schema()).validate(data)
     wire = result.stdout.encode("utf-8")
     for secret in (
         b"PROJECT_DESCRIPTION_SECRET",
@@ -440,7 +461,7 @@ def test_repeat_read_is_deterministic_and_does_not_mutate_state(
     assert first.event_cursor.event_count == 8
     assert (
         first.event_cursor.event_frontier_sha256
-        == "0417dbd4b57bf51d7b975425931f0f4f2391e1ef0082e8ca4f132f0857e5b3af"
+        == "81a9ac7c79a4e0568ad69d0f89bbdaa9a139164b473ae83d467b8527a638094f"
     )
     assert before == after
 

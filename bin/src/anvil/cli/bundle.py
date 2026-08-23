@@ -196,6 +196,10 @@ def claim_bundle(
 ) -> None:
     """Claim a bundle without Git side effects (use top-level claim for Git)."""
     from anvil.bundles.manager import BundleActorMismatch, BundleError
+    from anvil.planning.prd_persistence import (
+        PrdClaimBindingError,
+        require_canonical_prd_claim_binding,
+    )
 
     command = "bundle claim"
     state_dir, backend = _state(cwd, command, json_output)
@@ -224,9 +228,22 @@ def claim_bundle(
                     f"{len(shared)} active task claim(s) share this checkout; "
                     "prefer the top-level CLI worktree claim path."
                 )
-        result = _manager(
-            backend, state_dir, resolve_actor(actor), cwd=cwd
-        ).claim(bundle_id)
+        bundle = backend.get_bundle(bundle_id)
+        if bundle is None:
+            _fail(command, f"Bundle '{bundle_id}' not found.", json_output)
+        manager = _manager(backend, state_dir, resolve_actor(actor), cwd=cwd)
+        with backend.claim_operation_lock():
+            require_canonical_prd_claim_binding(
+                state_dir,
+                backend.get_prd(bundle.prd_id),
+            )
+            result = manager.claim(
+                bundle_id,
+                pre_log_check=lambda: require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(bundle.prd_id),
+                ),
+            )
     except BundleActorMismatch as exc:
         if json_output:
             fail_with(
@@ -236,6 +253,8 @@ def claim_bundle(
                 extra={"owner": exc.owner, "resolved_actor": exc.actual},
             )
         _fail(command, str(exc), json_output)
+    except PrdClaimBindingError as exc:
+        _fail(command, str(exc), json_output, code="prd_source_unapproved")
     except BundleError as exc:
         _fail(command, str(exc), json_output)
     finally:

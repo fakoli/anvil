@@ -510,6 +510,329 @@ class TestSchemaMismatch:
 
 
 class TestAuditGuarantee:
+    @pytest.mark.parametrize(
+        ("prd_id", "is_default"),
+        [("default", True), ("named-release", False)],
+    )
+    def test_v20_exact_source_migration_matches_empty_v21_replay_material(
+        self,
+        tmp_path: Path,
+        prd_id: str,
+        is_default: bool,
+    ) -> None:
+        """Legacy exact-source events derive identical v21 material lineage."""
+        events_path = str(tmp_path / "events.jsonl")
+        db_path = str(tmp_path / "state.db")
+        backend = _make_backend(tmp_path, _make_clock())
+        try:
+            backend.append(_make_project_event())
+            payload = _make_prd_parsed_payload()
+            payload.pop("material_sha256")
+            source = """\
+# Project: Test Project
+
+## Summary
+
+A test PRD summary.
+
+## Goals
+
+- Goal one.
+
+## Requirements
+
+- R001: The system does X.
+"""
+            source_bytes = source.encode("utf-8")
+            payload.update({
+                "prd_id": prd_id,
+                "is_default": is_default,
+                "source_text": source,
+                "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "source_size_bytes": len(source_bytes),
+            })
+            backend.append(
+                _make_event(
+                    "prd.parsed",
+                    payload,
+                    target_id=prd_id,
+                )
+            )
+        finally:
+            backend.close()
+
+        # Pre-v21 logs could carry lifecycle-looking status directly on a
+        # parse event. Keep the migrated projection and immutable event row in
+        # that historical shape; v21 replay must demote it just as migration
+        # does instead of manufacturing approval authority from content alone.
+        rewritten: list[str] = []
+        parsed_payload_json: str | None = None
+        for raw in Path(events_path).read_text(encoding="utf-8").splitlines():
+            event = json.loads(raw)
+            if event["action"] == "prd.parsed":
+                event["payload_json"]["status"] = "approved"
+                parsed_payload_json = json.dumps(
+                    event["payload_json"], separators=(",", ":")
+                )
+            rewritten.append(json.dumps(event, separators=(",", ":")))
+        Path(events_path).write_text(
+            "\n".join(rewritten) + "\n", encoding="utf-8"
+        )
+        assert parsed_payload_json is not None
+
+        # Model the exact v20 projection: complete v18 source provenance and
+        # content event in the immutable log, but no v21 material columns or
+        # trustworthy lifecycle binding. Existing columns are nulled rather
+        # than dropped so this test remains portable across SQLite builds.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE events SET payload_json = ? WHERE action = 'prd.parsed'",
+                (parsed_payload_json,),
+            )
+            conn.execute(
+                "UPDATE prds SET status = 'approved', material_sha256 = NULL, "
+                "content_event_id = NULL WHERE id = ?",
+                (prd_id,),
+            )
+            conn.execute("PRAGMA user_version = 20")
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated_backend = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        migrated_backend.initialize()
+        try:
+            migrated = migrated_backend.get_prd(prd_id)
+            assert migrated is not None
+            migrated_binding = (
+                migrated.status,
+                migrated.revision,
+                migrated.source_sha256,
+                migrated.material_sha256,
+                migrated.content_event_id,
+                migrated.lifecycle_revision,
+                migrated.lifecycle_source_sha256,
+                migrated.lifecycle_material_sha256,
+                migrated.lifecycle_content_event_id,
+            )
+            assert migrated.status.value == "draft"
+            assert migrated.material_sha256 is not None
+            assert migrated.content_event_id == "E000002"
+            migrated_backend.replay_from_empty(events_path)
+            replayed = migrated_backend.get_prd(prd_id)
+            assert replayed is not None
+            replayed_binding = (
+                replayed.status,
+                replayed.revision,
+                replayed.source_sha256,
+                replayed.material_sha256,
+                replayed.content_event_id,
+                replayed.lifecycle_revision,
+                replayed.lifecycle_source_sha256,
+                replayed.lifecycle_material_sha256,
+                replayed.lifecycle_content_event_id,
+            )
+            assert replayed_binding == migrated_binding
+        finally:
+            migrated_backend.close()
+
+    @pytest.mark.parametrize(
+        ("prd_id", "is_default"),
+        [("default", True), ("named-release", False)],
+    )
+    def test_v20_legacy_approved_revision_migration_matches_v21_replay(
+        self,
+        tmp_path: Path,
+        prd_id: str,
+        is_default: bool,
+    ) -> None:
+        """A lineage-less revision cannot restore demoted legacy approval."""
+        events_path = tmp_path / "events.jsonl"
+        db_path = tmp_path / "state.db"
+        backend = _make_backend(tmp_path, _make_clock())
+        source_v1 = """\
+# Project: Test Project
+
+## Summary
+
+A test PRD summary.
+
+## Goals
+
+- Goal one.
+
+## Requirements
+
+- R001: The system does X.
+"""
+        source_v2 = source_v1.replace(
+            "# Project: Test Project", "# Project: Test Project v2", 1
+        )
+        try:
+            backend.append(_make_project_event())
+            parsed = _make_prd_parsed_payload()
+            parsed.pop("material_sha256")
+            source_v1_bytes = source_v1.encode()
+            parsed.update(
+                {
+                    "prd_id": prd_id,
+                    "is_default": is_default,
+                    "source_text": source_v1,
+                    "source_sha256": hashlib.sha256(source_v1_bytes).hexdigest(),
+                    "source_size_bytes": len(source_v1_bytes),
+                }
+            )
+            backend.append(_make_event("prd.parsed", parsed, target_id=prd_id))
+            backend.append(
+                _make_event(
+                    "prd.reviewed",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": prd_id,
+                        "reviewer": "reviewer",
+                    },
+                    target_id=prd_id,
+                )
+            )
+            backend.append(
+                _make_event(
+                    "prd.approved",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": prd_id,
+                        "approver": "approver",
+                    },
+                    target_id=prd_id,
+                )
+            )
+            source_v2_bytes = source_v2.encode()
+            backend.append(
+                _make_event(
+                    "prd.revised",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": prd_id,
+                        "revision": 2,
+                        "expected_status": "approved",
+                        "title": "Test Project v2",
+                        "is_default": is_default,
+                        "status": "approved",
+                        "summary": parsed["summary"],
+                        "goals": parsed["goals"],
+                        "non_goals": parsed["non_goals"],
+                        "acceptance_criteria": parsed["acceptance_criteria"],
+                        "risks": parsed["risks"],
+                        "open_questions": parsed["open_questions"],
+                        "requirements_added": [],
+                        "requirements_superseded": [],
+                        "requirements_unchanged": parsed["requirements"],
+                        "source_text": source_v2,
+                        "source_sha256": hashlib.sha256(source_v2_bytes).hexdigest(),
+                        "source_size_bytes": len(source_v2_bytes),
+                        "source_encoding": "utf-8",
+                        "source_revision": 2,
+                        "provenance_state": "available",
+                        "content_available": True,
+                    },
+                    target_id=prd_id,
+                )
+            )
+        finally:
+            backend.close()
+
+        # Convert the lifecycle events to their real pre-v21 byte shape. The
+        # final v20 projection retained approved status after the title-only
+        # revision; migration must demote it exactly as an empty replay does.
+        rewritten: list[str] = []
+        payloads_by_id: dict[str, str] = {}
+        for raw in events_path.read_text(encoding="utf-8").splitlines():
+            event = json.loads(raw)
+            if event["action"] == "prd.reviewed":
+                payload = event["payload_json"]
+                for key in (
+                    "binding_version",
+                    "expected_revision",
+                    "expected_status",
+                    "source_sha256",
+                    "material_sha256",
+                    "content_event_id",
+                ):
+                    payload.pop(key, None)
+            elif event["action"] == "prd.approved":
+                payload = event["payload_json"]
+                for key in (
+                    "binding_version",
+                    "expected_revision",
+                    "expected_status",
+                    "source_sha256",
+                    "material_sha256",
+                    "content_event_id",
+                    "review_event_id",
+                ):
+                    payload.pop(key, None)
+            payloads_by_id[event["id"]] = json.dumps(
+                event["payload_json"], separators=(",", ":")
+            )
+            rewritten.append(json.dumps(event, separators=(",", ":")))
+        events_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+        conn = sqlite3.connect(db_path)
+        try:
+            for event_id, payload_json in payloads_by_id.items():
+                conn.execute(
+                    "UPDATE events SET payload_json=? WHERE id=?",
+                    (payload_json, event_id),
+                )
+            conn.execute(
+                "UPDATE prds SET status='approved', material_sha256=NULL, "
+                "content_event_id=NULL, lifecycle_revision=NULL, "
+                "lifecycle_source_sha256=NULL, lifecycle_material_sha256=NULL, "
+                "lifecycle_content_event_id=NULL, review_event_id=NULL WHERE id=?",
+                (prd_id,),
+            )
+            conn.execute("PRAGMA user_version=20")
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated_backend = SqliteBackend(
+            db_path=str(db_path),
+            events_path=str(events_path),
+            clock=_make_clock(),
+        )
+        migrated_backend.initialize()
+        try:
+            migrated = migrated_backend.get_prd(prd_id)
+            assert migrated is not None
+            migrated_binding = (
+                migrated.status,
+                migrated.revision,
+                migrated.source_sha256,
+                migrated.material_sha256,
+                migrated.content_event_id,
+                migrated.lifecycle_revision,
+                migrated.review_event_id,
+            )
+            assert migrated.status.value == "draft"
+            migrated_backend.replay_from_empty(str(events_path))
+            replayed = migrated_backend.get_prd(prd_id)
+            assert replayed is not None
+            assert (
+                replayed.status,
+                replayed.revision,
+                replayed.source_sha256,
+                replayed.material_sha256,
+                replayed.content_event_id,
+                replayed.lifecycle_revision,
+                replayed.review_event_id,
+            ) == migrated_binding
+        finally:
+            migrated_backend.close()
+
     def test_replay_from_empty_reconstructs_state_exactly(self, tmp_path: Path) -> None:
         """Replay 3-5 events from events.jsonl; reconstructed state.db matches original.
 
@@ -1557,8 +1880,9 @@ def _make_prd_parsed_payload(
                 "derived": False,
             },
         ]
-    return {
+    payload = {
         "project_id": project_id,
+        "title": "Test Project",
         "status": "draft",
         "summary": summary,
         "goals": ["Goal one.", "Goal two."],
@@ -1568,6 +1892,48 @@ def _make_prd_parsed_payload(
         "risks": [],
         "open_questions": [],
     }
+    return _bind_current_prd_source(
+        payload,
+        title="Test Project",
+        expected_absent=False,
+    )
+
+
+def _bind_current_prd_source(
+    payload: dict[str, Any],
+    *,
+    title: str = "Test Project",
+    expected_absent: bool = True,
+) -> dict[str, Any]:
+    """Add a complete v21 first-parse binding to a test payload."""
+    from types import SimpleNamespace
+
+    from anvil.planning.prd_persistence import material_content_sha256
+
+    source = f"# Project: {title}\n"
+    source_bytes = source.encode()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    exact = SimpleNamespace(
+        source_bytes=source_bytes,
+        markdown=source,
+        source_sha256=source_sha256,
+        source_size_bytes=len(source_bytes),
+        source_encoding="utf-8",
+    )
+    payload.update({
+        "title": title,
+        "source_text": source,
+        "source_sha256": source_sha256,
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": 1,
+        "provenance_state": "available",
+        "content_available": True,
+        "material_sha256": material_content_sha256(exact, title),
+    })
+    if expected_absent:
+        payload["expected_absent"] = True
+    return payload
 
 
 def _make_event(
@@ -1626,8 +1992,13 @@ class TestHandlePrdParsed:
             _setup_project(b)
             source_bytes = b"# Project: Snapshot\r\n"
             payload = _make_prd_parsed_payload()
+            from types import SimpleNamespace
+
+            from anvil.planning.prd_persistence import material_content_sha256
+
             payload.update(
                 {
+                    "title": "Snapshot",
                     "source_text": source_bytes.decode(),
                     "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
                     "source_size_bytes": len(source_bytes),
@@ -1635,6 +2006,16 @@ class TestHandlePrdParsed:
                     "source_revision": 1,
                     "provenance_state": "available",
                     "content_available": True,
+                    "material_sha256": material_content_sha256(
+                        SimpleNamespace(
+                            source_bytes=source_bytes,
+                            markdown=source_bytes.decode(),
+                            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+                            source_size_bytes=len(source_bytes),
+                            source_encoding="utf-8",
+                        ),
+                        "Snapshot",
+                    ),
                 }
             )
             draft = _make_event("prd.parsed", payload)
@@ -1733,6 +2114,18 @@ class TestHandlePrdParsed:
         try:
             _setup_project(b)
             payload = _make_prd_parsed_payload()
+            for field in (
+                "title",
+                "source_text",
+                "source_sha256",
+                "source_size_bytes",
+                "source_encoding",
+                "source_revision",
+                "provenance_state",
+                "content_available",
+                "material_sha256",
+            ):
+                payload.pop(field, None)
             payload["assumptions"] = [
                 {
                     "id": "A001",
@@ -2178,8 +2571,8 @@ class TestHandlePrdRevised:
         finally:
             b.close()
 
-    def test_pure_additive_revision_keeps_status(self, tmp_path: Path) -> None:
-        """A pure-additive revision (no superseded) keeps the payload's status."""
+    def test_pure_additive_unbound_revision_demotes_status(self, tmp_path: Path) -> None:
+        """A lineage-unbound content revision cannot preserve review authority."""
         b = _make_backend(tmp_path)
         try:
             self._parse_two_reqs(b)
@@ -2191,7 +2584,7 @@ class TestHandlePrdRevised:
                 ),
             )
             prd = b.get_prd()
-            assert prd.status == "reviewed"
+            assert prd.status == "draft"
             assert prd.revision == 2
             assert {r.id for r in b.list_requirements()} == {"R001", "R002", "R003"}
             lineage = _requirements_lineage(str(tmp_path / "state.db"))
@@ -2273,9 +2666,10 @@ class TestHandlePrdRevised:
         b = _make_backend(tmp_path)
         try:
             _setup_project(b)
-            winner = _make_prd_parsed_payload(summary="Concurrent winner.")
-            winner["expected_absent"] = True
-            winner["title"] = "Concurrent Winner"
+            winner = _bind_current_prd_source(
+                _make_prd_parsed_payload(summary="Concurrent winner."),
+                title="Concurrent Winner",
+            )
             b.append(_make_event("prd.parsed", winner))
 
             stale = _make_prd_parsed_payload(summary="Stale overwrite.")
@@ -2304,12 +2698,13 @@ class TestHandlePrdRevised:
         hostile_id = "secret-" + ("x" * 100_000) + "\nsecond-line"
         try:
             _setup_project(b)
-            winner = _make_prd_parsed_payload(summary="Concurrent winner.")
+            winner = _bind_current_prd_source(
+                _make_prd_parsed_payload(summary="Concurrent winner."),
+                title="Concurrent Winner",
+            )
             winner.update(
                 prd_id=hostile_id,
-                expected_absent=True,
                 is_default=False,
-                title="Concurrent Winner",
             )
             b.append(_make_event("prd.parsed", winner))
             before_log = events_path.read_bytes()
@@ -2385,12 +2780,19 @@ class TestHandlePrdRevised:
         events_path = tmp_path / "events.jsonl"
         try:
             self._parse_two_reqs(b)
+            observed = b.get_prd()
+            assert observed is not None
             stale = _make_event(
                 "prd.reviewed",
                 {
                     "project_id": "proj-1",
+                    "prd_id": "default",
                     "expected_revision": 1,
                     "expected_status": "draft",
+                    "binding_version": 1,
+                    "source_sha256": observed.source_sha256,
+                    "material_sha256": observed.material_sha256,
+                    "content_event_id": observed.content_event_id,
                     "reviewer": "stale-reviewer",
                 },
             )
@@ -7002,7 +7404,7 @@ class TestSchemaVersionPhase8:
     """
 
     def test_schema_version_is_twenty(self) -> None:
-        """Transactional claim Git bindings ship at SCHEMA_VERSION == 20
+        """Transactional claim Git bindings ship before SCHEMA_VERSION == 21
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
@@ -7013,7 +7415,7 @@ class TestSchemaVersionPhase8:
         v18 = exact revision-bound PRD source provenance;
         v19 = engine-derived task-rejection provenance;
         v20 = transactional task and bundle claim Git bindings)."""
-        assert SCHEMA_VERSION == 20
+        assert SCHEMA_VERSION == 21
         assert f"PRAGMA user_version = {SCHEMA_VERSION};" in DDL
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
@@ -7077,7 +7479,7 @@ class TestV18ToV19RejectionProvenanceMigration:
 
         migrated = _make_backend(tmp_path)
         try:
-            assert migrated.get_schema_version() == SCHEMA_VERSION == 20
+            assert migrated.get_schema_version() == SCHEMA_VERSION == 21
             rows = {
                 row.id: row
                 for row in migrated.list_reviews()
@@ -9436,29 +9838,11 @@ class TestV6ToV7Migration:
         finally:
             b.close()
 
-    def test_v6_to_v7_migration_preserves_claimability_gate(
+    def test_legacy_review_without_source_binding_demotes_and_blocks_claim(
         self, tmp_path: Path
     ) -> None:
-        """T014 (criterion 2) — a task claimable pre-migration is still
-        claimable post-migration, and a task NOT claimable pre-migration stays
-        un-claimable.
-
-        Pre-migration claimability on the v6 schema is exactly: status='ready'
-        AND the (single) PRD reviewed/approved (no per-task PRD partition
-        exists yet, so every task shares the one PRD). The v6 fixture's PRD is
-        'reviewed', so on the v6 DB T001 (set ready) is claimable while T002
-        (proposed) is not. After migrating to v7 the real ``ClaimManager``
-        gate — which now resolves the OWNING PRD via ``get_prd_for_task`` — must
-        reach the SAME verdict: T001 claims, T002 raises on the status gate.
-
-        The status-gated negative case (T002) short-circuits at Gate 2 and
-        never reaches the migrated PRD partition, so a companion test
-        (``…_blocked_by_unreviewed_prd``) exercises the OTHER direction: a
-        task that IS ready but whose PRD was un-reviewed pre-migration must
-        stay refused — there at the migration-sensitive PRD gate (Gate 3).
-        """
+        """v21 demotes a legacy review that has no exact source binding."""
         from anvil.claims.manager import ClaimError, ClaimManager
-        from anvil.state.models import ClaimStatus
 
         db_path = str(tmp_path / "state.db")
         events_path = str(tmp_path / "events.jsonl")
@@ -9494,11 +9878,13 @@ class TestV6ToV7Migration:
             assert b.get_schema_version() == SCHEMA_VERSION
             mgr = ClaimManager(b, clock, actor="agent-test")
 
-            # T001 was claimable pre-migration → still claimable post-migration.
+            # Schema v21 deliberately invalidates historical lifecycle facts
+            # that cannot prove an exact source/content binding.
             assert pre_claimable["T001"] is True
-            result = mgr.claim("T001")
-            assert result.claim.status == ClaimStatus.active
-            assert result.claim.task_id == "T001"
+            with pytest.raises(ClaimError, match="PRD must be in"):
+                mgr.claim("T001")
+            assert b.get_task("T001").status.value == "ready"
+            assert b.get_prd("default").status.value == "draft"
 
             # T002 was NOT claimable pre-migration → still refused (status gate).
             assert pre_claimable["T002"] is False
@@ -9626,7 +10012,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 20
+            assert b.get_schema_version() == SCHEMA_VERSION == 21
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -9805,7 +10191,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 20
+            assert b.get_schema_version() == SCHEMA_VERSION == 21
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.
@@ -12051,6 +12437,33 @@ class TestDecideApplyContract:
         finally:
             b.close()
 
+    def test_prd_parsed_rejects_lifecycle_status_before_log(
+        self, tmp_path: Path
+    ) -> None:
+        """Content parsing cannot bypass lineage-bound review and approval."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            _setup_project(b)
+            before = events_path.read_bytes()
+            payload = _make_prd_parsed_payload()
+            payload.update({"expected_absent": True, "status": "approved"})
+
+            with pytest.raises(EventRejected, match="status must be draft"):
+                b.append(
+                    _make_event(
+                        "prd.parsed",
+                        payload,
+                        target_kind="prd",
+                        target_id="default",
+                    )
+                )
+
+            assert events_path.read_bytes() == before
+            assert b.get_prd() is None
+        finally:
+            b.close()
+
     # ------------------------------------------------------------------
     # prd.reviewed
     # ------------------------------------------------------------------
@@ -13810,7 +14223,7 @@ class TestClaimProgressAttestationState:
         )
         b.initialize()
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 20
+            assert b.get_schema_version() == SCHEMA_VERSION == 21
             assert b.get_claim("C001").generation == 1  # type: ignore[union-attr]
             assert b.get_claim("C002").generation == 2  # type: ignore[union-attr]
             assert b.get_claim("C001").attestation_context is None  # type: ignore[union-attr]
@@ -15226,7 +15639,9 @@ def _planning_batch_draft(
     operations: list[EventDraft],
     *,
     expected_prd_revision: int = 1,
-    expected_prd_source_sha256: str | None = None,
+    expected_prd_source_sha256: str | None = hashlib.sha256(
+        b"# Project: Test Project\n"
+    ).hexdigest(),
 ) -> EventDraft:
     return EventDraft(
         timestamp=_T0,

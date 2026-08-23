@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.6.4 (schema 20)
+# → anvil 0.6.4 (schema 21)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -157,9 +157,10 @@ boundaries, acceptance scenarios, and verification with a suggested challenge
 question. Its findings are advisory: they do not alter parsing, approval, or
 claiming. The two-step review gate remains deliberate. `prd review` records
 that a human has read the PRD; `prd review --approve` unlocks task claiming.
-The claims manager refuses to claim any task while the PRD is in `draft` or
-`reviewed` status — only `approved` (or explicitly `reviewed` for the readiness
-gate) lets work begin.
+The claims manager refuses to claim any new task while the PRD is in `draft` or
+`reviewed` status. Only an `approved` PRD whose exact source/material binding is
+still current lets work begin. Existing active claims are not revoked by a
+later PRD edit.
 
 ## Step 5 — Generate and score tasks
 
@@ -302,7 +303,7 @@ PRD:           approved
 Tasks:         1 total (0 ready, 0 claimed, 0 in_progress, 0 needs_review, 0 blocked, 1 done)
 Active claims: 0
 Sync:          off
-Schema:        20
+Schema:        21
 ```
 
 The work packet under `.anvil/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
@@ -418,7 +419,7 @@ if ($status.ok) {
 ```
 
 `anvil --version` identifies the CLI engine and supported schema, for example
-`anvil 0.6.4 (schema 20)`. `schema_version` is that engine schema.
+`anvil 0.6.4 (schema 21)`. `schema_version` is that engine schema.
 `db_schema_version` (shown as `pre_open_database_schema`) is the database stamp
 observed before the backend opens. If the command succeeds with a lower
 pre-open value, that same call completed a supported migration; rerun the

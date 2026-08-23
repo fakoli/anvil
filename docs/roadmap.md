@@ -516,8 +516,9 @@ The three load-bearing properties this theme holds:
   purely additive per-PRD `revision` counter — see
   [`state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py) `_m_to_v7` / `_m_to_v8`.)
 - **Gating is per-PRD; conflict detection is cross-PRD.** The `prd_status_gate`
-  keys on the **task's owning PRD** (`task.prd_id`): a task is claimable as soon
-  as *its* PRD is reviewed/approved, even while a sibling PRD is still `draft`.
+  keys on the **task's owning PRD** (`task.prd_id`): a task is claimable once
+  its PRD is approved for its exact current material, even while a sibling PRD
+  is still `draft`.
   Conflict groups and `anvil next` exclusion sets, by contrast, are computed over
   **all** PRDs, so two tasks in different PRDs that touch the same file are still
   single-winner-coordinated — the moat holds across the whole project, not

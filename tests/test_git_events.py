@@ -36,6 +36,7 @@ import tracemalloc
 from datetime import UTC, datetime, timedelta
 from itertools import permutations
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -44,6 +45,7 @@ from typer.testing import CliRunner
 
 from anvil.cli import app
 from anvil.clock import FrozenClock
+from anvil.planning.prd_persistence import material_content_sha256
 from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.hashing import canonical_payload_json, hash_event_id
 from anvil.state.models import Event, EventDraft
@@ -128,7 +130,7 @@ def _prd_parsed_payload(
     *,
     prd_id: str = "default",
     title: str = "Original PRD",
-    expected_absent: bool | None = True,
+    expected_absent: bool | None = None,
     requirements: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -146,6 +148,29 @@ def _prd_parsed_payload(
         "open_questions": [],
         "assumptions": [],
     }
+    if expected_absent is True:
+        source = f"# Project: {title}\n"
+        source_bytes = source.encode()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        payload.update({
+            "source_text": source,
+            "source_sha256": source_sha256,
+            "source_size_bytes": len(source_bytes),
+            "source_encoding": "utf-8",
+            "source_revision": 1,
+            "provenance_state": "available",
+            "content_available": True,
+            "material_sha256": material_content_sha256(
+                SimpleNamespace(
+                    source_bytes=source_bytes,
+                    markdown=source,
+                    source_sha256=source_sha256,
+                    source_size_bytes=len(source_bytes),
+                    source_encoding="utf-8",
+                ),
+                title,
+            ),
+        })
     if expected_absent is not None:
         payload["expected_absent"] = expected_absent
     return payload
@@ -1387,10 +1412,13 @@ class TestGitPrdLifecycleReplay:
             branch = tmp_path / f"planning-lineage-{label}-{reverse_physical_order}"
             shutil.copytree(base, branch)
             branch_backend = _make_backend(branch)
+            parsed_payload = _prd_parsed_payload(
+                title=f"PRD {label}", expected_absent=True
+            )
             parsed = branch_backend.append(
                 _draft(
                     "prd.parsed",
-                    _prd_parsed_payload(title=f"PRD {label}"),
+                    parsed_payload,
                     target_kind="prd",
                     target_id="default",
                     ts=_T0 + timedelta(seconds=offset),
@@ -1400,6 +1428,9 @@ class TestGitPrdLifecycleReplay:
                 _planning_graph_batch(
                     f"F-{label}",
                     ts=_T0 + timedelta(seconds=offset + 10),
+                    expected_prd_source_sha256=str(
+                        parsed_payload["source_sha256"]
+                    ),
                 )
             )
             task_payload = _task_payload(f"T-{label}")
@@ -2239,7 +2270,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             bounded.close()
 
-    def test_transparent_ancestor_lifecycle_survives_material_replay(
+    def test_legacy_transparent_ancestor_lifecycle_stays_draft_on_material_replay(
         self, tmp_path: Path
     ) -> None:
         """A causal title ancestor is history, not a losing fork sibling."""
@@ -2260,8 +2291,6 @@ class TestGitPrdLifecycleReplay:
                     "prd.reviewed",
                     {
                         "project_id": "proj-1",
-                        "expected_revision": 2,
-                        "expected_status": "draft",
                         "reviewer": "r2-reviewer",
                     },
                     target_kind="prd",
@@ -2274,8 +2303,6 @@ class TestGitPrdLifecycleReplay:
                     "prd.approved",
                     {
                         "project_id": "proj-1",
-                        "expected_revision": 2,
-                        "expected_status": "reviewed",
                         "approver": "r2-approver",
                     },
                     target_kind="prd",
@@ -2288,9 +2315,9 @@ class TestGitPrdLifecycleReplay:
                 # A newer causal material revision may intentionally restore
                 # the semantic base's title; the older r2 overlay must not win.
                 title="Original PRD",
-                expected_status="approved",
+                expected_status="draft",
             )
-            material_payload["status"] = "approved"
+            material_payload["status"] = "draft"
             material_payload["assumptions"] = [
                 {
                     "id": "A001",
@@ -2316,7 +2343,7 @@ class TestGitPrdLifecycleReplay:
                     "SELECT reviewed_by FROM reviews ORDER BY reviewed_by"
                 )
             ]
-            assert expected_reviews == [("r2-approver",)]
+            assert expected_reviews == []
 
             events_path = tmp_path / "events.jsonl"
             backend.replay_from_empty(str(events_path))
@@ -2331,7 +2358,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             backend.close()
 
-    def test_material_revision_preserves_observed_base_approval_across_replay(
+    def test_legacy_material_revision_cannot_preserve_unbound_approval(
         self, tmp_path: Path
     ) -> None:
         """A material CAS against approved r1 preserves its audited approval."""
@@ -2342,8 +2369,6 @@ class TestGitPrdLifecycleReplay:
                 "prd.reviewed",
                 {
                     "project_id": "proj-1",
-                    "expected_revision": 1,
-                    "expected_status": "draft",
                     "reviewer": "r1-reviewer",
                 },
                 target_kind="prd",
@@ -2356,8 +2381,6 @@ class TestGitPrdLifecycleReplay:
                 "prd.approved",
                 {
                     "project_id": "proj-1",
-                    "expected_revision": 1,
-                    "expected_status": "reviewed",
                     "approver": "r1-approver",
                 },
                 target_kind="prd",
@@ -2368,9 +2391,9 @@ class TestGitPrdLifecycleReplay:
         material_payload = _prd_revised_payload(
             revision=2,
             title="Approved material r2",
-            expected_status="approved",
+            expected_status="draft",
         )
-        material_payload["status"] = "approved"
+        material_payload["status"] = "draft"
         material_payload["assumptions"] = [
             {
                 "id": "A001",
@@ -2398,9 +2421,7 @@ class TestGitPrdLifecycleReplay:
         reopened = _make_backend(tmp_path)
         try:
             assert _snap(reopened) == expected
-            assert [review.reviewed_by for review in reopened.list_reviews()] == [
-                "r1-approver"
-            ]
+            assert reopened.list_reviews() == []
             reopened.replay_from_empty(str(events_path))
             assert _snap(reopened) == expected
         finally:
@@ -2417,9 +2438,7 @@ class TestGitPrdLifecycleReplay:
             replayed = _make_backend(merged)
             try:
                 assert _snap(replayed) == expected
-                assert [review.reviewed_by for review in replayed.list_reviews()] == [
-                    "r1-approver"
-                ]
+                assert replayed.list_reviews() == []
             finally:
                 replayed.close()
 
@@ -2434,7 +2453,7 @@ class TestGitPrdLifecycleReplay:
 
     @pytest.mark.parametrize("prd_id", ["default", "v0.2"])
     @pytest.mark.parametrize("revision_sorts_after_approval", [False, True])
-    def test_current_non_material_revision_never_regresses_approval(
+    def test_legacy_non_material_revision_cannot_manufacture_approval(
         self,
         tmp_path: Path,
         prd_id: str,
@@ -2492,7 +2511,7 @@ class TestGitPrdLifecycleReplay:
                 assert prd is not None
                 assert prd.title == "Renamed PRD"
                 assert prd.revision == 2
-                assert prd.status.value == "approved"
+                assert prd.status.value == "draft"
                 snapshots.append(_snap(replayed))
             finally:
                 replayed.close()
@@ -2637,7 +2656,9 @@ class TestGitPrdLifecycleReplay:
             parent_event_id=parent,
             lamport=3,
             action="prd.parsed",
-            payload=_prd_parsed_payload(title="First Winner"),
+            payload=_prd_parsed_payload(
+                title="First Winner", expected_absent=True
+            ),
         )
         approval = _handcrafted_git_event(
             event_id="E-bbbbbbbbbbbb",
@@ -2651,7 +2672,9 @@ class TestGitPrdLifecycleReplay:
             parent_event_id=parent,
             lamport=5,
             action="prd.parsed",
-            payload=_prd_parsed_payload(title="Stale Loser"),
+            payload=_prd_parsed_payload(
+                title="Stale Loser", expected_absent=True
+            ),
         )
         merged = tmp_path / "merged"
         merged.mkdir()
@@ -2664,7 +2687,7 @@ class TestGitPrdLifecycleReplay:
             prd = replayed.get_prd("default")
             assert prd is not None
             assert prd.title == "First Winner"
-            assert prd.status.value == "approved"
+            assert prd.status.value == "draft"
             assert prd.revision == 1
         finally:
             replayed.close()
@@ -3045,7 +3068,7 @@ class TestGitPrdLifecycleReplay:
 
     @pytest.mark.parametrize("new_prd_id", ["default", "v0.2"])
     @pytest.mark.parametrize("losing_other_prd_is_tail", [False, True])
-    def test_cross_prd_union_tail_cannot_poison_new_prd_lineage(
+    def test_cross_prd_union_tail_cannot_poison_legacy_new_prd_lineage(
         self,
         tmp_path: Path,
         new_prd_id: str,
@@ -3177,8 +3200,6 @@ class TestGitPrdLifecycleReplay:
                     {
                         "project_id": "proj-1",
                         "prd_id": new_prd_id,
-                        "expected_revision": 2,
-                        "expected_status": "draft",
                         "reviewer": "cross-prd-reviewer",
                     },
                     target_kind="prd",
@@ -3192,8 +3213,6 @@ class TestGitPrdLifecycleReplay:
                     {
                         "project_id": "proj-1",
                         "prd_id": new_prd_id,
-                        "expected_revision": 2,
-                        "expected_status": "reviewed",
                         "approver": "cross-prd-approver",
                     },
                     target_kind="prd",
@@ -3203,13 +3222,13 @@ class TestGitPrdLifecycleReplay:
             )
             assert reviewed is not None and approved is not None
             assert reviewed.parent_event_id == revised.id
-            assert approved.parent_event_id == revised.id
+            assert approved.parent_event_id == reviewed.id
 
             current = replayed.get_prd(new_prd_id)
             assert current is not None
             assert current.title == "New Rev2"
             assert current.revision == 2
-            assert current.status.value == "approved"
+            assert current.status.value == "draft"
             expected = _snap(replayed)
             for _ in range(2):
                 replayed.replay_from_empty(str(events_path))
@@ -3217,7 +3236,7 @@ class TestGitPrdLifecycleReplay:
                 assert current is not None
                 assert current.title == "New Rev2"
                 assert current.revision == 2
-                assert current.status.value == "approved"
+                assert current.status.value == "draft"
                 assert _snap(replayed) == expected
         finally:
             replayed.close()
@@ -3610,7 +3629,7 @@ class TestGitPrdLifecycleReplay:
             (10, 5, 2, "Branch A Rename", "R102", "branch-b-approver", "branch-a-approver"),
         ),
     )
-    def test_asymmetric_material_fork_keeps_one_lineage_and_its_lifecycle(
+    def test_asymmetric_legacy_material_fork_keeps_one_content_lineage(
         self,
         tmp_path: Path,
         first_material_lamport: int,
@@ -3759,7 +3778,7 @@ class TestGitPrdLifecycleReplay:
                     assert prd is not None
                     assert prd.revision == expected_revision
                     assert prd.title == expected_title
-                    assert prd.status.value == "approved"
+                    assert prd.status.value == "draft"
                     assert [
                         requirement.id
                         for requirement in replayed.list_requirements(
@@ -3770,7 +3789,7 @@ class TestGitPrdLifecycleReplay:
                     assert conn.execute(
                         "SELECT 1 FROM reviews WHERE reviewed_by = ?",
                         (winning_approver,),
-                    ).fetchone() is not None
+                    ).fetchone() is None
                     assert conn.execute(
                         "SELECT 1 FROM reviews WHERE reviewed_by = ?",
                         (losing_approver,),
@@ -4622,7 +4641,7 @@ class TestGitPrdLifecycleReplay:
             finally:
                 replayed.close()
 
-    def test_approval_descended_from_material_revision_promotes(
+    def test_unbound_approval_descended_from_material_revision_stays_draft(
         self, tmp_path: Path
     ) -> None:
         requirement = {
@@ -4711,13 +4730,13 @@ class TestGitPrdLifecycleReplay:
             assert prd is not None
             assert prd.title == "Reviewed Rename"
             assert prd.revision == 2
-            assert prd.status.value == "approved"
+            assert prd.status.value == "draft"
             assert replayed.list_requirements(prd_id="default") == []
             row = replayed._require_conn().execute(  # noqa: SLF001
                 "SELECT reviewed_by FROM reviews WHERE id = ?",
                 ("RV-E-dddddddddddd",),
             ).fetchone()
-            assert row is not None and row[0] == "causal-approver"
+            assert row is None
         finally:
             replayed.close()
 
@@ -4823,14 +4842,18 @@ class TestGitPrdLifecycleReplay:
             parent_event_id=parent,
             lamport=3,
             action="prd.parsed",
-            payload=_prd_parsed_payload(title="Winning Content"),
+            payload=_prd_parsed_payload(
+                title="Winning Content", expected_absent=True
+            ),
         )
         loser = _handcrafted_git_event(
             event_id="E-bbbbbbbbbbbb",
             parent_event_id=parent,
             lamport=3,
             action="prd.parsed",
-            payload=_prd_parsed_payload(title="Losing Content"),
+            payload=_prd_parsed_payload(
+                title="Losing Content", expected_absent=True
+            ),
         )
         review = _handcrafted_git_event(
             event_id="E-cccccccccccc",

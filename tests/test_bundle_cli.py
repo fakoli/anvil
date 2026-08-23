@@ -12,6 +12,13 @@ from tests.test_bundle_state import _backend, _seed
 
 
 def _seed_cli_project(tmp_path):
+    import hashlib
+    import sqlite3
+    from types import SimpleNamespace
+
+    from anvil.cli._helpers import prd_source_path
+    from anvil.planning.prd_persistence import material_content_sha256
+
     state_dir = tmp_path / ".anvil"
     state_dir.mkdir()
     backend = _backend(state_dir)
@@ -19,7 +26,106 @@ def _seed_cli_project(tmp_path):
         _seed(backend)
     finally:
         backend.close()
+    source = (
+        b"# Project: release\n\n"
+        b"## Summary\nBundle test.\n\n"
+        b"## Goals\n- Test bundles.\n\n"
+        b"## Non-Goals\n- None.\n\n"
+        b"## Requirements\n- R001: Bundle tasks.\n\n"
+        b"## Acceptance Criteria\n- Bundle persists.\n\n"
+        b"## Risks\n- None.\n"
+    )
+    source_path = prd_source_path(state_dir, "release")
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(source)
+    source_sha256 = hashlib.sha256(source).hexdigest()
+    material_sha256 = material_content_sha256(
+        SimpleNamespace(
+            source_bytes=source,
+            markdown=source.decode(),
+            source_sha256=source_sha256,
+            source_size_bytes=len(source),
+            source_encoding="utf-8",
+        ),
+        "release",
+    )
+    with sqlite3.connect(state_dir / "state.db") as conn:
+        conn.execute(
+            "UPDATE prds SET source_bytes=?, source_sha256=?, source_size_bytes=?, "
+            "source_encoding='utf-8', source_revision=revision, "
+            "provenance_state='available', content_available=1, "
+            "material_sha256=?, content_event_id='E-TEST-CONTENT-release', "
+            "lifecycle_revision=revision, lifecycle_source_sha256=?, "
+            "lifecycle_material_sha256=?, "
+            "lifecycle_content_event_id='E-TEST-CONTENT-release', "
+            "review_event_id='E-TEST-REVIEW-release' WHERE id='release'",
+            (source, source_sha256, len(source), material_sha256, source_sha256, material_sha256),
+        )
     return state_dir
+
+
+def test_bundle_claim_releases_when_source_changes_during_linearization(
+    tmp_path, monkeypatch
+) -> None:
+    import anvil.planning.prd_persistence as persistence
+    from anvil.cli._helpers import prd_source_path
+
+    state_dir = _seed_cli_project(tmp_path)
+    created = _invoke(
+        tmp_path,
+        [
+            "bundle",
+            "create",
+            "B001",
+            "release:T001",
+            "--prd",
+            "release",
+            "--coordinator",
+            "coordinator",
+            "--actor",
+            "planner",
+            "--json",
+        ],
+    )
+    assert created.exit_code == 0, created.output
+    before_events = (state_dir / "events.jsonl").read_bytes()
+    source_path = prd_source_path(state_dir, "release")
+    original = persistence.require_canonical_prd_claim_binding
+    calls = 0
+
+    def drift_after_precheck(state_dir_arg, prd):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        original(state_dir_arg, prd)
+        calls += 1
+        if calls == 1:
+            source_path.write_bytes(
+                source_path.read_bytes() + b"\n<!-- concurrent state-only drift -->\n"
+            )
+
+    monkeypatch.setattr(
+        persistence, "require_canonical_prd_claim_binding", drift_after_precheck
+    )
+
+    refused = _invoke(
+        tmp_path,
+        ["bundle", "claim", "B001", "--actor", "coordinator", "--json"],
+    )
+
+    assert refused.exit_code == 1
+    assert json.loads(refused.output)["error"]["code"] == "prd_source_unapproved"
+    assert (state_dir / "events.jsonl").read_bytes() == before_events
+    import sqlite3
+
+    with sqlite3.connect(state_dir / "state.db") as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM bundle_claims WHERE status='active'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM claims WHERE status='active'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT status FROM execution_bundles WHERE id='B001'"
+        ).fetchone()[0] == "planned"
 
 
 def _invoke(tmp_path, args):

@@ -33,6 +33,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v18     | Revision-bound PRD source provenance | `prds` adds exact source bytes plus digest, size, UTF-8 encoding, source revision, and explicit availability fields. Existing rows retain their lifecycle and ownership state but migrate as `legacy_unbound` with no fabricated source or digest. |
 | v19     | Task-rejection provenance | `reviews` adds immutable engine-derived category, reason, attempt/claim identity, evidence digest, typed findings, matched process predicate, and accept-rate accounting. Historical task rejections migrate conservatively as counting `quality`; no missing identity is fabricated. |
 | v20     | Transactional claim Git bindings | `claims` and `bundle_claims` add nullable `git_metadata` containing the validated selected base, exact claim-start identity, branch, repository root, and shared/isolated target. Historical claims remain unbound. |
+| v21     | Revision-bound PRD lifecycle | `prds` adds canonical material/content identity and the exact source/material/content lineage reviewed or approved. Pre-v21 review and approval state is preserved in the audit log but demoted to unbound `draft`; Anvil never fabricates proof that historical content was reviewed. |
 
 Canonical PRD titles require no new schema migration: `prds.title` has existed
 since v7. Historical rows and legacy events that have no title remain `""`;
@@ -163,6 +164,28 @@ one operation. Existing claims retain `NULL`: migration does not inspect a
 working tree or invent historical Git identity. The additive columns and schema
 stamp commit in one SQLite transaction and safely retry after interruption.
 
+## Revision-bound PRD lifecycle — v20 → v21 auto-upgrade
+
+The v21 migration adds `material_sha256`, `content_event_id`, the four complete
+`lifecycle_*` binding fields, and `review_event_id` to each PRD projection.
+Where exact v18 source provenance and a matching historical content event are
+available, migration computes the canonical material digest and retains that
+content identity. It never reads a current source file to fill history.
+
+Pre-v21 `prd.reviewed` and `prd.approved` events did not carry the complete
+source/material/content binding. They remain immutable in `events.jsonl`, but
+their projection is demoted to `draft`, reviewer metadata is cleared, and the
+legacy PRD review projection is removed. This conservative migration requires
+operators to run `anvil prd parse`, `anvil prd review`, and
+`anvil prd review --approve` once against the current canonical source before
+new task or bundle claims. Existing active claims remain valid and auditable.
+
+New lifecycle events bind the exact persisted revision, source digest,
+canonical material digest, and content event. A revision that changes only the
+H1 project title may retain that binding because title is replaced by a fixed
+sentinel for the material digest; every other material change returns the PRD
+to `draft`. Live append and replay both validate the complete lineage.
+
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
 The schema diff from v1/v2 to v3 is **purely additive**:
@@ -262,13 +285,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v20, including the final v19→v20 step) that already lives in
+(currently v21, including the final v20→v21 step) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v20
+Schema migration  : v3 -> v21
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -276,7 +299,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v20.
+Migrated state.db v3 -> v21.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 

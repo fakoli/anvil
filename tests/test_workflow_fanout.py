@@ -6,6 +6,8 @@ from the item); a failing item respects on_fail without aborting siblings.
 
 from __future__ import annotations
 
+import pytest
+
 from anvil.state.models import TaskStatus
 from anvil.workflows.fanout import fan_out_ref, resolve_items, run_fan_out
 from anvil.workflows.parse import parse_workflow
@@ -71,6 +73,35 @@ def test_fan_out_expected_files_on_the_claim(approved_backend, frozen_clock):  #
     # each created task is done and scoped to its item
     files = sorted(approved_backend.get_task(r.task_id).likely_files[0] for r in records)
     assert files == ["x.py", "y.py"]
+
+
+def test_fan_out_threads_claim_linearization_check_before_executor(
+    approved_backend, frozen_clock
+):  # type: ignore[no-untyped-def]
+    step = Step(id="fix", fan_out="${{ steps.find.output }}", run="fix")
+    executed = False
+
+    def executor(step, item):  # type: ignore[no-untyped-def]
+        nonlocal executed
+        executed = True
+        return StepOutcome(success=True)
+
+    def refuse() -> None:
+        raise RuntimeError("source changed at fan-out claim linearization")
+
+    with pytest.raises(RuntimeError, match="source changed"):
+        run_fan_out(
+            approved_backend,
+            step,
+            ["x.py"],
+            fan_out_executor=executor,
+            actor="r",
+            clock=frozen_clock,
+            reviewer="r",
+            claim_pre_log_check=refuse,
+        )
+    assert executed is False
+    assert approved_backend.list_active_claims() == []
 
 
 def test_failing_item_does_not_abort_siblings(approved_backend, frozen_clock):  # type: ignore[no-untyped-def]

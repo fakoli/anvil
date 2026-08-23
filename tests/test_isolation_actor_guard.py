@@ -23,6 +23,7 @@ from anvil.naming import session_discriminator
 from anvil.state.models import EventDraft
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import SqliteBackend
+from tests.conftest import append_exact_approved_prd
 
 _T0 = datetime(2026, 7, 9, 18, 0, 0, tzinfo=UTC)
 
@@ -52,15 +53,14 @@ def _setup_project(b: SqliteBackend) -> None:
                           "derived": False}],
         "acceptance_criteria": ["ac"], "risks": [], "open_questions": [],
     }
-    for action, payload in (
-        ("prd.parsed", prd_payload),
-        ("prd.reviewed", {"project_id": "p1", "reviewer": "alice"}),
-        ("prd.approved", {"project_id": "p1", "approver": "bob"}),
-    ):
-        b.append(EventDraft(
-            timestamp=_T0, actor="test", action=action,
-            target_kind="prd", target_id="p1", payload_json=payload,
-        ))
+    append_exact_approved_prd(
+        b,
+        timestamp=_T0,
+        project_id="p1",
+        prd_id="default",
+        title="P1",
+        parsed_payload=prd_payload,
+    )
 
 
 def _insert_ready_task(b: SqliteBackend, task_id: str) -> None:

@@ -25,6 +25,7 @@ from anvil.state.models import (
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
+from tests.conftest import append_exact_approved_prd
 
 _T0 = datetime(2026, 7, 11, 18, 0, tzinfo=UTC)
 
@@ -77,19 +78,18 @@ def _seed(backend: SqliteBackend, *, second_prd: bool = False) -> None:
     )
     for prd_id in (["release", "other"] if second_prd else ["release"]):
         requirement_id = f"{prd_id}:R001"
-        backend.append(
-            _event(
-                "prd.parsed",
-                {
-                    "project_id": "proj",
-                    "prd_id": prd_id,
-                    "title": prd_id,
-                    "is_default": False,
-                    "status": "approved",
-                    "summary": "Bundle test.",
-                    "goals": ["Test bundles."],
-                    "non_goals": [],
-                    "requirements": [
+        append_exact_approved_prd(
+            backend,
+            timestamp=_T0,
+            project_id="proj",
+            prd_id=prd_id,
+            title=prd_id,
+            parsed_payload={
+                "is_default": False,
+                "summary": "Bundle test.",
+                "goals": ["Test bundles."],
+                "non_goals": [],
+                "requirements": [
                         {
                             "id": requirement_id,
                             "prd_id": prd_id,
@@ -98,14 +98,11 @@ def _seed(backend: SqliteBackend, *, second_prd: bool = False) -> None:
                             "source_paragraph": None,
                             "derived": False,
                         }
-                    ],
-                    "acceptance_criteria": ["Bundle persists."],
-                    "risks": [],
-                    "open_questions": [],
-                },
-                target_kind="prd",
-                target_id=prd_id,
-            )
+                ],
+                "acceptance_criteria": ["Bundle persists."],
+                "risks": [],
+                "open_questions": [],
+            },
         )
         feature_id = f"{prd_id}:F001"
         backend.append(
@@ -1438,7 +1435,7 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 20
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 21
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1514,7 +1511,7 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
             }
         assert "review_disposition_event_id" in bundle_columns
         assert "disposition_event_id" in review_columns
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 20
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 21
     finally:
         migrated.close()
 
@@ -1562,7 +1559,7 @@ def test_v12_review_schema_recovers_torn_table_rename(tmp_path: Path) -> None:
             ).fetchone()
         assert row == ("BR-OLD", "legacy-unbound")
         assert backup is None
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 20
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 21
     finally:
         migrated.close()
 
@@ -1593,7 +1590,7 @@ def test_v14_bundle_schema_migrates_to_result_projection(tmp_path: Path) -> None
         bundle = migrated.get_bundle("B001")
         assert bundle is not None
         assert bundle.last_result_at == projected_at
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 20
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 21
     finally:
         migrated.close()
 

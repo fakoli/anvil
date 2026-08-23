@@ -85,11 +85,15 @@ Version history
   accounting category plus exact evidence/claim/attempt bindings.
 - v20: transactional claim Git bindings — task and bundle claims retain the
   validated selected base, exact claim start, branch, and canonical target.
+- v21: revision-bound PRD lifecycle — PRD projections retain a canonical
+  material digest, exact content-event identity, and the complete source/
+  material/content lineage reviewed or approved. Historical lifecycle state
+  without that binding is demoted to draft instead of being guessed.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 20
+SCHEMA_VERSION: int = 21
 
 
 def get_schema_version() -> int:
@@ -150,6 +154,16 @@ CREATE TABLE IF NOT EXISTS prds (
     revision                    INTEGER NOT NULL DEFAULT 1,
     source_bytes                BLOB,
     source_sha256               TEXT,
+    material_sha256             TEXT,
+    content_event_id            TEXT,
+    lifecycle_revision          INTEGER CHECK (
+                                    lifecycle_revision IS NULL
+                                    OR lifecycle_revision >= 1
+                                ),
+    lifecycle_source_sha256     TEXT,
+    lifecycle_material_sha256   TEXT,
+    lifecycle_content_event_id  TEXT,
+    review_event_id             TEXT,
     source_size_bytes           INTEGER CHECK (
                                     source_size_bytes IS NULL
                                     OR source_size_bytes BETWEEN 0 AND 2097152
@@ -490,7 +504,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 20;
+PRAGMA user_version = 21;
 """
 
 

@@ -9,10 +9,119 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from anvil.clock import FrozenClock
+
+
+def append_exact_approved_prd(
+    backend: Any,
+    *,
+    timestamp: datetime,
+    project_id: str,
+    prd_id: str,
+    title: str,
+    parsed_payload: dict[str, Any],
+) -> None:
+    """Append one current parse -> review -> approval test lineage."""
+    import hashlib
+
+    from anvil.planning.prd_persistence import material_content_sha256
+    from anvil.state.models import EventDraft
+
+    source = f"# Project: {title}\n"
+    source_bytes = source.encode()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    material_sha256 = material_content_sha256(
+        SimpleNamespace(
+            source_bytes=source_bytes,
+            markdown=source,
+            source_sha256=source_sha256,
+            source_size_bytes=len(source_bytes),
+            source_encoding="utf-8",
+        ),
+        title,
+    )
+    parsed = {
+        **parsed_payload,
+        "project_id": project_id,
+        "prd_id": prd_id,
+        "title": title,
+        "status": "draft",
+        "expected_absent": True,
+        "source_text": source,
+        "source_sha256": source_sha256,
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": 1,
+        "provenance_state": "available",
+        "content_available": True,
+        "material_sha256": material_sha256,
+    }
+    content_event = backend.append(
+        EventDraft(
+            timestamp=timestamp,
+            actor="seed",
+            action="prd.parsed",
+            target_kind="prd",
+            target_id=prd_id,
+            payload_json=parsed,
+        )
+    )
+    assert content_event is not None
+    review_event = backend.append(
+        EventDraft(
+            timestamp=timestamp,
+            actor="reviewer",
+            action="prd.reviewed",
+            target_kind="prd",
+            target_id=prd_id,
+            payload_json={
+                "project_id": project_id,
+                "prd_id": prd_id,
+                "reviewer": "reviewer",
+                "binding_version": 1,
+                "expected_revision": 1,
+                "expected_status": "draft",
+                "source_sha256": source_sha256,
+                "material_sha256": material_sha256,
+                "content_event_id": content_event.id,
+            },
+        )
+    )
+    assert review_event is not None
+    backend.append(
+        EventDraft(
+            timestamp=timestamp,
+            actor="approver",
+            action="prd.approved",
+            target_kind="prd",
+            target_id=prd_id,
+            payload_json={
+                "project_id": project_id,
+                "prd_id": prd_id,
+                "approver": "approver",
+                "binding_version": 1,
+                "expected_revision": 1,
+                "expected_status": "reviewed",
+                "source_sha256": source_sha256,
+                "material_sha256": material_sha256,
+                "content_event_id": content_event.id,
+                "review_event_id": review_event.id,
+            },
+        )
+    )
+    state_dir = Path(backend._events_path).parent  # noqa: SLF001
+    source_path = (
+        state_dir / "prd.md"
+        if prd_id == "default"
+        else state_dir / "prds" / f"{prd_id}.md"
+    )
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(source_bytes)
 
 
 def _explicitly_selects_live_github_args(args: Sequence[str]) -> bool:
@@ -162,6 +271,10 @@ def approved_backend(backend, frozen_clock):  # type: ignore[no-untyped-def]
     Shared by the WF-3 task/runner tests, which need to claim tasks (the claim
     gate requires an approved PRD).
     """
+    import hashlib
+    from types import SimpleNamespace
+
+    from anvil.planning.prd_persistence import material_content_sha256
     from anvil.state.models import EventDraft
 
     t0 = frozen_clock.now()
@@ -179,17 +292,53 @@ def approved_backend(backend, frozen_clock):  # type: ignore[no-untyped-def]
         "project", "proj-1",
     ))
     backend.append(_ev("state.initialized", {}, "project", "proj-1"))
-    backend.append(_ev(
+    source = (
+        "# Project: P\n\n## Summary\nS.\n\n## Goals\n- G.\n\n"
+        "## Requirements\n- R001: R.\n"
+    )
+    source_bytes = source.encode()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    material_sha256 = material_content_sha256(
+        SimpleNamespace(
+            source_bytes=source_bytes,
+            markdown=source,
+            source_sha256=source_sha256,
+            source_size_bytes=len(source_bytes),
+            source_encoding="utf-8",
+        ),
+        "P",
+    )
+    parsed_event = backend.append(_ev(
         "prd.parsed",
-        {"project_id": "proj-1", "status": "draft", "summary": "S.",
+        {"project_id": "proj-1", "title": "P", "status": "draft", "summary": "S.",
          "goals": ["G."], "non_goals": [],
          "requirements": [{"id": "R001", "prd_section": "requirements",
                            "text": "R.", "source_paragraph": None, "derived": False}],
-         "acceptance_criteria": ["AC."], "risks": [], "open_questions": []},
+         "acceptance_criteria": ["AC."], "risks": [], "open_questions": [],
+         "source_text": source, "source_sha256": source_sha256,
+         "source_size_bytes": len(source_bytes), "source_encoding": "utf-8",
+         "source_revision": 1, "provenance_state": "available",
+         "content_available": True, "material_sha256": material_sha256},
         "prd", "proj-1",
     ))
-    backend.append(_ev("prd.reviewed", {"project_id": "proj-1", "reviewer": "a"}, "prd", "proj-1"))
-    backend.append(_ev("prd.approved", {"project_id": "proj-1", "approver": "b"}, "prd", "proj-1"))
+    assert parsed_event is not None
+    reviewed_event = backend.append(_ev(
+        "prd.reviewed",
+        {"project_id": "proj-1", "reviewer": "a", "binding_version": 1,
+         "expected_revision": 1, "expected_status": "draft",
+         "source_sha256": source_sha256, "material_sha256": material_sha256,
+         "content_event_id": parsed_event.id},
+        "prd", "proj-1",
+    ))
+    assert reviewed_event is not None
+    backend.append(_ev(
+        "prd.approved",
+        {"project_id": "proj-1", "approver": "b", "binding_version": 1,
+         "expected_revision": 1, "expected_status": "reviewed",
+         "source_sha256": source_sha256, "material_sha256": material_sha256,
+         "content_event_id": parsed_event.id, "review_event_id": reviewed_event.id},
+        "prd", "proj-1",
+    ))
     return backend
 
 

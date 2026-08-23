@@ -268,7 +268,7 @@ def test_serialize_state_is_json_serialisable_and_total(tmp_path: Path) -> None:
         assert len(snap["prds"]) == 1
         assert snap["prds"][0]["id"] == "default"
         assert snap["prds"][0]["revision"] == 1
-        assert snap["prds"][0]["status"] == "reviewed"
+        assert snap["prds"][0]["status"] == "draft"
 
         # Collections populated.
         assert [f["id"] for f in snap["features"]] == ["F001"]

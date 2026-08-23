@@ -142,7 +142,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 20)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 21)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -466,6 +466,13 @@ anvil prd assess --prd v0.2 --json
 `--approve`: `draft` → `reviewed` (emits `prd.reviewed`). With `--approve`:
 `reviewed` → `approved` (emits `prd.approved`).
 
+Both transitions bind the exact persisted revision, source digest, canonical
+material digest, and content event. The command refuses if the selected source
+file no longer matches that persisted content; run `anvil prd parse` first,
+then repeat review and approval. A title-only revision may retain an existing
+lifecycle binding because the canonical material is unchanged; any other
+material change returns the PRD to `draft`.
+
 **Flags:**
 
 - `--approve` *(flag)* — approve the PRD (transition `reviewed` → `approved`).
@@ -482,8 +489,9 @@ anvil prd assess --prd v0.2 --json
 - `1` — no PRD in state (run `prd parse` first); or the PRD is in the wrong
   status for the requested transition (e.g. `--approve` invoked while the
   PRD is still `draft`); or a concurrent same-revision lifecycle transition
-  made the optimistic status precondition stale. Stale transitions refuse
-  atomically with a bounded traceback-free diagnostic.
+  made the optimistic status precondition stale; or the source file no longer
+  matches the persisted revision. Refusals are atomic and use a bounded,
+  traceback-free diagnostic.
 
 **Example:**
 
@@ -853,6 +861,12 @@ conflict check (file overlap with active claims and conflict-group
 membership), and records a `claim.created` event. Optionally creates a git
 worktree at `../wt-<task_id>/`.
 
+New task and bundle claims require the owning PRD to be `approved` for its
+exact current persisted revision, source digest, canonical material digest,
+and content event. If the source changed, run `anvil prd parse`, review, and
+approve again before claiming. This gate does not revoke an existing active
+claim.
+
 **Positional arguments:**
 
 - `TASK_ID` *(required)* — task id to claim (e.g. `T001`).
@@ -895,7 +909,8 @@ worktree at `../wt-<task_id>/`.
   optional worktree path.
 - `1` — `TASK_ID` not found, pre-claim conflicts detected without `--force`,
   or the `ClaimManager` rejected the claim (task in wrong status, already
-  claimed by another actor, lease overlap, etc.).
+  claimed by another actor, lease overlap, or its PRD lacks an exact current
+  approval, etc.).
 
 **Example:**
 
@@ -1069,6 +1084,8 @@ to one PRD.
 `anvil bundle claim B001` atomically creates the coordinator claim and member task
 authorizations. `--shared-tree` explicitly accepts a shared checkout; required worktree
 isolation otherwise directs callers to the top-level Git-aware bundle claim path.
+The owning PRD must remain exactly approved for its canonical source at the pre-log
+claim boundary; drift refuses without a claim, bundle-status change, or Git mutation.
 JSON output includes the exact coordinator identity plus structured renew, release,
 progress, and complete argv/environment continuations; no task-submit command is emitted.
 
@@ -1805,6 +1822,8 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
 - `anvil run-workflow NAME` — Run a declarative
   `.anvil/workflows/<name>.yaml` workflow to completion through anvil's
   governed create → claim → run → submit → apply transitions, then exit.
+  The owning PRD must be exactly approved for its current canonical source
+  before workflow task creation and at each task-claim pre-log boundary.
 - `anvil backup` — Push `events.jsonl` (and, with `--include-db`,
   `state.db`) to the configured S3 `durable_store`.
 - `anvil restore` — Pull `events.jsonl` from S3 and replay it into

@@ -37,6 +37,7 @@ from anvil.claims.manager import ClaimError, ClaimManager
 from anvil.clock import SystemClock
 from anvil.state.models import EventDraft
 from anvil.state.sqlite import SqliteBackend
+from tests.conftest import append_exact_approved_prd
 
 _UTC = UTC
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
@@ -110,25 +111,13 @@ def _setup_project_and_prd(b: SqliteBackend) -> None:
         "risks": [],
         "open_questions": [],
     }
-    b.append(
-        EventDraft(
-            timestamp=_T0,
-            actor="test",
-            action="prd.parsed",
-            target_kind="prd",
-            target_id="proj-1",
-            payload_json=prd_payload,
-        )
-    )
-    b.append(
-        EventDraft(
-            timestamp=_T0,
-            actor="test",
-            action="prd.reviewed",
-            target_kind="prd",
-            target_id="proj-1",
-            payload_json={"project_id": "proj-1", "reviewer": "alice"},
-        )
+    append_exact_approved_prd(
+        b,
+        timestamp=_T0,
+        project_id="proj-1",
+        prd_id="default",
+        title="Test Project",
+        parsed_payload=prd_payload,
     )
 
 

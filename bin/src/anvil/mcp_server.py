@@ -1303,7 +1303,7 @@ def claim_task(
     """Acquire an exclusive lease on task_id for claimed_by.
 
     Reaps stale claims first; refuses (ToolError) unless the task's OWNING PRD
-    is reviewed/approved (enforced by ClaimManager's per-PRD gate, T011/T012).
+    is approved and bound to its exact canonical source/material lineage.
     lease_duration_seconds defaults to 900 (15 min).
 
     Honors the worktree_isolation policy (config.yaml): under ``require`` this
@@ -1330,6 +1330,8 @@ def claim_task(
             resolve_claim_plan,
             revalidate_claim_plan,
         )
+
+        _require_actor(claimed_by)
 
         _reap_stale(backend)
 
@@ -1365,12 +1367,10 @@ def claim_task(
                         "collide; prefer `anvil claim --worktree` (CLI)."
                     )
 
-        # The PRD gate is enforced inside ClaimManager.claim() via
-        # get_prd_for_task (T011/T012): the task's OWNING PRD must be reviewed or
-        # approved. Its ClaimError is translated to ToolError below, so the MCP
-        # and CLI paths apply the IDENTICAL per-PRD gate. (A duplicated inline
-        # pre-check on the global get_prd() lived here pre-T012; it resolved the
-        # default PRD and so disagreed with the per-PRD gate under multi-PRD.)
+        # ClaimManager retains the task-to-owning-PRD transition check. The
+        # stronger canonical-source approval check runs immediately before this
+        # block and again under the claim operation lock, so CLI and MCP refuse
+        # reviewed, stale, or unbound PRDs identically.
         lease_minutes = max(1, lease_duration_seconds // 60)
         project_dir = _resolve_project_dir(Path(cwd) if cwd else None)
         manager = ClaimManager(
@@ -1385,6 +1385,18 @@ def claim_task(
         task = backend.get_task(task_id)
         if task is None:
             raise ToolError(f"Task '{task_id}' not found.")
+        from anvil.planning.prd_persistence import (
+            PrdClaimBindingError,
+            require_canonical_prd_claim_binding,
+        )
+
+        try:
+            require_canonical_prd_claim_binding(
+                state_dir,
+                backend.get_prd(task.prd_id),
+            )
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
 
         try:
             plan = resolve_claim_plan(
@@ -1398,6 +1410,10 @@ def claim_task(
             metadata = claim_git_metadata(plan)
             mutation_tracker = ClaimGitMutationTracker(plan)
             with backend.claim_operation_lock():
+                require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(task.prd_id),
+                )
                 revalidate_claim_plan(plan, cwd=project_dir)
                 result = manager.claim(
                     task_id,
@@ -1408,6 +1424,10 @@ def claim_task(
                     ),
                     git_metadata=metadata,
                     operation_locked=True,
+                    pre_log_check=lambda: require_canonical_prd_claim_binding(
+                        state_dir,
+                        backend.get_prd(task.prd_id),
+                    ),
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
@@ -1427,6 +1447,8 @@ def claim_task(
                 )
         except ClaimPlanError as exc:
             raise ToolError(f"{exc.code}: {exc}") from exc
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -2855,8 +2877,11 @@ def parse_prd(
     from anvil.cli._helpers import _DEFAULT_PRD_IDS
     from anvil.clock import SystemClock
     from anvil.planning.diagnostics import parse_diagnostic_report
+    from anvil.planning.prd_persistence import (
+        PrdRevisionError,
+        build_prd_persistence_plan,
+    )
     from anvil.planning.template import parse_prd as _parse_prd_impl
-    from anvil.state.models import EventDraft
 
     state_dir = _resolve_state_dir(cwd)
     if not state_dir.exists():
@@ -2875,18 +2900,6 @@ def parse_prd(
         cwd=cwd,
     )
     markdown = source.markdown
-
-    def source_binding(revision: int) -> dict[str, object]:
-        """Bind this invocation's one exact source read to its PRD revision."""
-        return {
-            "source_text": source.markdown,
-            "source_sha256": source.source_sha256,
-            "source_size_bytes": source.source_size_bytes,
-            "source_encoding": source.source_encoding,
-            "source_revision": revision,
-            "provenance_state": "available",
-            "content_available": True,
-        }
 
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
 
@@ -2917,179 +2930,37 @@ def parse_prd(
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
-        now = clock.now()
         project = backend.get_project()
         project_id = project.id if project is not None else "project"
-
-        # ``result.prd.id`` is the STORED model id (default sentinels collapse to
-        # 'default'); use it for the existence check and the diff partition.
         stored_prd_id = result.prd.id
-        existing_prd = backend.get_prd(stored_prd_id)
         is_default_prd = parse_prd_id in _DEFAULT_PRD_IDS
-
-        # The status the response reports. A first parse stores the parsed
-        # status verbatim; a re-parse that supersedes a requirement DEMOTES an
-        # approved PRD to ``draft`` in the handler, so reporting the parsed
-        # status would lie. Re-read the stored status after the revised append.
         effective_status = result.prd.status.value
-
-        # Preserve validated Requirement models through diff construction so
-        # requirement ids remain structurally typed strings. Serialize only at
-        # the event payload boundary.
-        new_requirements = list(result.requirements)
-
-        if existing_prd is None:
-            # FIRST parse → create-if-absent prd.parsed. Mirrors cli/prd.py.
-            payload: dict[str, Any] = {
-                "project_id": project_id,
-                "expected_absent": True,
-                "title": result.prd.title,
-                "status": result.prd.status.value,
-                "summary": result.prd.summary,
-                "goals": result.prd.goals,
-                "non_goals": result.prd.non_goals,
-                "requirements": [
-                    requirement.model_dump(mode="json")
-                    for requirement in new_requirements
-                ],
-                "acceptance_criteria": result.prd.acceptance_criteria,
-                "risks": result.prd.risks,
-                "open_questions": result.prd.open_questions,
-                "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                **source_binding(1),
-            }
-
-            # Named PRD: stamp the partition so the handler writes ONLY this PRD's
-            # rows. The default PRD omits only the partition identity keys; new
-            # events on both surfaces carry canonical title metadata, while the
-            # payload model's title default keeps old event logs replayable.
-            # Gate on the RESOLVED parse_prd_id so the reserved 'default'/'prd'
-            # sentinels take the default branch (see cli/prd.py).
-            if not is_default_prd:
-                payload["prd_id"] = stored_prd_id
-                payload["is_default"] = False
-                payload["target_version"] = result.prd.target_version
-                payload["target_tag"] = result.prd.target_tag
-
-            from anvil.state.backend import EventRejected
-
-            try:
-                backend.append(EventDraft(
-                    timestamp=now,
-                    actor="anvil-mcp",
-                    action="prd.parsed",
-                    target_kind="prd",
-                    target_id=project_id,
-                    payload_json=payload,
-                ))
-            except EventRejected as exc:
-                raise ToolError(f"PRD parse rejected: {exc}") from None
-        else:
-            # RE-parse of an existing prd_id → prd.revised (non-destructive
-            # supersede). Diff the freshly parsed requirements against the PRD's
-            # current LIVE rows so prior requirements are SUPERSEDED (lineage
-            # retained), not DELETED. Mirrors cli/prd.py exactly.
-            live_reqs = backend.list_requirements(prd_id=stored_prd_id)
-            live_by_id = {r.id: r for r in live_reqs}
-            all_reqs = backend.list_requirements(
-                prd_id=stored_prd_id, include_superseded=True
+        try:
+            persistence = build_prd_persistence_plan(
+                backend,
+                result,
+                source,
+                project_id=project_id,
+                is_default=is_default_prd,
+                actor="anvil-mcp",
+                clock=clock,
             )
-            all_ids = {r.id for r in all_reqs}
-            new_by_id = {requirement.id: requirement for requirement in new_requirements}
+        except PrdRevisionError as exc:
+            raise ToolError(str(exc)) from None
 
-            # An id retired in a PRIOR revision (in all_ids but NOT live) that
-            # reappears in the new parse falls into NO diff bucket and would be
-            # silently dropped (mirrors cli/prd.py). The single ``id`` PK means
-            # lineage cannot be revived, so reject loudly instead of losing it.
-            readded_retired = sorted(
-                rid
-                for rid in new_by_id
-                if rid in all_ids and rid not in live_by_id
-            )
-            if readded_retired:
-                from anvil.planning.diagnostics import format_identifier_summary
+        from anvil.state.backend import EventRejected
 
-                ids = format_identifier_summary(readded_retired)
-                raise ToolError(
-                    f"Requirement id(s) {ids} were superseded in an earlier "
-                    "revision and cannot be re-added (ids are permanent "
-                    "lineage). Use a fresh id for the restored requirement."
-                )
+        try:
+            if persistence.draft is not None:
+                backend.append(persistence.draft)
+        except EventRejected as exc:
+            raise ToolError(f"PRD parse rejected: {exc}") from None
 
-            requirements_added = [
-                requirement
-                for requirement in new_requirements
-                if requirement.id not in all_ids
-            ]
-            requirements_unchanged = [
-                new_by_id[rid] for rid in live_by_id if rid in new_by_id
-            ]
-            requirements_superseded = [
-                r
-                for r in live_reqs
-                if r.id not in new_by_id
-            ]
-
-            new_revision = existing_prd.revision + 1
-            revised_payload: dict[str, Any] = {
-                "project_id": project_id,
-                "prd_id": stored_prd_id,
-                "revision": new_revision,
-                "expected_status": existing_prd.status.value,
-                "is_default": existing_prd.is_default,
-                "title": result.prd.title,
-                "target_version": existing_prd.target_version,
-                "target_tag": existing_prd.target_tag,
-                # Carry the CURRENT stored status (mirrors the CLI): result.prd is a
-                # fresh parse and is always 'draft', so using it would silently demote
-                # a reviewed/approved PRD on every re-parse. Pure-additive keeps this;
-                # the handler demotes only when a requirement is superseded.
-                "status": existing_prd.status.value,
-                "summary": result.prd.summary,
-                "goals": result.prd.goals,
-                "non_goals": result.prd.non_goals,
-                "acceptance_criteria": result.prd.acceptance_criteria,
-                "risks": result.prd.risks,
-                "open_questions": result.prd.open_questions,
-                "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                "requirements_added": [
-                    requirement.model_dump(mode="json")
-                    for requirement in requirements_added
-                ],
-                "requirements_superseded": [
-                    requirement.model_dump(mode="json")
-                    for requirement in requirements_superseded
-                ],
-                "requirements_unchanged": [
-                    requirement.model_dump(mode="json")
-                    for requirement in requirements_unchanged
-                ],
-                **source_binding(new_revision),
-            }
-
-            from anvil.state.backend import EventRejected
-
-            try:
-                backend.append(EventDraft(
-                    timestamp=now,
-                    actor="anvil-mcp",
-                    action="prd.revised",
-                    target_kind="prd",
-                    target_id=stored_prd_id,
-                    payload_json=revised_payload,
-                ))
-            except EventRejected as exc:
-                # The prd.revised gate can reject on PRD state (e.g. a concurrent
-                # re-parse off the same base computes revision != current+1). The
-                # old prd.parsed path never rejected on state, so without this
-                # guard the rejection would surface as an unhandled traceback.
-                raise ToolError(f"PRD parse rejected: {exc}") from exc
-
-            # Report the status as actually stored: a supersede demotes an
-            # approved PRD to draft, so the parsed status may be stale.
-            revised_prd = backend.get_prd(stored_prd_id)
-            if revised_prd is not None:
-                effective_status = revised_prd.status.value
+        effective_status = persistence.status
+        if persistence.draft is not None:
+            persisted_prd = backend.get_prd(stored_prd_id)
+            if persisted_prd is not None:
+                effective_status = persisted_prd.status.value
     finally:
         backend.close()
 
@@ -3140,7 +3011,12 @@ def review_prd(
             PRD, byte-identical to pre-T019 on a single-PRD project.
         cwd:      Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _DEFAULT_PRD_IDS, canonical_prd_id
+    from anvil.cli._helpers import (
+        _DEFAULT_PRD_IDS,
+        PrdSourceIngestError,
+        canonical_prd_id,
+        ingest_prd_source_for_id,
+    )
     from anvil.clock import SystemClock
     from anvil.state.backend import EventRejected
     from anvil.state.models import EventDraft
@@ -3163,6 +3039,23 @@ def review_prd(
         if prd is None:
             raise ToolError(
                 "No PRD found in state. Run parse_prd first.",
+            )
+        try:
+            canonical_source = ingest_prd_source_for_id(state_dir, resolved_prd_id)
+        except PrdSourceIngestError as exc:
+            raise ToolError(
+                f"Cannot verify canonical PRD source: {exc.message}"
+            ) from None
+        if (
+            not prd.content_available
+            or prd.source_bytes != canonical_source.source_bytes
+            or prd.source_sha256 != canonical_source.source_sha256
+            or prd.material_sha256 is None
+            or prd.content_event_id is None
+        ):
+            raise ToolError(
+                "Canonical PRD source is not the exact parsed revision. "
+                "Copy/reparse any custom source into the managed PRD source, then retry."
             )
         from_status = prd.status.value
         project = backend.get_project()
@@ -3189,6 +3082,11 @@ def review_prd(
                     "project_id": project_id,
                     "expected_revision": prd.revision,
                     "expected_status": prd.status.value,
+                    "binding_version": 1,
+                    "source_sha256": prd.source_sha256,
+                    "material_sha256": prd.material_sha256,
+                    "content_event_id": prd.content_event_id,
+                    "review_event_id": prd.review_event_id,
                     "approver": reviewer,
                 }
             )
@@ -3206,6 +3104,10 @@ def review_prd(
                     "project_id": project_id,
                     "expected_revision": prd.revision,
                     "expected_status": prd.status.value,
+                    "binding_version": 1,
+                    "source_sha256": prd.source_sha256,
+                    "material_sha256": prd.material_sha256,
+                    "content_event_id": prd.content_event_id,
                     "reviewer": reviewer,
                     "notes": notes,
                 }
@@ -4723,6 +4625,21 @@ def claim_bundle(
             cwd=cwd,
             new_claim=True,
         )
+        bundle = backend.get_bundle(bundle_id)
+        if bundle is None:
+            raise ToolError(f"bundle_error: Bundle '{bundle_id}' not found.")
+        from anvil.planning.prd_persistence import (
+            PrdClaimBindingError,
+            require_canonical_prd_claim_binding,
+        )
+
+        try:
+            require_canonical_prd_claim_binding(
+                state_dir,
+                backend.get_prd(bundle.prd_id),
+            )
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
         try:
             plan = resolve_claim_plan(
                 bundle_id,
@@ -4735,6 +4652,10 @@ def claim_bundle(
             metadata = claim_git_metadata(plan)
             mutation_tracker = ClaimGitMutationTracker(plan)
             with backend.claim_operation_lock():
+                require_canonical_prd_claim_binding(
+                    state_dir,
+                    backend.get_prd(bundle.prd_id),
+                )
                 revalidate_claim_plan(plan, cwd=project_dir)
                 result = manager.claim(
                     bundle_id,
@@ -4743,6 +4664,10 @@ def claim_bundle(
                         metadata.worktree_path if metadata is not None else None
                     ),
                     git_metadata=metadata,
+                    pre_log_check=lambda: require_canonical_prd_claim_binding(
+                        state_dir,
+                        backend.get_prd(bundle.prd_id),
+                    ),
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
@@ -4762,6 +4687,8 @@ def claim_bundle(
                 )
         except ClaimPlanError as exc:
             raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc
+        except PrdClaimBindingError as exc:
+            raise ToolError(f"prd_source_unapproved: {exc}") from None
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         return BundleClaimResponse(

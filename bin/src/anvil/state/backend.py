@@ -16,6 +16,7 @@ fully removed (Task 6 migration complete).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -73,16 +74,23 @@ class Backend(Protocol):
         """
         ...
 
-    def append(self, draft: EventDraft) -> Event | None:
+    def append(
+        self,
+        draft: EventDraft,
+        *,
+        pre_log_check: Callable[[], None] | None = None,
+    ) -> Event | None:
         """Validate, assign id, log-first, then apply mutation. Sole production write.
 
         Steps (all inside the flock critical section):
           1. ``_check_<action>`` — validation only; raises ``EventRejected`` on
              an illegal transition / bad payload, or ``IdempotentNoOp`` when the
              request is legal but already satisfied.
-          2. ``id = _next_seq()`` — increments the in-memory log-authority counter.
-          3. Append the materialized ``Event`` line to ``events.jsonl`` (log-first).
-          4. ``BEGIN IMMEDIATE; _write_<action>; _insert_event_row; COMMIT``.
+          2. Optional ``pre_log_check`` — a final read-only caller invariant at
+             the mutation linearization point; failure writes no event.
+          3. ``id = _next_seq()`` — increments the in-memory log-authority counter.
+          4. Append the materialized ``Event`` line to ``events.jsonl`` (log-first).
+          5. ``BEGIN IMMEDIATE; _write_<action>; _insert_event_row; COMMIT``.
 
         Returns:
             The materialized ``Event`` (with assigned id) on success.

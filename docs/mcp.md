@@ -499,9 +499,10 @@ therefore succeed together; a Git failure or interruption releases the claim and
 compensates only Git artifacts created by that invocation. Isolated worktrees require
 the CLI. Stale-claim reaping runs first.
 
-**Gate**: the task's owning PRD must be in `reviewed` or `approved` status. If the PRD is in
-any other status (e.g. `draft`) or missing, the tool raises a `ToolError` and no claim is
-created.
+**Gate**: the task's owning PRD must be `approved`, and the approval must bind
+its exact persisted revision, source digest, canonical material digest, and
+content event. A reviewed, draft, missing, legacy-unbound, or source-drifted
+PRD raises a bounded `ToolError`; no claim or Git mutation is created.
 
 **Inputs**
 
@@ -550,7 +551,8 @@ additive warning; legacy hook-observed file progress remains available.
 
 **Failure modes**
 
-- `ToolError` — PRD is not in `reviewed` or `approved` status, or missing.
+- `ToolError` — PRD is not exactly approved for its current canonical source,
+  or is missing.
 - `ToolError` — `ClaimError` from `ClaimManager` (task already claimed, task not in claimable state, etc.).
 - `ToolError` — bounded Git-plan refusal; no active claim or invocation-owned Git artifact remains.
 - `ToolError` — state directory not found.
@@ -879,6 +881,10 @@ Returns the bundle, coordinator claim, and isolation warnings. Under required wo
 isolation, callers must use the Git-aware CLI claim path or explicitly opt into a shared
 tree. The response also includes the exact coordinator identity and structured bundle
 renew, release, progress, and complete continuations; it never substitutes task submit.
+The bundle's owning PRD must be exactly approved for its current canonical source. That
+source is rechecked at the claim event's pre-log linearization point; drift refuses with
+`prd_source_unapproved` and creates no coordinator claim, member claim, bundle-status, or
+Git mutation.
 
 ### `generate_bundle_packet`
 
@@ -1531,7 +1537,7 @@ None.
   "tag": "v0.6.4",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 20,
+  "schema_version": 21,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],
@@ -1612,19 +1618,19 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":21,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":20}}
+{"error":{"code":"schema_mismatch","database_schema":22,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":21}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh
 state, a long-lived MCP connection detects a database that becomes incompatible between
 calls and returns the same closed error without restarting the transport.
 
-Example error message from `claim_task` when the PRD gate fires (the task's
-owning PRD is not yet reviewed/approved; enforced by ClaimManager's per-PRD gate):
+Example error message from `claim_task` when the owning PRD is not yet
+approved for its exact current source/material lineage:
 
 ```
-Task 'T012' cannot be claimed: PRD must be in {'reviewed', 'approved'}, got 'draft'.
-Review and approve the PRD before claiming tasks.
+PRD 'default' must be approved for its exact current source before new claims.
+Run `anvil prd parse`, `anvil prd review`, and `anvil prd review --approve`.
 ```
 
 Example error message from `update_task_status` when the transition is invalid:

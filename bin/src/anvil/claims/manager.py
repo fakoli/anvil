@@ -25,6 +25,7 @@ import datetime
 import logging
 import unicodedata
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -509,6 +510,7 @@ class ClaimManager:
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
         operation_locked: bool = False,
+        pre_log_check: Callable[[], None] | None = None,
     ) -> ClaimResult:
         """Atomically claim a task.
 
@@ -582,6 +584,7 @@ class ClaimManager:
                     branch=branch,
                     worktree_path=worktree_path,
                     git_metadata=git_metadata,
+                    pre_log_check=pre_log_check,
                 )
         return self._claim_unlocked(
             task_id,
@@ -591,6 +594,7 @@ class ClaimManager:
             branch=branch,
             worktree_path=worktree_path,
             git_metadata=git_metadata,
+            pre_log_check=pre_log_check,
         )
 
     def _claim_unlocked(
@@ -603,6 +607,7 @@ class ClaimManager:
         branch: str | None = None,
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
+        pre_log_check: Callable[[], None] | None = None,
     ) -> ClaimResult:
         """Claim implementation; caller owns same-backend serialization."""
 
@@ -814,7 +819,10 @@ class ClaimManager:
             payload_json=claim_payload,
         )
         try:
-            self._backend.append(claim_draft)
+            if pre_log_check is None:
+                self._backend.append(claim_draft)
+            else:
+                self._backend.append(claim_draft, pre_log_check=pre_log_check)
         except BackendError as exc:
             # The in-transaction guard (status race OR expected_files overlap
             # race) rejected this claim — a concurrent claim won. Surface it as
