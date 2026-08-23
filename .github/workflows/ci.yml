@@ -53,8 +53,8 @@ jobs:
           tests/test_installed_wheel.py
           -q
 
-  windows-source-binding:
-    name: windows sample source binding
+  windows-contracts:
+    name: windows focused contracts
     runs-on: windows-latest
 
     steps:
@@ -79,6 +79,15 @@ jobs:
           tests/test_cli.py::TestSampleSourceBindingContract
           -q
           --basetemp "${{ runner.temp }}/anvil-source-binding"
+
+      - name: Verify Git fixture contract in parallel
+        run: >-
+          uv run --project bin --locked --python 3.11 pytest
+          tests/test_git_ops.py
+          tests/test_reconciliation.py
+          -n 16
+          -q
+          --basetemp "${{ runner.temp }}/anvil-git-fixture-contract"
 
       - name: Verify Windows timing-harness mechanics
         run: >-
@@ -129,14 +138,14 @@ jobs:
           bin/src/anvil/planning/scoring.py
           bin/src/anvil/cli/plan.py
 
-      - name: Run test suite
+      - name: Run test suite in parallel
         env:
           # GitHub Actions sets GITHUB_ACTIONS=true which makes typer/rich
           # set FORCE_TERMINAL=True at import time, injecting ANSI codes into
           # CliRunner output. _TYPER_FORCE_DISABLE_TERMINAL overrides that so
           # --help assertions can match plain flag text (e.g. "--use-llm").
           _TYPER_FORCE_DISABLE_TERMINAL: "1"
-        run: uv run --project bin pytest
+        run: uv run --project bin pytest -n auto
 
       # Coordination benchmark smoke: drives the real anvil CLI against
       # a live SQLite state engine. Uses the venv materialized by `uv sync`

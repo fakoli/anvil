@@ -47,10 +47,9 @@ def _configuration_args(repo: Path, **overrides: object) -> argparse.Namespace:
     values = {
         "repo": str(repo),
         "warmups": 1,
-        "samples": 5,
-        "modes": "serial,parallel",
-        "workers": 4,
-        "timeout_seconds": 60,
+        "samples": 3,
+        "workers": 16,
+        "timeout_seconds": 120,
         "output": "artifacts/windows-pytest-timing.json",
         "expected_commit": None,
         "host_label": "test-host",
@@ -73,8 +72,7 @@ def _qualified_artifact(
         log_root=artifacts / "logs",
         log_relative_root="artifacts/logs",
         warmups=0,
-        samples=1,
-        modes=("serial", "parallel"),
+        samples=2,
         workers=2,
         timeout_seconds=10,
         expected_commit=None,
@@ -85,22 +83,24 @@ def _qualified_artifact(
     runs = [
         {
             "phase": "measured",
-            "mode": mode,
-            "pair": 1,
-            "order_in_pair": position,
+            "mode": "parallel",
+            "sample": position,
             "timing_valid": True,
-            "environment_qualified": True,
+            "comparison_qualified": True,
             "elapsed_seconds": elapsed,
             "junit_counts": counts,
             "junit_testcase_ids_sha256": "same-workload",
         }
-        for position, (mode, elapsed) in enumerate(
-            (("serial", 10.0), ("parallel", 5.0)), start=1
-        )
+        for position, elapsed in enumerate((10.0, 5.0), start=1)
     ]
     artifact: dict[str, Any] = {
         "versions": {"observable": True},
-        "controls": {"observable": True},
+        "controls": {
+            "comparison_ready": True,
+            "defender_exclusions_visibility": {
+                group: "unavailable" for group in timing.DEFENDER_EXCLUSION_GROUPS
+            },
+        },
         "collection": {
             "error": None,
             "count": 10,
@@ -176,11 +176,18 @@ def test_collected_nodes_must_come_from_tracked_sources() -> None:
         timing._validate_collected_nodes(nodes, {"tests/test_alpha.py"})
 
 
-def test_non_probe_protocol_is_fixed_to_one_warmup_and_five_pairs(tmp_path: Path) -> None:
+def test_non_probe_protocol_is_fixed_to_one_warmup_and_three_runs(tmp_path: Path) -> None:
     repo = _clean_repo(tmp_path)
 
-    with pytest.raises(ValueError, match="fixed_at_one_warmup_and_five_pairs"):
-        timing._configuration(_configuration_args(repo, samples=4))
+    with pytest.raises(ValueError, match="fixed_at_one_warmup_and_three_runs"):
+        timing._configuration(_configuration_args(repo, samples=5))
+
+
+def test_non_probe_worker_count_is_fixed_at_selected_optimum(tmp_path: Path) -> None:
+    repo = _clean_repo(tmp_path)
+
+    with pytest.raises(ValueError, match="workers_fixed_at_16"):
+        timing._configuration(_configuration_args(repo, workers=8))
 
 
 def test_output_must_be_direct_artifacts_child(tmp_path: Path) -> None:
@@ -253,7 +260,6 @@ def test_managed_probe_is_gated_and_job_is_empty_after_exit(tmp_path: Path) -> N
         log_relative_root="logs",
         warmups=0,
         samples=1,
-        modes=("serial", "parallel"),
         workers=2,
         timeout_seconds=10,
         expected_commit=None,
@@ -291,7 +297,6 @@ def test_managed_timeout_terminates_descendants_and_verifies_empty_job(tmp_path:
         log_relative_root="logs",
         warmups=0,
         samples=1,
-        modes=("serial", "parallel"),
         workers=2,
         timeout_seconds=1,
         expected_commit=None,
@@ -328,12 +333,161 @@ def test_managed_timeout_terminates_descendants_and_verifies_empty_job(tmp_path:
 
 
 def test_insufficient_non_probe_result_exits_nonzero() -> None:
-    assert timing.result_exit_code(probe=False, timing_valid=True, environment_qualified=False) == 1
-    assert timing.result_exit_code(probe=False, timing_valid=False, environment_qualified=True) == 1
-    assert timing.result_exit_code(probe=False, timing_valid=True, environment_qualified=True) == 0
+    assert timing.result_exit_code(
+        probe=False,
+        measurement_valid=True,
+        affected_slice_median_budget_met=False,
+    ) == 1
+    assert timing.result_exit_code(
+        probe=False,
+        measurement_valid=False,
+        affected_slice_median_budget_met=True,
+    ) == 1
+    assert timing.result_exit_code(
+        probe=False,
+        measurement_valid=True,
+        affected_slice_median_budget_met=True,
+    ) == 0
 
 
-def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
+def test_redacted_defender_exclusions_do_not_require_elevation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        timing,
+        "_power_snapshot",
+        lambda: {
+            "observable": True,
+            "active_scheme_guid": "00000000-0000-0000-0000-000000000001",
+            "full_settings_sha256": "power",
+            "power_source": "ac",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        timing,
+        "_defender_snapshot",
+        lambda: {
+            "status": {
+                "antivirus_enabled": True,
+                "realtime_protection_enabled": True,
+                "behavior_monitor_enabled": True,
+                "ioav_protection_enabled": True,
+                "tamper_protected": True,
+            },
+            "exclusions": {
+                group: {
+                    "availability": "unavailable",
+                    "unavailable_reason": "permission_limited",
+                    "count": None,
+                    "sha256": None,
+                }
+                for group in timing.DEFENDER_EXCLUSION_GROUPS
+            },
+            "status_error": None,
+            "exclusions_error": None,
+            "error": None,
+        },
+    )
+
+    snapshot = timing.control_snapshot()
+    artifact, config = _qualified_artifact(tmp_path)
+    artifact["controls"] = snapshot
+
+    assert snapshot["comparison_ready"] is True
+    assert snapshot["defender_exclusions_visibility"] == {
+        group: "unavailable" for group in timing.DEFENDER_EXCLUSION_GROUPS
+    }
+    assert timing._finish_artifact(config, artifact) == 0
+    assert artifact["result"]["status"] == "passed"
+    assert artifact["result"]["affected_slice_median_budget_met"] is True
+
+
+def test_partial_defender_status_is_not_comparable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        timing,
+        "_power_snapshot",
+        lambda: {"observable": True, "power_source": "ac", "error": None},
+    )
+    monkeypatch.setattr(
+        timing,
+        "_defender_snapshot",
+        lambda: {
+            "status": {"antivirus_enabled": True},
+            "status_error": None,
+            "exclusions": {
+                group: {
+                    "availability": "unavailable",
+                    "unavailable_reason": "permission_limited",
+                    "count": None,
+                    "sha256": None,
+                }
+                for group in timing.DEFENDER_EXCLUSION_GROUPS
+            },
+            "exclusions_error": None,
+            "error": None,
+        },
+    )
+
+    assert timing.control_snapshot()["comparison_ready"] is False
+
+
+def test_each_visible_defender_exclusion_group_is_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = {field: True for field in timing.DEFENDER_STATUS_FIELDS}
+    exclusions = {
+        "paths": {
+            "availability": "unavailable",
+            "unavailable_reason": "permission_limited",
+            "count": None,
+            "sha256": None,
+        },
+        "processes": {
+            "availability": "available",
+            "unavailable_reason": None,
+            "count": 1,
+            "sha256": "process-a",
+        },
+        "extensions": {
+            "availability": "available",
+            "unavailable_reason": None,
+            "count": 0,
+            "sha256": "extensions",
+        },
+    }
+    monkeypatch.setattr(
+        timing,
+        "_power_snapshot",
+        lambda: {"observable": True, "power_source": "ac", "error": None},
+    )
+    monkeypatch.setattr(
+        timing,
+        "_defender_snapshot",
+        lambda: {
+            "status": status,
+            "status_error": None,
+            "exclusions": exclusions,
+            "exclusions_error": None,
+            "error": None,
+        },
+    )
+    before = timing.control_snapshot()
+    exclusions["processes"] = {**exclusions["processes"], "sha256": "process-b"}
+    after = timing.control_snapshot()
+
+    assert before["comparison_ready"] is True
+    assert before["defender_exclusions_visibility"]["paths"] == "unavailable"
+    assert before["defender_exclusions_visibility"]["processes"] == "available"
+    assert (
+        before["comparison_fingerprint_sha256"]
+        != after["comparison_fingerprint_sha256"]
+    )
+
+
+def test_insufficient_artifact_keeps_descriptive_median_and_null_budget(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path
@@ -347,8 +501,7 @@ def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
         log_root=artifacts / "logs" / "run",
         log_relative_root="artifacts/logs/run",
         warmups=0,
-        samples=1,
-        modes=("serial", "parallel"),
+        samples=2,
         workers=4,
         timeout_seconds=60,
         expected_commit=None,
@@ -359,11 +512,10 @@ def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
     runs = [
         {
             "phase": "measured",
-            "mode": "serial",
-            "pair": 1,
-            "order_in_pair": 1,
+            "mode": "parallel",
+            "sample": 1,
             "timing_valid": True,
-            "environment_qualified": False,
+            "comparison_qualified": False,
             "elapsed_seconds": 10.0,
             "junit_counts": base_counts,
             "junit_testcase_ids_sha256": "same-workload",
@@ -371,10 +523,9 @@ def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
         {
             "phase": "measured",
             "mode": "parallel",
-            "pair": 1,
-            "order_in_pair": 2,
+            "sample": 2,
             "timing_valid": True,
-            "environment_qualified": False,
+            "comparison_qualified": False,
             "elapsed_seconds": 5.0,
             "junit_counts": base_counts,
             "junit_testcase_ids_sha256": "same-workload",
@@ -382,7 +533,12 @@ def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
     ]
     artifact = {
         "versions": {"observable": True},
-        "controls": {"observable": False},
+        "controls": {
+            "comparison_ready": False,
+            "defender_exclusions_visibility": {
+                group: "unavailable" for group in timing.DEFENDER_EXCLUSION_GROUPS
+            },
+        },
         "collection": {
             "error": None,
             "count": 10,
@@ -394,9 +550,9 @@ def test_insufficient_artifact_keeps_descriptive_medians_and_null_threshold(
 
     assert timing._finish_artifact(config, artifact) == 1
     written = json.loads(config.output.read_text(encoding="utf-8"))
-    assert written["result"]["descriptive_timing_valid"] is True
-    assert written["result"]["parallel_speedup_percent"] == 50.0
-    assert written["result"]["threshold_met"] is None
+    assert written["result"]["measurement_valid"] is False
+    assert written["result"]["parallel_seconds"]["median"] == 7.5
+    assert written["result"]["affected_slice_median_budget_met"] is None
 
 
 def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
@@ -410,8 +566,7 @@ def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
         log_root=artifacts / "logs",
         log_relative_root="artifacts/logs",
         warmups=0,
-        samples=1,
-        modes=("serial", "parallel"),
+        samples=2,
         workers=2,
         timeout_seconds=10,
         expected_commit=None,
@@ -419,15 +574,14 @@ def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
         probe=False,
     )
     runs = []
-    for mode, tests in (("serial", 10), ("parallel", 9)):
+    for sample, tests in ((1, 10), (2, 9)):
         runs.append(
             {
                 "phase": "measured",
-                "mode": mode,
-                "pair": 1,
-                "order_in_pair": 1 if mode == "serial" else 2,
+                "mode": "parallel",
+                "sample": sample,
                 "timing_valid": True,
-                "environment_qualified": True,
+                "comparison_qualified": True,
                 "elapsed_seconds": 1.0,
                 "junit_counts": {
                     "tests": tests,
@@ -441,7 +595,12 @@ def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
         )
     artifact = {
         "versions": {"observable": True},
-        "controls": {"observable": True},
+        "controls": {
+            "comparison_ready": True,
+            "defender_exclusions_visibility": {
+                group: "available" for group in timing.DEFENDER_EXCLUSION_GROUPS
+            },
+        },
         "collection": {
             "error": None,
             "count": 10,
@@ -455,13 +614,13 @@ def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
     assert artifact["result"]["junit_counts_identical_across_runs"] is False
 
 
-def test_invalid_collection_cannot_qualify_threshold(tmp_path: Path) -> None:
+def test_invalid_collection_cannot_qualify_budget(tmp_path: Path) -> None:
     artifact, config = _qualified_artifact(tmp_path)
     artifact["collection"]["error"] = "CollectionNonzero"
 
     assert timing._finish_artifact(config, artifact) == 1
     assert artifact["result"]["collection_valid"] is False
-    assert artifact["result"]["threshold_met"] is None
+    assert artifact["result"]["affected_slice_median_budget_met"] is None
 
 
 def test_equal_counts_with_different_testcase_ids_cannot_qualify(
@@ -472,15 +631,55 @@ def test_equal_counts_with_different_testcase_ids_cannot_qualify(
 
     assert timing._finish_artifact(config, artifact) == 1
     assert artifact["result"]["junit_testcase_ids_identical_across_runs"] is False
-    assert artifact["result"]["threshold_met"] is None
+    assert artifact["result"]["affected_slice_median_budget_met"] is None
+
+
+def test_valid_measurement_above_slice_budget_exits_nonzero(tmp_path: Path) -> None:
+    artifact, config = _qualified_artifact(tmp_path)
+    for run in artifact["runs"]:
+        run["elapsed_seconds"] = 36.0
+
+    assert timing._finish_artifact(config, artifact) == 1
+    assert artifact["result"]["measurement_valid"] is True
+    assert artifact["result"]["affected_slice_median_budget_met"] is False
+    assert artifact["result"]["status"] == "regression"
 
 
 def test_powershell_entrypoint_keeps_locked_exact_public_protocol() -> None:
     script = (ROOT / "scripts" / "measure-windows-pytest.ps1").read_text(encoding="utf-8")
     assert '[int]$Warmups = 1' in script
-    assert '[int]$Samples = 5' in script
-    assert '[string]$Modes = "serial,parallel"' in script
+    assert '[int]$Samples = 3' in script
+    assert '[int]$Workers = 16' in script
+    assert '[int]$TimeoutSeconds = 120' in script
+    assert "$Modes" not in script
     assert '"run", "--locked", "--exact", "--project"' in script
+
+
+def test_timing_workload_is_only_the_git_fixture_contract() -> None:
+    command = timing._public_command(16, "artifacts/logs/result.xml", probe=False)
+
+    assert timing.TIMING_TEST_TARGETS == (
+        "tests/test_git_ops.py",
+        "tests/test_reconciliation.py",
+    )
+    assert "tests" not in command
+    assert command[command.index("-n") + 1] == "16"
+    assert "0" not in command
+    assert command[command.index("pytest") + 1 : command.index("-q")] == list(
+        timing.TIMING_TEST_TARGETS
+    )
+
+
+def test_timing_collection_contract_rejects_count_source_or_identity_drift() -> None:
+    nodes = [f"tests/test_git_ops.py::test_{number}" for number in range(167)]
+    sources = sorted(timing.TIMING_TEST_TARGETS)
+
+    with pytest.raises(RuntimeError, match="timing_collection_contract_mismatch"):
+        timing._validate_timing_collection(nodes[:-1], sources)
+    with pytest.raises(RuntimeError, match="timing_collection_contract_mismatch"):
+        timing._validate_timing_collection(nodes, ["tests/test_git_ops.py"])
+    with pytest.raises(RuntimeError, match="timing_collection_contract_mismatch"):
+        timing._validate_timing_collection(nodes, sources)
 
 
 def test_windows_ci_runs_timing_harness_mechanics_separately() -> None:
@@ -492,3 +691,8 @@ def test_windows_ci_runs_timing_harness_mechanics_separately() -> None:
     assert "tests/test_windows_pytest_timing.py" in workflow
     assert "anvil-source-binding" in workflow
     assert "anvil-timing-harness" in workflow
+    assert "anvil-git-fixture-contract" in workflow
+    assert "tests/test_git_ops.py" in workflow
+    assert "tests/test_reconciliation.py" in workflow
+    assert "-n 16" in workflow
+    assert "uv run --project bin pytest -n auto" in workflow

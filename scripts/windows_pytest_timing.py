@@ -49,6 +49,22 @@ UNTRACKED_SCAN_EXCLUDES = (
     "bin/.venv/**",
     "**/__pycache__/**",
 )
+TIMING_TEST_TARGETS = (
+    "tests/test_git_ops.py",
+    "tests/test_reconciliation.py",
+)
+TIMING_EXPECTED_NODE_COUNT = 167
+TIMING_EXPECTED_NODE_IDS_SHA256 = (
+    "05e7981aeb118af1a647f290dcd0410021e464b2f71ca1395ae7f7772a8ab769"
+)
+DEFENDER_STATUS_FIELDS = (
+    "antivirus_enabled",
+    "realtime_protection_enabled",
+    "behavior_monitor_enabled",
+    "ioav_protection_enabled",
+    "tamper_protected",
+)
+DEFENDER_EXCLUSION_GROUPS = ("paths", "processes", "extensions")
 
 
 def _utc_now() -> str:
@@ -603,11 +619,14 @@ def _normalized_exclusion_group(values: Iterable[Any]) -> dict[str, Any]:
             if str(value).strip()
         }
     )
-    unobservable = any("n/a:" in value or "administrator" in value for value in normalized)
+    permission_limited = any(
+        "n/a:" in value or "administrator" in value for value in normalized
+    )
     return {
-        "observable": not unobservable,
-        "count": len(normalized),
-        "sha256": None if unobservable else _sha256_json(normalized),
+        "availability": "unavailable" if permission_limited else "available",
+        "unavailable_reason": "permission_limited" if permission_limited else None,
+        "count": None if permission_limited else len(normalized),
+        "sha256": None if permission_limited else _sha256_json(normalized),
     }
 
 
@@ -618,57 +637,143 @@ def _as_values(value: Any) -> list[Any]:
 
 
 def _defender_snapshot() -> dict[str, Any]:
-    command = r"""
+    status_command = r"""
 $ErrorActionPreference='Stop'
-$p=Get-MpPreference
 $s=Get-MpComputerStatus
 [ordered]@{
-  status=[ordered]@{
-    antivirus_enabled=[bool]$s.AntivirusEnabled
-    realtime_protection_enabled=[bool]$s.RealTimeProtectionEnabled
-    behavior_monitor_enabled=[bool]$s.BehaviorMonitorEnabled
-    ioav_protection_enabled=[bool]$s.IoavProtectionEnabled
-    tamper_protected=[bool]$s.IsTamperProtected
-  }
+  antivirus_enabled=[bool]$s.AntivirusEnabled
+  realtime_protection_enabled=[bool]$s.RealTimeProtectionEnabled
+  behavior_monitor_enabled=[bool]$s.BehaviorMonitorEnabled
+  ioav_protection_enabled=[bool]$s.IoavProtectionEnabled
+  tamper_protected=[bool]$s.IsTamperProtected
+}|ConvertTo-Json -Compress
+"""
+    exclusions_command = r"""
+$ErrorActionPreference='Stop'
+$p=Get-MpPreference
+[ordered]@{
   paths=@($p.ExclusionPath)
   processes=@($p.ExclusionProcess)
   extensions=@($p.ExclusionExtension)
-}|ConvertTo-Json -Compress -Depth 5
+}|ConvertTo-Json -Compress -Depth 3
 """
     try:
-        completed = subprocess.run(
-            ("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command),
+        status_completed = subprocess.run(
+            (
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                status_command,
+            ),
             check=True,
             capture_output=True,
             text=True,
             timeout=60,
             env=_controlled_environment(),
         )
-        raw = json.loads(completed.stdout)
+        status = json.loads(status_completed.stdout)
+    except Exception as exc:
+        status = None
+        status_error = _safe_error(exc)
+    else:
+        status_error = None
+        if not (
+            isinstance(status, dict)
+            and set(status) == set(DEFENDER_STATUS_FIELDS)
+            and all(type(status[field]) is bool for field in DEFENDER_STATUS_FIELDS)
+        ):
+            status = None
+            status_error = "defender_status_schema_invalid"
+
+    try:
+        exclusions_completed = subprocess.run(
+            (
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                exclusions_command,
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=_controlled_environment(),
+        )
+        raw_exclusions = json.loads(exclusions_completed.stdout)
+        if not isinstance(raw_exclusions, dict) or set(raw_exclusions) != set(
+            DEFENDER_EXCLUSION_GROUPS
+        ):
+            raise ValueError("defender_exclusions_schema_invalid")
         exclusions = {
-            "paths": _normalized_exclusion_group(_as_values(raw.get("paths"))),
-            "processes": _normalized_exclusion_group(_as_values(raw.get("processes"))),
-            "extensions": _normalized_exclusion_group(_as_values(raw.get("extensions"))),
-        }
-        observable = all(group["observable"] for group in exclusions.values())
-        return {
-            "observable": observable,
-            "status": raw["status"],
-            "exclusions": exclusions,
-            "error": None,
+            group: _normalized_exclusion_group(_as_values(raw_exclusions.get(group)))
+            for group in DEFENDER_EXCLUSION_GROUPS
         }
     except Exception as exc:
-        return {"observable": False, "status": None, "exclusions": None, "error": _safe_error(exc)}
+        exclusions = None
+        exclusions_error = _safe_error(exc)
+    else:
+        exclusions_error = None
+
+    return {
+        "status": status,
+        "status_error": status_error,
+        "exclusions": exclusions,
+        "exclusions_error": exclusions_error,
+        "error": status_error or exclusions_error,
+    }
 
 
 def control_snapshot() -> dict[str, Any]:
     power = _power_snapshot()
     defender = _defender_snapshot()
     snapshot = {"power": power, "defender": defender}
-    snapshot["observable"] = bool(power["observable"] and defender["observable"])
-    snapshot["fingerprint_sha256"] = _sha256_json(
-        {"power": power, "defender": defender}
+    # Get-MpPreference deliberately redacts exclusion values from a normal
+    # Windows shell.  Those values are useful context when visible, but they
+    # must not turn elevation into a benchmark prerequisite.  Bind the
+    # comparison to the observable Defender status and record whether the
+    # exclusion set was visible; include its values only when Windows exposes
+    # them.  A change in visibility or any comparable control still fails the
+    # measurement protocol.
+    defender_status_comparable = bool(
+        defender.get("status_error") is None
+        and isinstance(defender.get("status"), dict)
+        and set(defender["status"]) == set(DEFENDER_STATUS_FIELDS)
+        and all(
+            type(defender["status"][field]) is bool
+            for field in DEFENDER_STATUS_FIELDS
+        )
     )
+    exclusions = defender.get("exclusions")
+    defender_exclusions_comparable = bool(
+        defender.get("exclusions_error") is None
+        and isinstance(exclusions, dict)
+        and set(exclusions) == set(DEFENDER_EXCLUSION_GROUPS)
+        and all(
+            isinstance(exclusions[group], dict)
+            and exclusions[group].get("availability") in {"available", "unavailable"}
+            for group in DEFENDER_EXCLUSION_GROUPS
+        )
+    )
+    defender_exclusions_visibility = {
+        group: exclusions[group]["availability"]
+        for group in DEFENDER_EXCLUSION_GROUPS
+    } if defender_exclusions_comparable else None
+    comparison_payload = {
+        "power": power,
+        "defender_status": defender.get("status"),
+        "defender_exclusions_visibility": defender_exclusions_visibility,
+        "defender_exclusions": exclusions if defender_exclusions_comparable else None,
+    }
+    snapshot["comparison_ready"] = bool(
+        power["observable"]
+        and defender_status_comparable
+        and defender_exclusions_comparable
+    )
+    snapshot["defender_exclusions_visibility"] = defender_exclusions_visibility
+    snapshot["comparison_fingerprint_sha256"] = _sha256_json(comparison_payload)
+    snapshot["observation_fingerprint_sha256"] = _sha256_json(snapshot)
     return snapshot
 
 
@@ -710,10 +815,15 @@ def _distribution(values: Sequence[float]) -> dict[str, float | None]:
     }
 
 
-def result_exit_code(*, probe: bool, timing_valid: bool, environment_qualified: bool) -> int:
+def result_exit_code(
+    *,
+    probe: bool,
+    measurement_valid: bool,
+    affected_slice_median_budget_met: bool | None,
+) -> int:
     if probe:
-        return 0 if timing_valid else 1
-    return 0 if timing_valid and environment_qualified else 1
+        return 0 if measurement_valid else 1
+    return 0 if measurement_valid and affected_slice_median_budget_met else 1
 
 
 @dataclass
@@ -726,7 +836,6 @@ class Configuration:
     log_relative_root: str
     warmups: int
     samples: int
-    modes: tuple[str, str]
     workers: int
     timeout_seconds: int
     expected_commit: str | None
@@ -734,7 +843,7 @@ class Configuration:
     probe: bool
 
 
-def _public_command(mode: str, workers: int, junit_relative: str, probe: bool) -> list[str]:
+def _public_command(workers: int, junit_relative: str, probe: bool) -> list[str]:
     if probe:
         return ["python", "-c", "<fixed-probe>"]
     command = [
@@ -745,10 +854,10 @@ def _public_command(mode: str, workers: int, junit_relative: str, probe: bool) -
         "--project",
         "bin",
         "pytest",
-        "tests",
+        *TIMING_TEST_TARGETS,
         "-q",
         "-n",
-        "0" if mode == "serial" else str(workers),
+        str(workers),
         "--junitxml",
         junit_relative,
     ]
@@ -845,9 +954,7 @@ def _run_one(
     *,
     sequence: int,
     phase: str,
-    mode: str,
-    pair: int | None,
-    order_in_pair: int | None,
+    sample: int | None,
     collection: dict[str, Any],
 ) -> dict[str, Any]:
     before_error: str | None = None
@@ -858,7 +965,7 @@ def _run_one(
     except Exception as exc:
         before_error = _safe_error(exc)
 
-    prefix = f"{sequence:02d}-{phase}-{mode}"
+    prefix = f"{sequence:02d}-{phase}-parallel"
     raw_relative = f"{config.log_relative_root}/{prefix}.log"
     junit_relative = f"{config.log_relative_root}/{prefix}.xml"
     raw_path = config.repo / raw_relative
@@ -866,7 +973,7 @@ def _run_one(
     stdout_path = config.log_root / f"{prefix}.stdout"
     stderr_path = config.log_root / f"{prefix}.stderr"
     gate = f"Local\\AnvilPytestTiming-Gate-{uuid.uuid4().hex}"
-    public = _public_command(mode, config.workers, junit_relative, config.probe)
+    public = _public_command(config.workers, junit_relative, config.probe)
     control_before = control_snapshot()
     process_result = {
         "elapsed_seconds": None,
@@ -932,15 +1039,17 @@ def _run_one(
     else:
         junit_error = "JUnitMissing"
 
-    control_match = (
-        control_before["fingerprint_sha256"] == baseline_control["fingerprint_sha256"]
-        and control_after["fingerprint_sha256"] == baseline_control["fingerprint_sha256"]
+    controls_match = (
+        control_before["comparison_fingerprint_sha256"]
+        == baseline_control["comparison_fingerprint_sha256"]
+        and control_after["comparison_fingerprint_sha256"]
+        == baseline_control["comparison_fingerprint_sha256"]
     )
-    environment_qualified = bool(
-        baseline_control["observable"]
-        and control_before["observable"]
-        and control_after["observable"]
-        and control_match
+    comparison_qualified = bool(
+        baseline_control["comparison_ready"]
+        and control_before["comparison_ready"]
+        and control_after["comparison_ready"]
+        and controls_match
     )
     count_matches = bool(counts and counts["tests"] == collection["count"])
     timing_valid = bool(
@@ -956,10 +1065,9 @@ def _run_one(
     return {
         "sequence": sequence,
         "phase": phase,
-        "pair": pair,
-        "order_in_pair": order_in_pair,
-        "mode": mode,
-        "worker_count": 0 if mode == "serial" else config.workers,
+        "sample": sample,
+        "mode": "parallel",
+        "worker_count": config.workers,
         "command": public,
         "elapsed_seconds": process_result["elapsed_seconds"],
         "exit_code": process_result["exit_code"],
@@ -972,10 +1080,10 @@ def _run_one(
         "junit_counts": counts,
         "junit_testcase_ids_sha256": testcase_ids_sha256,
         "collection_count_matches": count_matches,
-        "control_before_fingerprint": control_before["fingerprint_sha256"],
-        "control_after_fingerprint": control_after["fingerprint_sha256"],
-        "controls_match": control_match,
-        "environment_qualified": environment_qualified,
+        "control_before_fingerprint": control_before["comparison_fingerprint_sha256"],
+        "control_after_fingerprint": control_after["comparison_fingerprint_sha256"],
+        "controls_match": controls_match,
+        "comparison_qualified": comparison_qualified,
         "timing_valid": timing_valid,
         "raw_log": {
             "relative_path": raw_relative,
@@ -1043,6 +1151,17 @@ def _validate_collected_nodes(
     return sources, _sha256_bytes(("\n".join(sources) + "\n").encode("utf-8"))
 
 
+def _validate_timing_collection(nodes: Sequence[str], sources: Sequence[str]) -> str:
+    node_ids_sha256 = _sha256_bytes(("\n".join(nodes) + "\n").encode("utf-8"))
+    if (
+        len(nodes) != TIMING_EXPECTED_NODE_COUNT
+        or node_ids_sha256 != TIMING_EXPECTED_NODE_IDS_SHA256
+        or list(sources) != sorted(TIMING_TEST_TARGETS)
+    ):
+        raise RuntimeError("timing_collection_contract_mismatch")
+    return node_ids_sha256
+
+
 def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
     if config.probe:
         return {
@@ -1061,7 +1180,7 @@ def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
         "--project",
         "bin",
         "pytest",
-        "tests",
+        *TIMING_TEST_TARGETS,
         "--collect-only",
         "-q",
         "-n",
@@ -1087,7 +1206,7 @@ def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
         if "::" in line and not line.startswith(("=", " "))
     ]
     tracked_output = subprocess.run(
-        ("git", "ls-files", "-z", "--", "tests"),
+        ("git", "ls-files", "-z", "--", *TIMING_TEST_TARGETS),
         cwd=config.repo,
         check=True,
         capture_output=True,
@@ -1101,18 +1220,26 @@ def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
     error = None
     source_files: list[str] = []
     source_files_sha256: str | None = None
+    node_ids_sha256 = _sha256_bytes(("\n".join(nodes) + "\n").encode("utf-8"))
     if completed.returncode != 0:
         error = "CollectionNonzero"
     elif not nodes:
         error = "CollectionEmpty"
     else:
-        source_files, source_files_sha256 = _validate_collected_nodes(
-            nodes, tracked_files
-        )
+        try:
+            source_files, source_files_sha256 = _validate_collected_nodes(
+                nodes, tracked_files
+            )
+            node_ids_sha256 = _validate_timing_collection(nodes, source_files)
+        except Exception as exc:
+            error = _safe_error(exc)
     return {
         "command": public_command,
         "count": len(nodes),
-        "node_ids_sha256": _sha256_bytes(("\n".join(nodes) + "\n").encode("utf-8")),
+        "node_ids_sha256": node_ids_sha256,
+        "expected_count": TIMING_EXPECTED_NODE_COUNT,
+        "expected_node_ids_sha256": TIMING_EXPECTED_NODE_IDS_SHA256,
+        "expected_source_files": list(TIMING_TEST_TARGETS),
         "source_files_count": len(source_files),
         "source_files_sha256": source_files_sha256,
         "error": error,
@@ -1146,19 +1273,22 @@ $o=Get-CimInstance Win32_OperatingSystem
 
 def _artifact_base(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at_utc": _utc_now(),
         "commit": identity.commit,
         "tree": identity.tree,
         "index_tree": identity.index_tree,
         "host": _host_metadata(config.host_label),
         "protocol": {
-            "warmups_per_mode": config.warmups,
-            "measured_pairs": config.samples,
-            "modes": list(config.modes),
-            "pair_order": "odd declared order; even reversed order",
+            "mode": "parallel",
+            "warmups": config.warmups,
+            "measured_runs": config.samples,
             "timeout_seconds": config.timeout_seconds,
             "parallel_workers": config.workers,
+            "workload": "git_fixture_contract",
+            "test_targets": list(TIMING_TEST_TARGETS),
+            "expected_node_count": TIMING_EXPECTED_NODE_COUNT,
+            "expected_node_ids_sha256": TIMING_EXPECTED_NODE_IDS_SHA256,
             "uv_cache": ".anvil-build/windows-pytest-uv-cache",
             "controlled_environment_sha256": _sha256_json(_controlled_environment()),
             "pytest_addopts": "rejected_and_removed",
@@ -1166,7 +1296,8 @@ def _artifact_base(config: Configuration, identity: GitIdentity) -> dict[str, An
             "pytest_plugin_metadata": (
                 "locked_exact_distribution_names_and_versions_only"
             ),
-            "control_observation": "snapshots_immediately_before_and_after_each_run",
+            "control_observation": "comparable_snapshots_immediately_before_and_after_each_run",
+            "defender_exclusions": "record_when_visible_otherwise_redacted_context_not_elevation_gate",
             "raw_logs": f"{config.log_relative_root}/",
             "process_containment": "windows_job_kill_on_close_gated_before_assignment_zero_active_verified",
             "probe": config.probe,
@@ -1215,7 +1346,8 @@ def _finish_artifact(
         and artifact["collection"].get("source_files_sha256")
     )
     timing_valid = bool(
-        len(measured) == config.samples * 2
+        len(measured) == config.samples
+        and len(warmups) == config.warmups
         and all(run["timing_valid"] for run in measured)
         and all(run["timing_valid"] for run in warmups)
         and junit_counts_identical
@@ -1223,43 +1355,23 @@ def _finish_artifact(
         and collection_valid
         and artifact.get("repository_final_error") is None
     )
-    environment_qualified = bool(
+    comparison_qualified = bool(
         artifact["versions"]["observable"]
-        and artifact["controls"]["observable"]
-        and all(run["environment_qualified"] for run in runs)
+        and artifact["controls"]["comparison_ready"]
+        and all(run["comparison_qualified"] for run in runs)
     )
-    serial = [float(run["elapsed_seconds"]) for run in measured if run["mode"] == "serial" and run["timing_valid"]]
-    parallel = [float(run["elapsed_seconds"]) for run in measured if run["mode"] == "parallel" and run["timing_valid"]]
-    pairs: list[dict[str, Any]] = []
-    for number in range(1, config.samples + 1):
-        pair_runs = [run for run in measured if run["pair"] == number]
-        serial_run = next((run for run in pair_runs if run["mode"] == "serial"), None)
-        parallel_run = next((run for run in pair_runs if run["mode"] == "parallel"), None)
-        valid = bool(serial_run and parallel_run and serial_run["timing_valid"] and parallel_run["timing_valid"])
-        ratio = (
-            float(serial_run["elapsed_seconds"]) / float(parallel_run["elapsed_seconds"])
-            if valid and float(parallel_run["elapsed_seconds"]) > 0
-            else None
-        )
-        pairs.append(
-            {
-                "pair": number,
-                "order": [run["mode"] for run in sorted(pair_runs, key=lambda run: run["order_in_pair"])],
-                "valid": valid,
-                "speedup_ratio": round(ratio, 4) if ratio is not None else None,
-                "speedup_percent": round((1 - 1 / ratio) * 100, 2) if ratio else None,
-            }
-        )
-    serial_distribution = _distribution(serial)
+    parallel = [
+        float(run["elapsed_seconds"])
+        for run in measured
+        if run["timing_valid"]
+    ]
     parallel_distribution = _distribution(parallel)
-    pair_ratios = [float(pair["speedup_ratio"]) for pair in pairs if pair["speedup_ratio"] is not None]
-    descriptive_available = len(serial) == config.samples and len(parallel) == config.samples
-    speedup_ratio = (
-        float(serial_distribution["median"]) / float(parallel_distribution["median"])
-        if descriptive_available and float(parallel_distribution["median"]) > 0
+    measurement_valid = bool(timing_valid and comparison_qualified)
+    affected_slice_median_budget_met = (
+        float(parallel_distribution["median"]) <= 35.0
+        if measurement_valid and parallel_distribution["median"] is not None
         else None
     )
-    speedup_percent = (1 - 1 / speedup_ratio) * 100 if speedup_ratio else None
     reasons: list[str] = []
     if not timing_valid:
         reasons.append("timing_protocol_incomplete_or_invalid")
@@ -1271,25 +1383,30 @@ def _finish_artifact(
         reasons.append("collection_invalid")
     if artifact.get("repository_final_error") is not None:
         reasons.append("repository_integrity_failed_after_runs")
-    if not environment_qualified:
-        reasons.append("environment_not_qualified")
+    if not comparison_qualified:
+        reasons.append("controls_not_comparable")
+    result_status = (
+        "passed"
+        if measurement_valid and affected_slice_median_budget_met
+        else "regression"
+        if measurement_valid
+        else "insufficient"
+    )
     artifact["result"] = {
-        "status": "valid" if timing_valid and environment_qualified else "insufficient",
-        "descriptive_timing_valid": timing_valid,
-        "environment_qualified": environment_qualified,
+        "status": result_status,
+        "measurement_valid": measurement_valid,
+        "comparison_qualified": comparison_qualified,
+        "defender_exclusions_visibility": artifact["controls"].get(
+            "defender_exclusions_visibility"
+        ),
         "junit_counts_identical_across_runs": junit_counts_identical,
         "junit_testcase_ids_identical_across_runs": junit_testcase_ids_identical,
         "collection_valid": collection_valid,
         "insufficient_reasons": reasons,
-        "serial_seconds": serial_distribution,
         "parallel_seconds": parallel_distribution,
-        "paired_speedup_ratio": _distribution(pair_ratios),
-        "pairs": pairs,
-        "parallel_speedup_ratio": round(speedup_ratio, 4) if speedup_ratio else None,
-        "parallel_speedup_percent": round(speedup_percent, 2) if speedup_percent is not None else None,
-        "threshold_percent_for_issue_118": 40,
-        "threshold_met": speedup_percent >= 40 if timing_valid and environment_qualified and speedup_percent is not None else None,
-        "all_scheduled_runs_recorded": len(runs) == 2 * (config.warmups + config.samples),
+        "affected_slice_median_budget_seconds": 35.0,
+        "affected_slice_median_budget_met": affected_slice_median_budget_met,
+        "all_scheduled_runs_recorded": len(runs) == config.warmups + config.samples,
     }
     artifact["generated_at_utc"] = _utc_now()
     if output is None:
@@ -1301,18 +1418,19 @@ def _finish_artifact(
         output.write_json(artifact)
     return result_exit_code(
         probe=config.probe,
-        timing_valid=timing_valid,
-        environment_qualified=environment_qualified,
+        measurement_valid=measurement_valid,
+        affected_slice_median_budget_met=affected_slice_median_budget_met,
     )
 
 
 def _configuration(arguments: argparse.Namespace) -> Configuration:
     repo = Path(os.path.abspath(arguments.repo))
-    modes = tuple(part.strip().lower() for part in arguments.modes.split(","))
-    if len(modes) != 2 or set(modes) != {"serial", "parallel"}:
-        raise ValueError("modes_must_be_serial_parallel")
-    if not arguments.probe and (arguments.warmups != 1 or arguments.samples != 5):
-        raise ValueError("non_probe_protocol_is_fixed_at_one_warmup_and_five_pairs")
+    if not arguments.probe and (arguments.warmups != 1 or arguments.samples != 3):
+        raise ValueError("non_probe_protocol_is_fixed_at_one_warmup_and_three_runs")
+    if not arguments.probe and arguments.workers != 16:
+        raise ValueError("non_probe_workers_fixed_at_16")
+    if not arguments.probe and arguments.timeout_seconds != 120:
+        raise ValueError("non_probe_timeout_fixed_at_120_seconds")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", arguments.host_label):
         raise ValueError("invalid_host_label")
     if os.environ.get("PYTEST_ADDOPTS"):
@@ -1335,7 +1453,6 @@ def _configuration(arguments: argparse.Namespace) -> Configuration:
         log_relative_root=f"artifacts/windows-pytest-timing-logs/{run_id}",
         warmups=arguments.warmups,
         samples=arguments.samples,
-        modes=modes,  # type: ignore[arg-type]
         workers=arguments.workers,
         timeout_seconds=arguments.timeout_seconds,
         expected_commit=arguments.expected_commit,
@@ -1365,7 +1482,7 @@ def _execute_protocol(
                     "--project",
                     "bin",
                     "pytest",
-                    "tests",
+                    *TIMING_TEST_TARGETS,
                     "--collect-only",
                     "-q",
                     "-n",
@@ -1380,41 +1497,34 @@ def _execute_protocol(
         _write_checkpoint(config, artifact)
 
         sequence = 0
-        for mode in config.modes:
-            for _ in range(config.warmups):
-                sequence += 1
-                artifact["runs"].append(
-                    _run_one(
-                        config,
-                        identity,
-                        artifact["controls"],
-                        sequence=sequence,
-                        phase="warmup",
-                        mode=mode,
-                        pair=None,
-                        order_in_pair=None,
-                        collection=artifact["collection"],
-                    )
+        for _ in range(config.warmups):
+            sequence += 1
+            artifact["runs"].append(
+                _run_one(
+                    config,
+                    identity,
+                    artifact["controls"],
+                    sequence=sequence,
+                    phase="warmup",
+                    sample=None,
+                    collection=artifact["collection"],
                 )
-                _write_checkpoint(config, artifact)
-        for pair in range(1, config.samples + 1):
-            order = config.modes if pair % 2 else tuple(reversed(config.modes))
-            for position, mode in enumerate(order, start=1):
-                sequence += 1
-                artifact["runs"].append(
-                    _run_one(
-                        config,
-                        identity,
-                        artifact["controls"],
-                        sequence=sequence,
-                        phase="measured",
-                        mode=mode,
-                        pair=pair,
-                        order_in_pair=position,
-                        collection=artifact["collection"],
-                    )
+            )
+            _write_checkpoint(config, artifact)
+        for sample in range(1, config.samples + 1):
+            sequence += 1
+            artifact["runs"].append(
+                _run_one(
+                    config,
+                    identity,
+                    artifact["controls"],
+                    sequence=sequence,
+                    phase="measured",
+                    sample=sample,
+                    collection=artifact["collection"],
                 )
-                _write_checkpoint(config, artifact)
+            )
+            _write_checkpoint(config, artifact)
         try:
             require_clean_git(
                 config.repo, identity, allowed_untracked=_owned_output(config)
@@ -1497,10 +1607,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--warmups", type=int, default=1)
-    parser.add_argument("--samples", type=int, default=5)
-    parser.add_argument("--modes", default="serial,parallel")
+    parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--workers", type=int, required=True)
-    parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--output", default="artifacts/windows-pytest-timing.json")
     parser.add_argument("--expected-commit")
     parser.add_argument("--host-label", required=True)

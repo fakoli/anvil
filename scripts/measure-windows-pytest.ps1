@@ -4,15 +4,13 @@ param(
     [int]$Warmups = 1,
 
     [ValidateRange(1, 20)]
-    [int]$Samples = 5,
-
-    [string]$Modes = "serial,parallel",
+    [int]$Samples = 3,
 
     [ValidateRange(1, 256)]
-    [int]$Workers = [Math]::Max(1, [Math]::Min(16, [Environment]::ProcessorCount)),
+    [int]$Workers = 16,
 
     [ValidateRange(1, 86400)]
-    [int]$TimeoutSeconds = 1800,
+    [int]$TimeoutSeconds = 120,
 
     [string]$Output = "artifacts/windows-pytest-timing.json",
 
@@ -43,7 +41,6 @@ $arguments = @(
     "--repo", $repoRoot,
     "--warmups", "$Warmups",
     "--samples", "$Samples",
-    "--modes", $Modes,
     "--workers", "$Workers",
     "--timeout-seconds", "$TimeoutSeconds",
     "--output", $Output,
