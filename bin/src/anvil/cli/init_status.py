@@ -68,7 +68,7 @@ def init(
     force: bool = typer.Option(  # noqa: B008
         False,
         "--force",
-        help="Overwrite an existing .anvil/ directory.",
+        help="Overwrite the resolved state directory if it already exists.",
     ),
     with_sample: bool = typer.Option(  # noqa: B008
         False,
@@ -92,11 +92,12 @@ def init(
         ),
     ),
 ) -> None:
-    """Scaffold a .anvil/ directory in the current working directory.
+    """Scaffold the resolved state directory for the current project.
 
     Creates the canonical project-state layout including config.yaml,
     state.db (SQLite), events.jsonl (append-only event log), and an
-    empty packets/ subdirectory.
+    empty packets/ subdirectory. The default is a per-project HOME workspace;
+    ANVIL_STATE_LAYOUT=local opts into an in-repo .anvil/ directory.
 
     With ``--with-sample`` the scaffold is followed by a one-command
     quickstart: a self-contained sample ``prd.md`` is written and the full

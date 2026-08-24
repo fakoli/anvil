@@ -14,13 +14,13 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 | Terraform concept | anvil equivalent | Where it lives |
 |---|---|---|
-| `.tf` configuration | `prd.md` + parsed `Requirement`/`Feature`/`Task` rows | `.anvil/prd.md`, rows in `state.db` |
-| `terraform.tfstate` | `state.db` (Pydantic-validated SQLite) | `.anvil/state.db` |
+| `.tf` configuration | `prd.md` + parsed `Requirement`/`Feature`/`Task` rows | `<resolved-state-dir>/prd.md`, rows in `state.db` |
+| `terraform.tfstate` | `state.db` (Pydantic-validated SQLite) | `<resolved-state-dir>/state.db` |
 | `terraform plan` | `anvil packet T012` (work-packet preview before claim) | derived view, not stored |
 | `terraform apply` | `anvil apply T012` (reviewed transition to `done`) | `Review` row + `apply.*` event |
 | State locking | `Claim` row with `lease_expires_at` + heartbeat | `claims` table, `BEGIN IMMEDIATE` txn |
 | Drift detection | stale-claim sweep + `sync --fix` reconciliation | `claims/stale.py`, `sync.reconcile` |
-| Workspace | `.anvil/` per repo | created by `anvil init` |
+| Workspace | one resolved state directory per project | HOME workspace by default; local layout is opt-in |
 | Backend protocol | `Backend` Protocol (SQLite ships) | `state/backend.py` |
 
 ### What the analogy gets right
@@ -39,7 +39,10 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 ## Why SQLite + WAL
 
-**Choice:** one SQLite database per project at `.anvil/state.db`, opened in WAL mode with `BEGIN IMMEDIATE` for mutating transactions. Append-only JSONL event log alongside (`events.jsonl`) as the replay source of truth.
+**Choice:** one SQLite database per project at
+`<resolved-state-dir>/state.db`, opened in WAL mode with `BEGIN IMMEDIATE` for
+projection mutations. An append-only JSONL event log lives alongside it as the
+log-first replay source of truth.
 
 ### Rejected alternatives
 
@@ -125,8 +128,8 @@ A 1-hour lease without heartbeat means stale claims wait the full hour to releas
 The `Evidence` Pydantic model captures the following (the *content* fields are optional at the model level; the identifiers `id`/`task_id`/`claim_id` and the `submitted_at`/`submitted_by` metadata are always present; the per-task evidence gate decides which content must be present for a given task):
 
 - `commands_run: list[str]`: the shell commands the agent cites as having run during the work
-- `files_changed: list[str]`: paths touched, cross-checked against `record-file-change.sh` events
-- `output_excerpt: str`: last N lines of test/build output, captured by `capture-evidence.sh`
+- `files_changed: list[str]`: paths touched, cross-checked against `hook dispatch record-file-change` events
+- `output_excerpt: str`: last N lines of test/build output, captured by `hook dispatch capture-evidence`
 - `pr_url` / `commit_sha`: where the work landed
 - `screenshots: list[str]`, `known_limitations: str`: optional supporting context
 
@@ -134,7 +137,15 @@ Note: `Evidence` now carries typed proofs — `CommandProof` (command / exit_cod
 
 ### Why hooks capture, not the agent
 
-`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records the verification commands the agent runs that match a hardcoded set of patterns (pytest, ruff, and the like), capturing their output (stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
+The shell-free `hook dispatch capture-evidence` path runs as a PostToolUse hook
+on `Bash` and records verification commands that match its fixed pattern set,
+including output and exit status. The retained `capture-evidence.sh` wrapper
+delegates to the same subcommand. The agent's job is to *cite* what to include
+in the submission; the hook supplies the ground truth. An agent that fabricates
+`commands_run: ["pytest"]` without having actually run pytest gets caught
+because the hook stream does not show a pytest invocation in the claim's
+window. The split is deliberate: agent-supplied evidence is auditable against
+system-captured evidence.
 
 ### Trade-off accepted
 
@@ -179,25 +190,40 @@ external-authority policy.
 
 ## Why MCP + CLI both
 
-**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`anvil claim T012`), and a FastMCP stdio server exposing 36 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
+**Choice:** CLI and MCP are complementary public state surfaces. The Typer CLI
+serves humans, shell-capable agents, hooks, and provider transports; the
+FastMCP stdio server exposes 36 structured tools to agents. Overlapping
+operations delegate to the same state engine. The two bounded provider reads
+(`project snapshot` and `prd show`) are intentionally CLI-only execution
+operations whose contracts MCP clients discover with `describe_surface`.
 
 ### Rejected alternatives
 
 - **CLI only.** Agents would have to shell out and parse stdout. Some can (Claude Code, with Bash); some cannot (Cursor, with no shell). Shell-out loses structured errors.
-- **MCP only.** Humans, shell scripts, and hooks still need a command-line surface. `anvil status` in a terminal during debugging is faster than starting an MCP client. Hooks are sh, not Python, so they shell out to the CLI.
+- **MCP only.** Humans, scripts, and hooks still need a command-line surface.
+  `anvil status` in a terminal during debugging is faster than starting an MCP
+  client, and the active hook manifest delegates through the Python CLI
+  dispatcher.
 - **REST/HTTP server.** A long-running process. Daemon problems (see below). Authentication. Port collisions. We get the agent-tool benefits via MCP stdio without any of that.
 
 ### The principle
 
-From `_positioning.md` § MCP vs plugin: **MCP exposes capabilities; the plugin layer encodes operating discipline.** The MCP tool `claim_task` does not decide *when* to claim, *which* specialist should execute, or *what* evidence is required; those decisions live in skills (`execute/SKILL.md`), agents (`sentinel.md`), and hooks (`check-claim.sh`).
+From `_positioning.md` § MCP vs plugin: **MCP exposes capabilities; the plugin
+layer encodes operating discipline.** The MCP tool `claim_task` does not decide
+*when* to claim, *which* specialist should execute, or *what* evidence is
+required; those decisions live in skills (`execute/SKILL.md`), agents
+(`sentinel.md`), and the active `anvil hook dispatch` paths.
 
 ### Trade-off accepted
 
-Two front doors means two surfaces to keep in sync. We mitigate by sharing the engine: both surfaces construct the same `Backend`, call the same `ClaimManager.claim()`, surface the same exceptions. If the engine layer is correct, both surfaces are correct.
+Overlapping front doors mean two surfaces to keep in sync. We mitigate by
+sharing the engine: both surfaces construct the same `Backend`, call the same
+state contracts, and surface bounded exceptions. Provider reads avoid a false
+parity promise by declaring their CLI-only transport in the operation catalog.
 
 ### Who calls which
 
-- **Hooks** call the CLI (sh scripts can't speak MCP).
+- **Hooks** call the shell-free Python CLI dispatcher.
 - **Humans** call the CLI (faster than spinning up an MCP client).
 - **Skills** call the CLI (they are markdown choreography invoking shell).
 - **Agents inside MCP-capable runtimes** call MCP (typed responses, structured errors).
@@ -227,7 +253,11 @@ Both paths are first-class. Neither is the "main" API.
 
 ### Trade-off accepted
 
-Six dimensions is more cognitive load than one. We mitigated by making LLM scoring the default (`score --use-llm`) so humans rarely score by hand; the template-based fallback gives reasonable defaults from heuristics on the task description. Lost: comparability with existing story-point velocity charts. The audience is not running sprint retros.
+Six dimensions is more cognitive load than one. Deterministic rule-based
+numeric scoring is therefore the default and remains reproducible offline;
+`score --use-llm` may augment explanations but never changes the six numeric
+scores. Lost: comparability with existing story-point velocity charts. The
+audience is not running sprint retros.
 
 ---
 
@@ -247,7 +277,11 @@ A blocking hook would refuse the Edit tool call when an agent tries to write a f
 
 ### The right shape
 
-Warn + log + audit trail. The check-claim hook prints a one-line warning to stderr ("warning: editing src/foo.py outside active claim T012 scope") and appends an event to `events.jsonl`. The human or downstream sentinel decides whether the warning matters.
+Warn, then record what actually happened. The check-claim path prints a
+one-line stderr warning when an edit overlaps another actor's active claim; it
+does not mutate state. After an edit, `record-file-change` independently writes
+the actual file-change event through the normal backend. Humans and reviewers
+can evaluate the warning and recorded work without blocking the edit tool.
 
 ### What gets enforced anyway
 
@@ -261,7 +295,11 @@ The discipline is layered: hooks observe and warn, the engine enforces invariant
 
 ### Trade-off accepted
 
-Hooks observe and report; the engine enforces state transitions. An agent that ignores warnings and submits evidence anyway is checked at `apply` time by the sentinel, which cross-references `files_changed` against the warning stream. Performance remains a constraint; see `roadmap.md` Theme 3 for the next hot-path pass on the 200ms budget.
+Hooks observe and report; the engine enforces state transitions. Claim-time
+file and conflict-group overlaps are enforced atomically, while post-claim
+scope warnings remain advisory and actual file changes remain auditable.
+The shell-free dispatcher is the active hot path; roadmap Theme 3 now preserves
+legacy-wrapper performance findings only as historical cleanup context.
 
 ---
 

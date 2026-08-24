@@ -112,17 +112,21 @@ agent/t012-add-retry-backoff
 
 Incremental commits create a recoverable trail. If the agent session is interrupted, the commits survive on the branch and the work does not need to restart from zero.
 
-Two hooks run automatically during this step — no manual action required:
+Three hook actions run automatically during this step — no manual action required:
 
-**`check-claim.sh`** (PreToolUse on Edit, Write, NotebookEdit) — warns whenever any active claim exists, prompting a check that the file being modified is within this claim's `likely_files` scope. The warning is non-blocking: the edit proceeds. Heed the warning; file overlap with another claim creates a merge conflict that is painful to resolve after submit.
+**`hook dispatch check-claim`** (PreToolUse on Edit, Write, NotebookEdit) — warns when the file overlaps another actor's active claim scope. The warning is non-blocking: the edit proceeds. Heed it; overlap creates avoidable integration risk.
 
-**`record-file-change.sh`** (PostToolUse on Edit, Write, NotebookEdit) — appends a `file_changed` event to `events.jsonl` for every file touched. This populates the `files_changed` list that `submit` reads and includes in the Evidence row. Do not maintain a manual list; the hook tracks it.
+**`hook dispatch record-file-change`** (PostToolUse on Edit, Write, NotebookEdit) — appends a `file_changed` audit event for every editor-tool path touched. `anvil submit` still requires an explicit, complete `--files-changed` list; derive it from the actual diff rather than assuming the hook injects CLI arguments.
+
+**`hook dispatch heartbeat`** (PostToolUse) — attempts a progress-gated lease renewal for the current actor/session. It renews only after new hook-observed file progress or a verified pending attestation.
 
 ---
 
 ### Step 4 — Heartbeat the lease during long work
 
-The default lease is 60 minutes. For sessions longer than 55 minutes, renew before the lease expires:
+The default lease is 240 minutes unless project/global config or `claim --lease`
+overrides it. The automatic heartbeat handles qualified progress, but inspect
+`anvil status` and renew manually before the echoed expiry on long-running work:
 
 ```bash
 anvil renew CLAIM_ID
@@ -134,7 +138,11 @@ Example:
 anvil renew C004
 ```
 
-Renewing extends `lease_expires_at` by another 60 minutes from now and updates `last_heartbeat_at`. Run this every 5 minutes during active work — set a timer at the start of a long session. A missed heartbeat does not immediately lose the claim; the stale detector fires on the next CLI or MCP operation. Once the lease has expired, the task returns to `ready` and another agent can claim it mid-work.
+Renewing extends `lease_expires_at` by the resolved lease duration from now and
+updates `last_heartbeat_at` only after qualifying progress. A missed heartbeat
+does not immediately lose the claim; the stale detector fires on the next
+coordination operation. Once the lease has expired, the task returns to `ready`
+and another agent can claim it mid-work.
 
 ```
 Renewed claim 'C004'.
@@ -276,8 +284,8 @@ The command overwrites the previous packet file (the CLI re-echoes `Wrote packet
 
 - **Working from memory instead of the packet.** `anvil show TASK_ID` is a summary; the packet is the full operating context. Always read the packet before writing code.
 - **Submitting without running all verification commands.** The Review engine checks completeness at `apply` time. Submitting partial evidence delays the ship decision and may require reopening the task.
-- **Skipping heartbeats on sessions longer than 55 minutes.** Leases expire silently. Set a timer at session start and renew every 5 minutes.
-- **Manually tracking files changed.** The `record-file-change.sh` hook tracks this automatically from every Edit, Write, and NotebookEdit call. Pass the hook-tracked list to `--files-changed`; do not reconstruct it by hand.
+- **Ignoring the echoed lease expiry.** The automatic heartbeat is progress-gated and cannot extend a claim indefinitely without new evidence. Inspect status and renew before expiry when work is genuinely continuing.
+- **Submitting an incomplete file list.** The record-file-change hook creates audit events, but `submit` takes explicit `--files-changed` values. Derive the complete list from the actual diff.
 
 ---
 
@@ -303,6 +311,6 @@ Every command in this loop ships in the current engine. The execution surface is
 | `anvil submit TASK_ID` | records evidence and auto-releases the claim |
 | `anvil apply TASK_ID` | human review gate (accept / reject) |
 | `anvil conflicts` | persisted conflict groups (overlapping likely_files) |
-| `capture-evidence.sh` hook | PostToolUse Bash; buffers verification output |
-| `check-claim.sh` hook | PreToolUse Edit/Write/NotebookEdit; warns per claim's likely_files scope |
+| `hook dispatch capture-evidence` | PostToolUse Bash; buffers verification output |
+| `hook dispatch check-claim` | PreToolUse Edit/Write/NotebookEdit; warns on overlap with another actor's active claim scope |
 | MCP `generate_work_packet` | the packet over MCP for tools/agents that consume it programmatically |

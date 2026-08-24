@@ -170,19 +170,26 @@ The claim is valid. Work proceeds in the repo root. The branch field on the Clai
 
 Actual code changes happen here, inside the conversation. The agent makes the edits directly on `agent/t012-add-retry-backoff` (or the worktree branch). Commit incrementally — incremental commits make the eventual PR reviewable and give a recovery point if the session is interrupted.
 
-Two hooks run automatically during this phase (`check-claim.sh` and `record-file-change.sh`). See `/anvil:execute` Step 3a for full hook descriptions.
+The shell-free check-claim, record-file-change, and heartbeat dispatcher paths
+run automatically during this phase. See `/anvil:execute` Step 3 for their
+contracts.
 
 ---
 
 ### Step 6 — Heartbeat the lease
 
-The default lease is 60 minutes. For sessions longer than 55 minutes, renew before the lease expires. Invoke renewal yourself whenever the agent notices the timer:
+The default lease is 240 minutes unless project/global config or `claim --lease`
+overrides it. Automatic PostToolUse heartbeats attempt progress-gated renewal;
+invoke renewal yourself before the echoed expiry when work is still active:
 
 ```bash
 anvil renew C0FCF72C8
 ```
 
-Renewing extends `lease_expires_at` by another 60 minutes from now and updates `last_heartbeat_at`. The command errors if the lease is already expired — re-claiming is the only option at that point.
+Renewing extends `lease_expires_at` by the resolved lease duration from now and
+updates `last_heartbeat_at` only when new hook-observed progress or a verified
+pending attestation authorizes renewal. The command errors if the lease is
+already expired — re-claiming is the only option at that point.
 
 ```
 Renewed claim 'C0FCF72C8'.
@@ -190,7 +197,10 @@ Renewed claim 'C0FCF72C8'.
   Last heartbeat:  2026-05-24T19:05:00.000000+00:00
 ```
 
-Automated agents should renew every 5 minutes. A missed heartbeat does not immediately lose the claim — the lease detector runs on the next CLI or MCP operation. Once the lease expires, the task returns to `ready` and any agent can claim it.
+The bundled heartbeat runs after matching tool calls, so a separate five-minute
+poll is not required. A missed heartbeat does not immediately lose the claim —
+the lease detector runs on the next coordination operation. Once the lease
+expires, the task returns to `ready` and any agent can claim it.
 
 Only the owning actor can renew a claim. To release another actor's stale claim, use `release --force` (Step 8).
 
@@ -293,6 +303,6 @@ Every command named in this skill ships today; confirm any with `anvil <cmd> --h
 | `anvil submit TASK_ID` | Records evidence (`--commands` + `--files-changed` required), auto-releases, moves task to `needs_review` |
 | `anvil apply TASK_ID` | Human review gate (`needs_review` → accepted → done, or rejected); lives in `/anvil:finish` |
 | `anvil conflicts` | Lists the persisted conflict groups |
-| `check-claim.sh` hook (PreToolUse) | Per-file scope check against active claims via `anvil hook check-claim` |
-| `record-file-change.sh` hook (PostToolUse) | Records touched files against the active claim |
+| `hook dispatch check-claim` (PreToolUse) | Per-file overlap warning against other actors' active claims |
+| `hook dispatch record-file-change` (PostToolUse) | Records touched editor-tool paths in the audit log |
 | PR creation / commit assistance | Out of scope: anvil coordinates work; it does not write code |

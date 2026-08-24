@@ -3,6 +3,10 @@
 > Sequencing overlay: [`strategic-backlog.md`](strategic-backlog.md) (2026-07)
 > orders the moat-critical subset of this backlog (S1–S13) ahead of breadth
 > work; consult it before picking the next item.
+>
+> Historical rationale, acceptance text, and line references are preserved as
+> discovery records. For current state, use each item's **Status** / **Resolution**
+> plus the roadmap and linked GitHub issue.
 
 ## North Star
 
@@ -93,6 +97,11 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 ### B29 — `anvil init` at the plugin root: guidance instead of a bare refusal (dogfooding friction)
 
 - **Priority:** P3  **Effort:** S  **Type:** modify
+- **Status:** DONE / superseded by HOME workspace state resolution.
+- **Resolution:** Default initialization stores state outside the repository, so
+  Anvil can dogfood itself without writing `.anvil/` into the plugin root. The
+  refusal remains only for explicit local layout and now explains the resolved
+  state-directory boundary and available override.
 - **Rationale:** Surfaced 2026-06-19 while dogfooding anvil to plan its own WF-3 work. `anvil init` run at the anvil plugin root fails with `Error: this directory is the anvil plugin root. Run anvil init from your project directory, not from inside the plugin.` That guard is correct (don't seed `.anvil/` into the published plugin), but for the legitimate self-hosting case it gives no next step — the user has to guess that `bin/` (the Python package root, where tests already run) is the right project dir. The refusal also fires *after* an accidental `cd` can leave a stray `.anvil/` in a subdir, so the message should name a concrete fallback.
 - **Acceptance:** `anvil init` at the plugin root still refuses, but the message suggests an explicit project dir (e.g. "to manage anvil's own work, run from `bin/`" or honor an `--allow-plugin-root`/`ANVIL_PROJECT_ROOT` override). Tested: running at the plugin root prints the suggested path and exits non-zero; running in the suggested dir succeeds.
 - **Likely files:** `bin/src/anvil/cli/init_status.py` (guard at `:106-113`), `bin/src/anvil/cli/_helpers.py` (`_is_plugin_root` `:178-192`, `_resolve_base_dir` `:59-87`), `tests/test_cli.py`
@@ -111,6 +120,11 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 ### B07 — `ANVIL_ROOT` env override + stable root resolution across container/host
 
 - **Priority:** P1  **Effort:** M  **Type:** feature
+- **Status:** DONE.
+- **Resolution:** CLI and MCP share the precedence `explicit cwd > ANVIL_ROOT >
+  current project`, and `ANVIL_ROOT` resolves literally to `<root>/.anvil/`.
+  Without it, state uses the per-project HOME workspace unless local layout is
+  explicitly selected.
 - **Rationale:** Confirmed gap: config.py has no env-var project-root override (only a comment about auto-detect from environment) and `_resolve_state_dir` walks from cwd. MCP-on-host vs agent-in-container infers the wrong project root on every call (eyaltoledano/claude-task-master#288). Runtime neutrality is a lean-on strength only if CLI and MCP agree on the `.anvil` location regardless of where they run.
 - **Acceptance:** Both CLI (`_resolve_state_dir`) and MCP server honor `ANVIL_ROOT` when set, resolving to that path's `.anvil` before any cwd walk; when unset, behavior is unchanged. Precedence documented: explicit `--cwd`/arg > `ANVIL_ROOT` > cwd walk. Test: with `ANVIL_ROOT` pointed at a fixture project from an unrelated cwd, CLI `next` and the MCP `get_next_task` tool resolve the same state.db.
 - **Likely files:** `bin/src/anvil/cli/_helpers.py`, `bin/src/anvil/config.py`, `bin/src/anvil/mcp_server.py`, `bin/tests/test_cli.py`, `bin/tests/test_mcp.py`

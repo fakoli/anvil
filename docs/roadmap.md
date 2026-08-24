@@ -74,7 +74,7 @@ shipped.
   ([`state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)),
   and tasks can declare typed `Verification.required_proofs`; a `command`
   requirement is satisfiable only by a `CommandProof` whose real `exit_code`
-  is in the passing set. `hooks/capture-evidence.sh` records each command's
+  is in the passing set. The shell-free capture-evidence dispatcher records each command's
   real exit code and an `output_sha256`; `anvil submit` (CLI and MCP)
   reconciles the per-claim buffer into `Evidence.proofs`. Additive and
   non-breaking — the legacy free-text `required_evidence` path stayed
@@ -259,7 +259,7 @@ Theme: typed proof. The substrate stops trusting strings.
   ([`state/models.py:233`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)); the
   unified gate ([`review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py))
   evaluates typed predicates;
-  [`hooks/capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) emits `CommandProof`
+  shell-free `hook dispatch capture-evidence` path emits `CommandProof`
   with real exit codes and output hashes. The substring path stayed
   enforced alongside the typed path rather than being deleted (additive, not
   breaking — old event logs replay unchanged). Depended on SL-0.
@@ -497,14 +497,21 @@ optional cleanup unless those scripts are wired again.
 
 See [Theme 7](#theme-7-install-messaging-drift-in-readme-changelog).
 
-- **[P11-ST-S1]** `README.md:37-48` — install section says "not yet in marketplace" but root `.claude-plugin/marketplace.json` contains v1.9.0 entry. Replace manual-clone paragraph with `/plugin marketplace add fakoli/fakoli-plugins && /plugin install anvil@fakoli-plugins` flow.
-- **[P11-ST-S2]** `CHANGELOG.md:7-14` — `[Unreleased]` opens with past-tense summary of v1.9.0; content already lives under dated section. Trim leading sentence; keep forward-looking notes.
-- **[P11-ST-S3]** `.gitignore:7` — covers `bin/.pytest_cache/` but plugin-root `.pytest_cache/` not ignored locally. Add `.pytest_cache/` so rule survives a future repo split.
-- **[P11-ST-S4]** `README.md:17,39,49,190` — internally inconsistent install messaging — 4 different phrasings about "once published". Settle on single install story; sweep all 4 sites. _Batches with P11-ST-S1._
-- **[P11-ST-C1]** `README.md` (new section near top) — no top-level surface-count table. Add header: "ships 6 agents, 7 skills, 4 hooks, 0 commands, 1 CLI, 1 MCP server with 36 tools."
-- **[P11-ST-C2]** `CHANGELOG.md:9-14` — forward-looking items name LinearIssuesProvider / MondayBoardsProvider / webhooks without issue/PR links. Append `(see docs/roadmap.md § Next — P9B-1 / P9B-2 / P9B-5)` or equivalent anchor links.
+- **[P11-ST-S1]** **SHIPPED.** README uses the public
+  `/plugin marketplace add fakoli/anvil` and `/plugin install anvil@anvil`
+  flow, with source installation kept as an explicit alternative.
+- **[P11-ST-S2]** **SHIPPED.** `[Unreleased]` is empty; dated release entries
+  own past-tense changes.
+- **[P11-ST-S3]** **SHIPPED.** Root `.pytest_cache/` is ignored.
+- **[P11-ST-S4]** **SHIPPED.** README presents one published-package install
+  story and labels alternate paths consistently.
+- **[P11-ST-C1]** **CLOSED as superseded.** A hand-maintained README count
+  table would immediately drift. `anvil describe --json` is the authoritative
+  live CLI/MCP inventory; architecture documents the current surface split.
+- **[P11-ST-C2]** **SHIPPED.** `[Unreleased]` no longer carries unlinked
+  forward-looking provider claims; roadmap items own that planning detail.
 - **[P11-ST-C3]** `README.md:5-7` — minimal badge set; no CI / test-count badges. Add CI status badge (once live-GitHub nightly workflow public) and a test-count badge.
-- **[P11-ST-N1]** `README.md:132` — "Phase 9 (this release, v1.9.0)" parenthetical will stale on the next release. Replace with "Phase 9 shipped in v1.9.0" for tense-stability. _Drive-by during P11-ST-S1/S4._
+- **[P11-ST-N1]** **SHIPPED.** The stale "this release" parenthetical is gone.
 
 ### Theme: Sync providers (multi-provider expansion)
 
@@ -589,16 +596,17 @@ this batch remains here as the audit cross-reference.
 
 ### Theme 3 — Hot-path perf budget on hook scripts
 
-**Closes:** P11-HK-S1, P11-HK-S2 (and P11-HK-N1 as drive-by).
-**Pattern:** `check-claim.sh` spawns python3 twice; `record-file-change.sh` spawns python3 5-6 times. Each cold python3 spawn is 50-150ms; declared budget is 200ms on hot events. Pattern in `record-file-change.sh:35-58` already proves the consolidation works (1 spawn).
-**Welder effort:** consolidate each script's extraction + escaping into single python3 round-trip — ~2 hours per script, 2 scripts.
+**Superseded for the active manifest:** P11-HK-S1, P11-HK-S2, and
+P11-HK-N1 now describe only retained, unwired legacy wrappers. Active hooks use
+the shell-free Python dispatcher. Revisit this batch only if the wrappers are
+wired again or retained compatibility itself gains a measured performance
+requirement.
 
 ### Theme 4 — Hook contract undocumented at plugin level
 
-**Closes:** P11-HK-S3 (1 SHOULD FIX).
-**Pattern:** the non-blocking contract lives only in script-header comments (3/4 hooks have identical "Rules: no set -e, no piped grep, always exit 0, complete in < 200ms" comments) but is absent from README and `docs/`. Future maintainer who hasn't read every script will reintroduce `set -e` and silently break PreToolUse.
-**Fix shape:** new `hooks/README.md` OR `docs/hooks.md` section OR README "Hooks" row expansion. Single paragraph: "All anvil hooks are non-blocking: must `exit 0` regardless of internal failure, must not use `set -e`/`set -u`/`set -o pipefail`, must wrap CLI calls with `|| true`, and must complete in < 200ms on hot events. SessionStart hook may take up to 1s."
-**Welder effort:** ~15 minutes.
+**Closed:** P11-HK-S3. Architecture and design now document the shell-free
+dispatcher, the five active hooks, their non-blocking `exit 0` contract, and
+the separately opt-in blocking stop gate.
 
 ### Theme 5 — Phase-status table drift across skills
 
@@ -616,10 +624,10 @@ this batch remains here as the audit cross-reference.
 
 ### Theme 7 — Install messaging drift in README + CHANGELOG
 
-**Closes:** P11-ST-S1, P11-ST-S2, P11-ST-S4, P11-ST-N1 (3 SHOULD FIX + 1 NIT).
-**Pattern:** README has 4 different phrasings about "once published"; CHANGELOG `[Unreleased]` narrates the just-shipped release; README has a stale "Phase 9 (this release)" parenthetical. All four are downstream effects of a release shipping without a docs-scribe sweep.
-**Fix shape:** single README sweep + CHANGELOG trim. Single docs-scribe pass.
-**Welder effort:** ~1 hour.
+**Closed:** P11-ST-S1, P11-ST-S2, P11-ST-S4, and P11-ST-N1. README now has
+one published-package install story, `[Unreleased]` is empty, and release-bound
+phrasing has been removed. The release helper and its tests keep current-version
+examples synchronized.
 
 ---
 

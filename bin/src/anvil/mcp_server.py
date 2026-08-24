@@ -2540,13 +2540,15 @@ def init_project(
     name: str | None = None,
     cwd: str | None = None,
 ) -> InitProjectResponse:
-    """Scaffold a fresh .anvil/ state directory in the target project root.
+    """Scaffold a fresh resolved state directory for the target project.
 
     Creates the canonical layout (config.yaml, state.db, events.jsonl,
     packets/), seeds the project row, and emits project.created +
-    state.initialized. Non-destructive: raises ToolError if .anvil/ already
-    exists (use ``anvil init --force`` from the CLI to reinit) or inside the
-    plugin root.
+    state.initialized. The default is a per-project HOME workspace;
+    ANVIL_STATE_LAYOUT=local opts into an in-repo .anvil/ directory.
+    Non-destructive: raises ToolError if resolved state already exists (use
+    ``anvil init --force`` from the CLI to reinit), or if local layout would
+    write inside the plugin root.
 
     Args:
         name: Project name. Defaults to the cwd basename.
@@ -5017,8 +5019,9 @@ def _help_text() -> str:
         "  -v, --version   Print the engine version and exit.",
         "",
         "Environment:",
-        "  ANVIL_ROOT  Project root holding .anvil/ (defaults to the",
-        "                     current working directory). In Docker, bind-mount the",
+        "  ANVIL_ROOT  Explicit project root whose state resolves to",
+        "                     <root>/.anvil/. Without it, state uses the project-specific",
+        "                     HOME workspace by default. In Docker, bind-mount the",
         "                     host project here, e.g. -v \"$PWD:/project\" -e",
         "                     ANVIL_ROOT=/project.",
         "  ANVIL_MCP_PLANNING  When truthy (1/true/yes/on), the live server",

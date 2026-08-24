@@ -8,8 +8,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [0.6.5] - 2026-08-24
 
-> v0.6.4 was an internal release candidate and was never published. v0.6.5
-> contains the complete user-visible delta from v0.6.3.
+> v0.6.4 remained an untagged release candidate and was never published.
+> v0.6.5 contains the complete user-visible delta from v0.6.3.
 
 ### Highlights
 
@@ -26,8 +26,7 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   and actor-specific review governance now agree across CLI and MCP
   ([#56](https://github.com/fakoli/anvil/issues/56),
   [#109](https://github.com/fakoli/anvil/issues/109),
-  [#180](https://github.com/fakoli/anvil/issues/180),
-  [#181](https://github.com/fakoli/anvil/issues/181)).
+  [#180](https://github.com/fakoli/anvil/issues/180)).
 - **Faster Windows feedback without UAC** — the maintained parallel suite and
   focused contract slice avoid junction-dependent collection and unnecessary
   serial repetition ([#118](https://github.com/fakoli/anvil/issues/118)).

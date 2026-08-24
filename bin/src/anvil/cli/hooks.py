@@ -892,7 +892,10 @@ def hook_check_claim(
         hidden=True,
     ),
 ) -> None:
-    """Used by hooks/check-claim.sh — exit 0 always; output goes to stderr.
+    """Check one edit against active claim scopes; exit 0 always.
+
+    The shipped manifest invokes this through ``hook dispatch check-claim``;
+    ``hooks/check-claim.sh`` is the retained compatibility wrapper.
 
     Checks whether FILE is within the scope of an active claim.
     - If FILE is in expected_files of a claim by THIS actor: silent exit 0.
@@ -957,9 +960,12 @@ def hook_record_file_change(
         hidden=True,
     ),
 ) -> None:
-    """Used by hooks/record-file-change.sh — appends a file_changed event.
+    """Append a file_changed event from the active dispatcher or legacy wrapper.
 
-    Writes a file_changed event to both the SQLite events table and events.jsonl.
+    The shipped manifest invokes this through ``hook dispatch
+    record-file-change``; ``hooks/record-file-change.sh`` is the retained
+    compatibility wrapper. The backend writes the event log first and then the
+    SQLite projection.
     Exits 0 always; any failure is silently swallowed so the hook never blocks
     the tool that triggered it.
     """

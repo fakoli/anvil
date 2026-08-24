@@ -8,8 +8,9 @@
 
 **(Q)** anvil is a local-first, backend-neutral project-state layer for
 humans and AI coding agents: the durable record of every requirement, task,
-claim, and piece of evidence in your project, stored in SQLite under
-`.anvil/` and exposed through a CLI and an MCP server.
+claim, and piece of evidence in your project, stored in a resolved local state
+directory (a per-project HOME workspace by default) and exposed through a CLI
+and an MCP server.
 
 ## Who it is for
 
@@ -40,8 +41,8 @@ not papered over.
 **(Q)** Stretching the analogy one notch: each PRD is a **scoped stack /
 workspace** within the **one canonical state**. A project holds several PRDs the
 way a Terraform installation holds several workspaces — separate plans, separate
-gates, separate `apply` rhythms — all backed by a single state store
-(`.anvil/state.db` + `events.jsonl`), not one database per PRD. A PRD is
+gates, separate `apply` rhythms — all backed by one resolved state store
+(`state.db` + `events.jsonl`), not one database per PRD. A PRD is
 a release/milestone-scoped, separately-gated, revisable plan carrying a target
 version/tag: it gates the claimability of the tasks *it* owns (a task is
 claimable once its owning PRD is approved for its exact current material,
@@ -165,7 +166,7 @@ spec and (ii) emit/ingest adapters. For a solo author the win condition is
 
 ## What it is NOT
 
-- **Not a SaaS.** State lives in your repo under `.anvil/`; no hosted backend, no account, no telemetry.
+- **Not a SaaS.** State stays in a local per-project directory; no hosted backend, account, or telemetry. The default is a HOME workspace, with in-repo `.anvil/` available as an opt-in layout.
 - **Not a chat memory layer.** Chat history is not a database. State survives session resets, model swaps, and agent runtime changes.
 - **Not an issue tracker.** GitHub Issues is an opt-in *sync target* via the bidirectional Phase 8 sync engine, not the source of truth.
 - **Not a coding agent.** It is the coordination layer around coding agents: work packets in, evidence out.

@@ -10,6 +10,9 @@
 > through `uv run`; the legacy `.sh` wrappers call the same subcommands in
 > [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)
 > and remain as compatibility/test wrappers.
+>
+> Paths written as `.anvil/...` below are shorthand for the resolved state
+> directory reported by `anvil status`; they are in-repo only in local layout.
 
 ---
 
@@ -90,7 +93,7 @@ not assume an in-repo `./.anvil`.
 
 ## Per-hook reference
 
-### `detect-state.sh` (SessionStart)
+### `detect-state` dispatcher (SessionStart)
 
 **Purpose.** On session start, detect the project language (Rust, Python,
 TypeScript, or unknown) by inspecting marker files (`Cargo.toml`,
@@ -142,82 +145,82 @@ for the legacy shell wrapper.
 
 ---
 
-### `check-claim.sh` (PreToolUse: Edit, Write, NotebookEdit)
+### `check-claim` dispatcher (PreToolUse: Edit, Write, NotebookEdit)
 
 **Purpose.** Before any file edit, look up active claims and warn (on
 stderr) when the file being modified is in the `expected_files` scope of
 **another actor's** claim. Files in the current actor's own claim are
 silent.
 
-**Payload extraction.** The script parses stdin JSON for:
+**Payload extraction.** The dispatcher parses stdin JSON for:
 - `.tool_input.path` (Edit, Write) or `.tool_input.notebook_path`
   (NotebookEdit) — the file being modified.
 - `.session_id` — used as the actor proxy only when neither `ANVIL_ACTOR` nor
   legacy `ANVIL_GATE_ACTOR` is pinned. A pinned lifecycle actor wins.
 
-**Skip conditions (silent).** The script exits 0 with no output when any of
+**Skip conditions (silent).** The dispatcher exits 0 with no output when any of
 the following hold:
-- `.anvil/` does not exist in the cwd.
+- No state resolves for the selected project.
 - The payload contains no file path.
 - The file is an absolute path outside the project tree (not under `pwd`).
-- The CLI binary is missing or not executable.
 
 **Warning format (stderr).** When a conflict is detected:
 > `[anvil:check-claim] WARNING: file 'src/foo.py' is in the scope of claim 'C00042' owned by 'session-bbb', not 'session-aaa'.`
 
 **Side effects.** None — the CLI subcommand is read-only. It does **not**
-append an event to `events.jsonl`; the audit signal lives only in the
-agent's terminal output for this PR's check-claim path.
+append an event to `events.jsonl`; the signal lives only in the agent's
+terminal output for this check-claim path.
 
-**Performance.** Header targets <200ms. The hot path is the shell-out to
-`anvil hook check-claim`, which opens SQLite, calls
-`list_active_claims()`, and closes. Phase 11 backlog item P11-HK-S1 tracks
-consolidating these per-call sqlite spawns.
+**Performance.** The manifest launches one shell-free Python dispatcher, which
+opens SQLite, calls `list_active_claims()`, and closes. The 5-second manifest
+timeout is the hard ceiling; historical Theme 3 subprocess findings apply only
+to the unwired legacy wrapper.
 
 **CLI call.** `anvil hook check-claim --file PATH --actor ACTOR`
 (defined in
 [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)).
 
-**Source.** [`hooks/check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh).
+**Source.** [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)
+for the active dispatcher, and
+[`hooks/check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh)
+for the legacy wrapper.
 
 ---
 
-### `record-file-change.sh` (PostToolUse: Edit, Write, NotebookEdit)
+### `record-file-change` dispatcher (PostToolUse: Edit, Write, NotebookEdit)
 
 **Purpose.** After every file edit, append a `file_changed` event to both
 the SQLite `events` table and `events.jsonl`. This feeds the
 conflict-detection and audit layers with real per-file write data.
 
-**Payload extraction.** Parses stdin for `.tool_input.path` (or
+**Payload extraction.** The dispatcher parses stdin for `.tool_input.path` (or
 `.notebook_path`), `.tool_name`, and `.session_id`.
 
-**Skip conditions (silent).** Exits 0 with no output when:
-- `.anvil/` does not exist.
+**Skip conditions (silent).** It exits 0 with no output when:
+- No state resolves for the selected project.
 - No file path can be extracted from the payload.
 
-**Two-tier write strategy.**
-1. **Preferred path.** Shell out to `anvil hook record-file-change
-   --file PATH --tool TOOL --actor ACTOR`. The subcommand opens a
-   `SqliteBackend`, builds an `Event` with `action="file_changed"`,
-   `target_kind="file"`, `target_id=<path>`, calls `backend.apply_event`
-   (which writes to both `state.db` and `events.jsonl` inside one
-   `BEGIN IMMEDIATE` transaction), and closes.
-2. **Direct-append fallback.** If the CLI is absent or returns non-zero
-   (DB locked, subcommand not yet wired), the script appends a hand-built
-   JSONL line directly to `events.jsonl`. The line uses the same field
-   names the replay engine expects (`action`, `entity_type`, `entity_id`,
-   `actor`, `tool`, `timestamp`, `source: "hook"`).
+**Write strategy.** The dispatcher calls `anvil hook record-file-change --file
+PATH --tool TOOL --actor ACTOR` in-process. The subcommand opens a
+`SqliteBackend`, builds `action="file_changed"`, and uses the normal locked,
+log-first append path before applying the SQLite projection. The legacy shell
+wrapper delegates to that subcommand and retains a direct-JSONL fallback for
+compatibility when the CLI is unavailable.
 
 **Output.** Silent on success and on every failure path.
 
-**Performance.** Header targets <200ms. Phase 11 backlog item P11-HK-S2
-tracks adding `flock` to harden concurrent appends.
+**Performance.** The active manifest uses one shell-free dispatcher process.
+The backend serializes cooperating JSONL writers; historical wrapper-only
+performance findings remain in roadmap Theme 3.
 
-**Source.** [`hooks/record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh).
+**Source.** [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)
+for the active dispatcher, and
+[`hooks/record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh)
+for the legacy wrapper.
 
 ---
 
-### `capture-evidence.sh` (PostToolUse: Bash)
+### `capture-evidence` dispatcher (PostToolUse: Bash)
 
 **Purpose.** After every Bash tool call, check whether the command matches
 a verification pattern (substring match against a hardcoded set). If yes,
@@ -285,11 +288,14 @@ or `.anvil/.evidence-buffer/orphan.json`.
 
 **Performance.** Header targets <200ms.
 
-**Source.** [`hooks/capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh).
+**Source.** [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)
+for the active dispatcher, and
+[`hooks/capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh)
+for the legacy wrapper.
 
 ---
 
-### `heartbeat.sh` (PostToolUse: Edit, Write, NotebookEdit, Bash)
+### `heartbeat` dispatcher (PostToolUse: Edit, Write, NotebookEdit, Bash)
 
 **Purpose.** On every matching tool call, renew the acting session's active
 claim lease(s) so a lazy lease stays fresh while real work is happening. This
@@ -308,27 +314,26 @@ cryptographic authentication. Lease and gate continuation messages carry the
 exact owner through safely quoted `--actor` guidance or structured MCP fields.
 
 **Skip conditions (silent).** Exits 0 with no output when:
-- No anvil state exists anywhere (`.anvil/`, `bin/.anvil/`, or the HOME
-  workspace's `~/.anvil/workspaces/`).
-- `$CLAUDE_PLUGIN_ROOT` is unset, or the `anvil` binary under it is missing or
-  not executable.
+- No state resolves for the selected project.
 - The resolved actor holds no active claims (nothing to renew).
 - Renewing a given claim raises (e.g. an already-expired lease) — that claim
   is skipped, not fatal; the next claim/reclaim handles it.
 
-**Side effects.** For each active claim held by the resolved actor where there
-has been forward progress (a `file_changed` event on an expected file) since
-the last heartbeat, renews the lease timestamp and appends a `claim.renewed`
-row to `events.jsonl`. When there is no such progress, the renewal is a
-no-op — the lease is left unchanged and nothing is appended.
+**Side effects.** For each active claim held by the resolved actor and current
+session, the normal renewal gate extends the lease only after new hook-observed
+file progress or a pending verified claim-bound attestation. A successful
+renewal appends `claim.renewed`; without qualifying progress it is a no-op.
 
-**Performance.** Header targets <200ms, same as the other `PostToolUse`
-hooks.
+**Performance.** The active manifest uses one shell-free dispatcher process
+per entry and a 5-second hard timeout.
 
 **CLI call.** `anvil hook heartbeat` (defined in
 [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)).
 
-**Source.** [`hooks/heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh).
+**Source.** [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)
+for the active dispatcher, and
+[`hooks/heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh)
+for the legacy wrapper.
 
 ---
 
@@ -340,12 +345,11 @@ hooks.
   SessionStart dispatcher fires on every session and will inject either a
   "not initialized" notice or the project state line. If you see neither,
   the plugin may be unloaded or untrusted.
-- Check the script is executable:
-  `ls -la $CLAUDE_PLUGIN_ROOT/hooks/`.
-- Run the script manually to see its output and exit status:
-  `bash $CLAUDE_PLUGIN_ROOT/hooks/<script>.sh < /dev/null`.
-- Confirm `.anvil/` exists in your cwd — the
-  `PreToolUse` / `PostToolUse` hooks fast-path-exit 0 when it is absent.
+- Inspect `hooks/hooks.json` and confirm its `uv run ... anvil.cli hook dispatch`
+  command matches the installed plugin location.
+- Run `anvil status` from the same project and confirm it reports an initialized
+  resolved state directory. The active hooks use that resolver; an in-repo
+  `.anvil/` is neither required nor assumed.
 
 ### I am getting noisy claim warnings
 
@@ -361,7 +365,7 @@ actor's claim `expected_files`. Two fixes:
 
 ### My test output is not being captured
 
-`capture-evidence.sh` only captures commands that match its **hardcoded**
+The capture-evidence dispatcher only captures commands that match its **fixed**
 substring matcher: `pytest`, `ruff check`, `mypy`, `npm test`,
 `cargo test`, `bun test`. The matcher is independent of the active task's
 `verification.commands` field — adding a new command to a task does not
@@ -380,37 +384,21 @@ Checks:
 
 ### A hook is too slow
 
-Per the non-blocking contract, scripts target <200ms each. The dominant
-cost on `check-claim` and `record-file-change` is the python sqlite
-connection open inside `anvil hook ...`. Two backlog items track
-this:
-
-- **P11-HK-S1** — consolidate sqlite spawns across the hook sub-app.
-- **P11-HK-S2** — add `flock` around `events.jsonl` appends.
-
-If the script consistently exceeds the 5s declared timeout in
-`hooks.json`, Claude Code aborts it. The hook then partially-wrote a
-buffer file or appended a JSONL line; both states are tolerant — the
-replay engine ignores malformed JSONL lines and the evidence buffer is
-consumed-and-cleared by `submit`.
+The active path launches one shell-free Python dispatcher process. Its main
+cost is Python startup plus the bounded SQLite operation. Each manifest entry
+has a 5-second hard timeout. If a hook reaches that ceiling, inspect the
+resolved `events.jsonl` or `.evidence-buffer/` rather than assuming a write
+completed; rerun a verification command under the packet environment when its
+capture record is absent. Historical wrapper subprocess findings are retained
+in roadmap Theme 3 but do not describe the active manifest.
 
 ### Temporarily disable a hook
 
-The hook scripts do not currently read any `ANVIL_*` env-var
-override. To disable a hook:
-
-- **Comment its entry out of `hooks.json`** (and restart the session so
-  Claude Code re-reads the manifest).
-- **Rename the script** — for example,
-  `mv hooks/check-claim.sh hooks/check-claim.sh.disabled`. The bash
-  invocation in `hooks.json` then fails to find the script and the
-  Claude Code runtime treats the entry as a no-op.
-- **Or remove `.anvil/`** from the project root entirely. Every
-  hook fast-paths to `exit 0` when the state directory is missing, so
-  this turns the whole plugin into a no-op.
-
-A config-driven disable mechanism is a candidate roadmap item; the
-existing levers above are the supported workflow today.
+There is no per-hook config toggle today. Remove the specific dispatcher entry
+from `hooks/hooks.json`, then restart the session so the harness reloads the
+manifest. This is an installation-local change and may be replaced by a plugin
+upgrade. Renaming a legacy `.sh` wrapper does not disable the active shell-free
+entry, and removing project state is not a hook-control mechanism.
 
 ---
 

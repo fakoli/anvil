@@ -84,7 +84,13 @@ Evidence gate: INCOMPLETE — missing items for required_evidence:
 Pass --approve to accept or --reject --reason TEXT to reject.
 ```
 
-An `INCOMPLETE` gate means a required-evidence item was not captured: the agent ran verification commands outside the hook window or the `capture-evidence.sh` hook did not fire. Do not approve over an incomplete gate without understanding why; the gap may indicate the verification was never actually run. (The gate is **advisory** by default: `--approve` still proceeds. Run `anvil apply --strict` to refuse approval while the gate is incomplete.)
+An `INCOMPLETE` gate means a required-evidence item was not captured: the agent
+ran verification commands outside the hook window or the shell-free
+capture-evidence dispatcher did not fire. Do not approve over an incomplete
+gate without understanding why; the gap may indicate the verification was
+never actually run. (The gate is **advisory** by default: `--approve` still
+proceeds. Run `anvil apply --strict` to refuse approval while the gate is
+incomplete.)
 
 Before approving:
 

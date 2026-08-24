@@ -157,10 +157,12 @@ Source: [`assets/diagrams/component.mmd`](https://github.com/fakoli/anvil/blob/m
 
 The two iron rules of the layering:
 
-1. **CLI is the one-and-only mutator.** Hooks shell out to the CLI; the MCP
-   server opens a `SqliteBackend` directly but only via the same engine
-   functions the CLI uses. Skills and agents do not write the resolved state
-   directory directly — they call the CLI.
+1. **The state engine is the only mutation authority.** CLI and MCP are public
+   state surfaces that resolve the same project state and call the same engine
+   contracts; neither hand-writes storage. Active hooks delegate through the
+   shell-free CLI dispatcher. The two provider reads are intentionally
+   CLI-only execution transports, with their versioned contracts discoverable
+   through `describe_surface`.
 2. **Transitions are pure.** Every status change is a function from
    `(entity, context) -> new entity`. Persisting the result is the backend's
    job, not the transition's. This is what makes the JSONL replay possible.
@@ -323,13 +325,19 @@ atomically.
 
 ## Event log and JSONL replay
 
-Every state mutation appends one `Event` row to two places:
+Every accepted state mutation records one `Event` in a locked, log-first
+critical section:
 
-1. The `events` table inside `state.db` (assigned the monotonic id
-   `E000001`, `E000002`, ... inside the same `BEGIN IMMEDIATE`
-   transaction that mutated state).
-2. `events.jsonl` — a newline-delimited JSON mirror, append-only, written
-   after the SQLite commit succeeds.
+1. Assign the monotonic id (`E000001`, `E000002`, ...) from log authority,
+   append the materialized event to `events.jsonl`, and `fsync` first when
+   strict durability is configured.
+2. Run `BEGIN IMMEDIATE`, mutate the SQLite projection, insert the same event
+   into the `events` table, and commit.
+
+If SQLite fails after the append, it rolls back while the append-only log line
+remains. The failure is audited and forward catch-up on the next initialization
+applies the logged event to SQLite. The log is never truncated to disguise a
+post-append projection failure.
 
 The replay guarantee is the central audit property of the engine: **replaying
 `events.jsonl` from an empty database must reconstruct canonical SQLite state
@@ -418,17 +426,19 @@ mechanisms layered together:
 2. **Claim leases with heartbeats.** A `Claim` row carries
    `lease_expires_at` and `last_heartbeat_at`. The CLI's `renew` command
    (and the MCP `renew_claim` tool) extends the lease. Default lease is 240
-   minutes (configurable via `.anvil/config.yaml`); the in-code
+   minutes (configurable via the resolved `config.yaml`); the in-code
    default lives at [`claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py).
    A renewal requires new hook-observed file progress or a pending verified
    claim-bound attestation. Accepted attestations are generation-bound and
    consumed once; audit-only free-text progress does not extend a lease.
-3. **Stale-claim reaping.** Coordination entry points call
+3. **Stale-claim reaping.** CLI `next`, claim/release/renew, packet,
+   submit/apply, and bundle-lease paths call
    [`detect_and_release_stale()`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py)
-   before offering, claiming, renewing, progressing, submitting, or reporting
-   coordinated state. Leases past their expiry are auto-released with
-   `release_reason="stale"`; the audit event preserves the original claimant.
-   Read-only listers skip reaping for latency.
+   before coordinated work. MCP additionally reaps on its documented progress,
+   status-summary, and task-status entry points (the exact list is below).
+   CLI `progress` remains an audit-only note that can be recorded without an
+   active claim, so it does not reap. Expired leases are released with
+   `release_reason="stale"`; read-only listers skip reaping for latency.
 4. **Conflict groups.** A `ConflictGroup` row names a set of tasks whose
    `expected_files` overlap. `anvil next` and the
    `get_next_task` MCP tool refuse to surface a task whose conflict group
@@ -506,10 +516,10 @@ The legacy shell scripts remain as compatibility/test wrappers. All five hooks a
 **non-blocking**: they must `exit 0` regardless of internal failure and must complete
 in well under their declared timeout.
 
-| Hook | Trigger | Script | Purpose |
+| Hook | Trigger | Active path / legacy wrapper | Purpose |
 |---|---|---|---|
 | `detect-state` | SessionStart | `anvil hook dispatch detect-state` / [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | Surface project state info into the session context |
-| `check-claim` | PreToolUse on `Edit / Write / NotebookEdit` | `anvil hook dispatch check-claim` / [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | Warn (non-blocking) if the agent has no active claim covering the file |
+| `check-claim` | PreToolUse on `Edit / Write / NotebookEdit` | `anvil hook dispatch check-claim` / [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | Warn (non-blocking) when the file overlaps another actor's active claim scope |
 | `record-file-change` | PostToolUse on `Edit / Write / NotebookEdit` | `anvil hook dispatch record-file-change` / [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | Record the change against the active claim for orphan detection |
 | `capture-evidence` | PostToolUse on `Bash` | `anvil hook dispatch capture-evidence` / [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | When the command matches a verification pattern, buffer it as evidence for the active claim |
 | `heartbeat` | PostToolUse on `Edit / Write / NotebookEdit` and on `Bash` | `anvil hook dispatch heartbeat` / [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | Renew the active claim's lease |
@@ -564,8 +574,8 @@ points at a file you can grep.
 | Context (work packets) | [`bin/src/anvil/context/packets.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) |
 | Review gates | [`bin/src/anvil/review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py) |
 | Git ops | [`bin/src/anvil/git_ops/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/git_ops) |
-| Brownfield scan / ingest (`.anvil/scan.db` → draft PRD + task graph) | [`bin/src/anvil/scan/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/scan) |
-| Declarative workflows (`.anvil/workflows/*.yaml` parse + run) | [`bin/src/anvil/workflows/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/workflows) |
+| Brownfield scan / ingest (`<resolved-state-dir>/scan.db` → draft PRD + task graph) | [`bin/src/anvil/scan/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/scan) |
+| Declarative workflows (`<resolved-state-dir>/workflows/*.yaml` parse + run) | [`bin/src/anvil/workflows/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/workflows) |
 | Ed25519 proof signing | [`bin/src/anvil/signing.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/signing.py) |
 | Task-id → safe path/branch component | [`bin/src/anvil/naming.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/naming.py) |
 | Sync Protocol + registry | [`bin/src/anvil/sync/provider.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/provider.py), [`registry.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/registry.py) |

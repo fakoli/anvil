@@ -14,8 +14,9 @@ records the claiming actor for the audit trail. See
 
 ### evidence buffer
 
-`.anvil/.evidence-buffer/` is a transient directory the `capture-evidence.sh`
-hook appends to whenever a recognized verification command (`pytest`,
+`<resolved-state-dir>/.evidence-buffer/` is a transient directory that the
+shell-free `hook dispatch capture-evidence` path appends to whenever a
+recognized verification command (`pytest`,
 `ruff check`, `mypy`, `npm test`, `cargo test`, `bun test`) runs while a claim
 is active. `anvil submit` reads the buffer file for the active claim and
 folds matching records into the durable `evidence.submitted` event, but it

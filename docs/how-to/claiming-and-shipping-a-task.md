@@ -105,7 +105,7 @@ Run `anvil renew C9F3A210 --actor alice` to extend the lease before it expires.
 
 ### What the claim records
 
-The `Claim` row carries `expected_files` (copied from `task.likely_files`), `claimed_by`, `lease_expires_at` (now + default lease), `last_heartbeat_at`, and `status="active"`. Git-backed claims also carry a monotonic generation and immutable attestation context for external progress. The `expected_files` list is what the `check-claim.sh` PreToolUse hook uses to warn when an Edit/Write targets a file outside the recorded scope.
+The `Claim` row carries `expected_files` (copied from `task.likely_files`), `claimed_by`, `lease_expires_at` (now + default lease), `last_heartbeat_at`, and `status="active"`. Git-backed claims also carry a monotonic generation and immutable attestation context for external progress. The `expected_files` list is what the shell-free `hook dispatch check-claim` PreToolUse path uses to warn when an Edit/Write targets another actor's recorded scope; `check-claim.sh` is the retained legacy wrapper.
 
 ### Git is not required
 
@@ -153,8 +153,8 @@ The JSON form mirrors the markdown sections one-for-one and is what the MCP `gen
 
 Switch to the agent branch and edit the files in scope. Three hooks fire during the work session:
 
-- **`check-claim.sh` (PreToolUse on Edit/Write/NotebookEdit)** — warns to stderr if the file you are about to edit is outside the claim's `expected_files`. Non-blocking by hook contract.
-- **`record-file-change.sh` (PostToolUse on Edit/Write/NotebookEdit)** — records the change against the active claim for orphan detection.
+- **`hook dispatch check-claim` (PreToolUse on Edit/Write/NotebookEdit)** — warns to stderr if the file you are about to edit overlaps another actor's claim scope. Non-blocking by hook contract.
+- **`hook dispatch record-file-change` (PostToolUse on Edit/Write/NotebookEdit)** — records the change against the active claim for orphan detection.
 - **`capture-evidence` dispatcher (PostToolUse on Bash)** — when the command
   matches a verification pattern (`pytest`, `npm test`, `cargo test`, `ruff`,
   `mypy`, ...) and the packet's hook environment exactly matches the active
@@ -372,7 +372,11 @@ anvil release C9F3A210 --force --reason "stale recovery; original actor offline"
 
 ## What gets recorded
 
-Every step above appends to two places: the `events` table inside `state.db` (assigned a monotonic id inside `BEGIN IMMEDIATE`) and `events.jsonl` (append-only mirror, written after commit). A full claim → ship cycle produces this event sequence:
+Every accepted mutation runs through the locked, log-first write path: Anvil
+assigns the monotonic event id and appends to `events.jsonl`, then applies the
+same event to the SQLite projection inside `BEGIN IMMEDIATE`. A post-append
+SQLite failure rolls back and is repaired by forward catch-up; the log line is
+never discarded. A full claim → ship cycle produces this event sequence:
 
 ```text
 claim.created      → claim row inserted; task ready → claimed
@@ -389,7 +393,7 @@ This is the audit trail that backs anvil's replay guarantee — see [`../archite
 ## Where to next
 
 - [Full concurrency model and conflict semantics: `../architecture.md#concurrency-model`](../architecture.md)
-- [The evidence buffer and how `capture-evidence.sh` feeds `submit`: `../evidence-buffer.md`](../evidence-buffer.md)
+- [The evidence buffer and how the capture-evidence dispatcher feeds `submit`: `../evidence-buffer.md`](../evidence-buffer.md)
 - [Sync state to GitHub Issues: `../github-sync.md`](../github-sync.md)
 - [MCP surface for agents: `../mcp.md`](../mcp.md)
 - [PRD template and the readiness gate: `../prd-template.md`](../prd-template.md)
