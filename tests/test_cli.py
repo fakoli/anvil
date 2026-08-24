@@ -3863,6 +3863,92 @@ class TestSinglePrdBackcompat:
         assert data["governor"]["withheld_reason"] == "no_claimable_tasks"
         assert data["governor"]["offer_throttled"] is False
 
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--max-blast", "not-an-integer"),
+            ("--max-blast", "0"),
+            ("--max-blast", "6"),
+            ("--max-review-risk", "not-an-integer"),
+            ("--max-review-risk", "0"),
+            ("--max-review-risk", "6"),
+        ],
+    )
+    def test_next_risk_ceiling_invalid_input_refuses_without_mutation(
+        self, tmp_path: Path, flag: str, value: str
+    ) -> None:
+        """Malformed ceilings fail at Click's typed boundary before state opens."""
+        import subprocess as _subprocess
+
+        _do_init(tmp_path)
+        _seed_default_prd(tmp_path, approve=True)
+        db = tmp_path / ".anvil" / "state.db"
+        _insert_task_row(db, task_id="T001", status="claimed")
+        _insert_active_claim_row(db, claim_id="C001", task_id="T001")
+        with sqlite3.connect(db) as connection:
+            connection.execute(
+                "UPDATE claims SET lease_expires_at = ? WHERE id = 'C001'",
+                ("2000-01-01T00:00:00+00:00",),
+            )
+        _subprocess.run(
+            ["git", "init", str(tmp_path)], check=True, capture_output=True
+        )
+        _subprocess.run(
+            ["git", "config", "user.email", "tests@example.invalid"],
+            cwd=tmp_path,
+            check=True,
+        )
+        _subprocess.run(
+            ["git", "config", "user.name", "Anvil Tests"],
+            cwd=tmp_path,
+            check=True,
+        )
+        marker = tmp_path / "tracked.txt"
+        marker.write_text("unchanged\n", encoding="utf-8")
+        _subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+        _subprocess.run(
+            ["git", "commit", "-m", "initial"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+        state_dir = tmp_path / ".anvil"
+        state_before = _recursive_file_manifest(state_dir)
+        git_head_before = _subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        git_status_before = _subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        result = _invoke_cmd(tmp_path, ["next", flag, value, "--json"])
+
+        assert result.exit_code == 2
+        assert "Invalid value" in result.output
+        assert _recursive_file_manifest(state_dir) == state_before
+        assert _subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == git_head_before
+        assert _subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == git_status_before
+
     def test_single_prd_backcompat_prd_review_no_flag_transitions(
         self, tmp_path: Path
     ) -> None:
@@ -9652,6 +9738,50 @@ class TestT019PrdScopedCliCommands:
         assert payload["data"]["task"] is None
         assert payload["data"]["prd"] == "v0.2"
         assert "no ready tasks in this prd" in payload["data"]["message"].lower()
+
+    @pytest.mark.parametrize("prd_id", ["", "   "])
+    def test_next_scoped_prd_invalid_input_refuses_without_mutation(
+        self, tmp_path: Path, prd_id: str
+    ) -> None:
+        """An explicit invalid scope never falls through or reaps stale claims."""
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(db) as connection:
+            connection.execute(
+                "UPDATE tasks SET status = 'claimed' WHERE id = 'T001'"
+            )
+        _insert_active_claim_row(db, claim_id="C001", task_id="T001")
+        with sqlite3.connect(db) as connection:
+            connection.execute(
+                "UPDATE claims SET lease_expires_at = ? WHERE id = 'C001'",
+                ("2000-01-01T00:00:00+00:00",),
+            )
+
+        state_dir = tmp_path / ".anvil"
+        state_before = _recursive_file_manifest(state_dir)
+
+        result = _invoke_cmd(tmp_path, ["next", "--prd", prd_id, "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"] == {
+            "code": "invalid_prd_id",
+            "message": "PRD id is invalid",
+        }
+        assert _recursive_file_manifest(state_dir) == state_before
+
+    @pytest.mark.parametrize("prd_id", ["", "   "])
+    def test_next_scoped_prd_invalid_input_precedes_initialization(
+        self, tmp_path: Path, prd_id: str
+    ) -> None:
+        """Selector syntax has the same precedence before and after init."""
+        result = _invoke_cmd(tmp_path, ["next", "--prd", prd_id, "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"] == {
+            "code": "invalid_prd_id",
+            "message": "PRD id is invalid",
+        }
+        assert not (tmp_path / ".anvil").exists()
 
     # ---- show ---------------------------------------------------------------
 

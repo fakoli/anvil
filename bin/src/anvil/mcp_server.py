@@ -29,6 +29,7 @@ from anvil.cli._actor_output import (
     bundle_continuation_data,
     continuation_data,
 )
+from anvil.read_contracts import PrdScopedRefV1
 from anvil.state.models import (
     RejectionQualityFinding,
     RejectionQualityFindingCode,
@@ -101,6 +102,21 @@ DependencyEdgesInput = Annotated[
     Any,
     WithJsonSchema(_DEPENDENCY_EDGES_INPUT_SCHEMA),
 ]
+RiskCeiling = Annotated[int, Field(strict=True, ge=1, le=5)]
+PrdIdInput = Annotated[
+    str,
+    Field(strict=True),
+    WithJsonSchema(PrdScopedRefV1.model_json_schema()["properties"]["prd_id"]),
+]
+
+
+def _validate_risk_ceiling(value: object, *, field: str) -> int | None:
+    """Apply the public strict 1-5 contract to direct Python calls too."""
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= 5:
+        raise ToolError(f"{field} must be an integer from 1 to 5")
+    return value
 
 # Env flag that opts a live server back into the full 36-tool surface.
 _PLANNING_ENV = "ANVIL_MCP_PLANNING"
@@ -1170,9 +1186,9 @@ def get_task(task_id: str) -> dict[str, Any]:
 @mcp.tool
 def get_next_task(
     actor: str | None = None,
-    prd_id: str | None = None,
-    max_blast: int | None = None,
-    max_review_risk: int | None = None,
+    prd_id: PrdIdInput | None = None,
+    max_blast: RiskCeiling | None = None,
+    max_review_risk: RiskCeiling | None = None,
 ) -> GetNextTaskResponse:
     """Return the single highest-priority ready task that has no overlapping
     active claim, plus the complete offer-governor calculation. ``task`` is
@@ -1182,10 +1198,10 @@ def get_next_task(
     Ordering: critical > high > medium > low; then complexity asc, creation
     time asc, and id asc.
 
-    ``max_blast`` / ``max_review_risk`` (B45/#56) are optional risk-axis ceilings:
-    when set, a task is only offered if that dimension is CONFIRMED and within
-    the ceiling — so a weak/local runner can declare a ceiling and never be
-    handed high-risk work. This uses the SAME
+    ``max_blast`` / ``max_review_risk`` (B45/#56) are optional 1-5 risk-axis
+    ceilings: when set, a task is only offered if that dimension is CONFIRMED
+    and within the ceiling — so a weak/local runner can declare a ceiling and
+    never be handed high-risk work. This uses the SAME
     :func:`anvil.claims.manager.within_risk_ceiling` helper as the CLI
     ``ClaimManager.next_claimable``, so the two seams cannot diverge.
 
@@ -1195,19 +1211,36 @@ def get_next_task(
     ``ClaimManager.next_claimable(prd_id=...)``. ``None`` keeps the all-PRDs
     behaviour. ``actor`` selects the accept-rate history used by the governor.
     """
+    from anvil.cli._helpers import PrdSourceIngestError, validate_prd_id
+
+    max_blast = _validate_risk_ceiling(max_blast, field="max_blast")
+    max_review_risk = _validate_risk_ceiling(
+        max_review_risk,
+        field="max_review_risk",
+    )
+    try:
+        selected_prd_id = validate_prd_id(prd_id) if prd_id is not None else None
+    except PrdSourceIngestError as exc:
+        raise ToolError(exc.message) from exc
+
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
-        _reap_stale(backend)
-
-        # T019: resolve which PRD to scope candidates to (explicit > $ANVIL_PRD;
-        # None when neither names one -> all PRDs, byte-identical to pre-T019).
+        # T019: resolve which PRD to scope candidates to. None keeps the
+        # all-PRDs view, byte-identical to pre-T019.
         # Collapse the default sentinel ('prd') so prd_id='prd' matches tasks
         # stored with prd_id='default' rather than narrowing to an empty pool.
         from anvil.claims.manager import ClaimManager
         from anvil.claims.metrics import AcceptRateMetrics
         from anvil.cli._helpers import canonical_prd_id, resolve_actor
         from anvil.clock import SystemClock
+
+        scoped_prd_id = (
+            canonical_prd_id(_resolve_prd_id(backend, selected_prd_id))
+            if selected_prd_id is not None
+            else None
+        )
+        _reap_stale(backend)
 
         resolved_actor = resolve_actor(actor)
         clock = SystemClock()
@@ -1219,10 +1252,6 @@ def get_next_task(
             floor=cfg.accept_rate_floor if cfg is not None else 0.80,
             needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
             as_of=clock.now(),
-        )
-
-        scoped_prd_id = (
-            canonical_prd_id(_resolve_prd_id(backend, prd_id)) if prd_id else None
         )
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)

@@ -98,6 +98,15 @@ def _data(result: Any) -> Any:
     return d
 
 
+def _recursive_file_manifest(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(
+            candidate for candidate in root.rglob("*") if candidate.is_file()
+        )
+    }
+
+
 # ---------------------------------------------------------------------------
 # State-setup helpers (no mocking — real SQLite)
 # ---------------------------------------------------------------------------
@@ -1914,6 +1923,27 @@ class TestGetTask:
 # ===========================================================================
 
 class TestGetNextTask:
+    def test_get_next_task_public_schema_matches_prd_identity_contract(self) -> None:
+        """Discovery rejects every PRD shape that runtime validation refuses."""
+        from anvil.read_contracts import PrdScopedRefV1
+
+        tool = _run(mcp.get_tool("get_next_task"))
+        actual = tool.parameters["properties"]["prd_id"]
+        string_schema = next(
+            candidate
+            for candidate in actual["anyOf"]
+            if candidate.get("type") == "string"
+        )
+        expected = PrdScopedRefV1.model_json_schema()["properties"]["prd_id"]
+        assert string_schema == {
+            key: value for key, value in expected.items() if key != "title"
+        }
+        assert {candidate.get("type") for candidate in actual["anyOf"]} == {
+            "string",
+            "null",
+        }
+        assert actual["default"] is None
+
     def test_happy_path_returns_highest_priority_ready_task(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -2060,7 +2090,7 @@ class TestGetNextTask:
         assert governor["floor"] == 0.95
         assert governor["offer_throttled"] is True
 
-    def test_risk_ceiling_is_not_reported_for_unmet_dependency(
+    def test_get_next_task_risk_ceiling_is_not_reported_for_unmet_dependency(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_dir = _init_state_dir(tmp_path)
@@ -2350,7 +2380,7 @@ class TestGetNextTask:
         task = _run(run())["task"]
         assert task["id"] == "T001"
 
-    def test_prd_id_narrows_candidates(
+    def test_get_next_task_prd_id_narrows_candidates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """T019: get_next_task(prd_id='v0.2') only returns tasks in that PRD —
@@ -2376,42 +2406,228 @@ class TestGetNextTask:
         assert unscoped["task"]["id"] == "T001"  # high-priority default task wins
         assert scoped["task"]["id"] == "T900"  # candidate pool narrowed to v0.2
 
-    def test_ceiling_withholds_over_ceiling_and_unconfirmed_tasks(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    @pytest.mark.parametrize(
+        ("score_key", "cli_flag", "mcp_arg"),
+        [
+            ("blast_radius", "--max-blast", "max_blast"),
+            ("review_risk", "--max-review-risk", "max_review_risk"),
+        ],
+    )
+    def test_get_next_task_cli_mcp_share_risk_ceiling_eligibility(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        score_key: str,
+        cli_flag: str,
+        mcp_arg: str,
     ) -> None:
-        """#56: get_next_task honors the risk-axis ceiling via the SAME
-        within_risk_ceiling helper as ClaimManager.next_claimable, so a ceilinged
-        runner is only ever offered confirmed-within-ceiling work. Mirrors
-        test_claims.py::TestRiskAxisNext to prove the two seams agree."""
+        """#56: CLI and MCP apply the same fail-safe filter on both risk axes."""
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
-        # A: confirmed blast 2 -> eligible under a <=3 ceiling.
+        confirmed_key = f"{score_key}_confirmed"
+        # A: confirmed score 2 -> eligible under a <=3 ceiling.
         _add_task(state_dir, task_id="A", status="ready", priority="high",
-                  scores={"blast_radius": 2, "blast_radius_confirmed": True})
-        # B: blast 2 but UNCONFIRMED -> frontier-only under a ceiling.
+                  scores={score_key: 2, confirmed_key: True})
+        # B: score 2 but UNCONFIRMED -> frontier-only under a ceiling.
         _add_task(state_dir, task_id="B", status="ready", priority="high",
-                  scores={"blast_radius": 2, "blast_radius_confirmed": False})
-        # C: confirmed blast 5 -> over the ceiling; highest suitability so it
+                  scores={score_key: 2, confirmed_key: False})
+        # C: confirmed score 5 -> over the ceiling; highest suitability so it
         # wins the UNRESTRICTED pick, proving the ceiling changes the outcome.
         _add_task(state_dir, task_id="C", status="ready", priority="high",
-                  scores={"blast_radius": 5, "blast_radius_confirmed": True,
+                  scores={score_key: 5, confirmed_key: True,
                           "agent_suitability": 5, "complexity": 1})
         monkeypatch.chdir(tmp_path)
+
+        cli = CliRunner()
+        cli_unrestricted = json.loads(
+            cli.invoke(app, ["next", "--json"], catch_exceptions=False).output
+        )["data"]
+        cli_ceilinged = json.loads(
+            cli.invoke(
+                app,
+                ["next", "--json", cli_flag, "3"],
+                catch_exceptions=False,
+            ).output
+        )["data"]
 
         async def run() -> tuple[Any, Any]:
             async with Client(mcp) as c:
                 unrestricted = _data(await c.call_tool("get_next_task", {}))
                 ceilinged = _data(
-                    await c.call_tool("get_next_task", {"max_blast": 3})
+                    await c.call_tool("get_next_task", {mcp_arg: 3})
                 )
                 return unrestricted, ceilinged
 
-        unrestricted, ceilinged = _run(run())
-        assert unrestricted["task"]["id"] == "C"  # wins with no ceiling
-        assert ceilinged["task"] is not None
-        assert ceilinged["task"]["id"] == "A"  # withholds C and B
+        mcp_unrestricted, mcp_ceilinged = _run(run())
+        assert cli_unrestricted["task"]["id"] == "C"
+        assert mcp_unrestricted["task"]["id"] == "C"
+        assert cli_ceilinged["task"]["id"] == "A"
+        assert mcp_ceilinged["task"]["id"] == "A"
 
-    def test_prd_id_scoped_pick_skips_cross_prd_active_claim_collision(
+    def test_get_next_task_prd_id_empty_partition_does_not_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#109: an empty named PRD never falls through to another PRD's work."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved", prd_id="empty", is_default=0)
+        _add_feature(state_dir)
+        _add_task(
+            state_dir,
+            task_id="T001",
+            status="ready",
+            priority="high",
+            prd_id="default",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool("get_next_task", {"prd_id": "empty"})
+                )
+
+        response = _run(run())
+        assert response["task"] is None
+        assert response["governor"]["withheld_reason"] == "no_ready_tasks"
+
+    @pytest.mark.parametrize("prd_id", ["", "   "])
+    def test_get_next_task_prd_id_invalid_input_refuses_without_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        prd_id: str,
+    ) -> None:
+        """An explicit invalid scope never falls through or reaps stale claims."""
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir,
+            claim_id="C001",
+            task_id="T001",
+            minutes_until_expiry=-30,
+        )
+        monkeypatch.chdir(tmp_path)
+        state_before = _recursive_file_manifest(state_dir)
+        git_head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        git_status_before = subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("get_next_task", {"prd_id": prd_id})
+
+        with pytest.raises(ToolError, match="validation error|PRD id is invalid"):
+            _run(run())
+        assert _recursive_file_manifest(state_dir) == state_before
+        assert subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == git_head_before
+        assert subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == git_status_before
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("max_blast", "not-an-integer"),
+            ("max_blast", 0),
+            ("max_blast", 6),
+            ("max_blast", True),
+            ("max_blast", 3.0),
+            ("max_review_risk", "not-an-integer"),
+            ("max_review_risk", 0),
+            ("max_review_risk", 6),
+            ("max_review_risk", True),
+            ("max_review_risk", 3.0),
+        ],
+    )
+    def test_get_next_task_risk_ceiling_invalid_input_refuses_without_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        field: str,
+        value: object,
+    ) -> None:
+        """FastMCP and direct calls reject ceilings before state or Git opens."""
+        from anvil.mcp_server import get_next_task
+
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir,
+            claim_id="C001",
+            task_id="T001",
+            minutes_until_expiry=-30,
+        )
+        monkeypatch.chdir(tmp_path)
+        state_before = _recursive_file_manifest(state_dir)
+        git_head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        git_status_before = subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("get_next_task", {field: value})
+
+        with pytest.raises(ToolError, match="validation error"):
+            _run(run())
+        with pytest.raises(ToolError, match="must be an integer from 1 to 5"):
+            get_next_task(**{field: value})
+        assert _recursive_file_manifest(state_dir) == state_before
+        assert subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == git_head_before
+        assert subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == git_status_before
+
+    def test_get_next_task_prd_id_scoped_pick_skips_cross_prd_active_claim_collision(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """T019 core: get_next_task(prd_id='v0.1') builds the conflict-group
