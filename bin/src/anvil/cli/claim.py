@@ -22,6 +22,7 @@ from anvil.cli._actor_output import (
 )
 from anvil.cli._helpers import (
     PRD_OPTION,
+    PrdSourceIngestError,
     _lease_manager_kwargs,
     _load_config_optional,
     _open_backend,
@@ -32,6 +33,7 @@ from anvil.cli._helpers import (
     canonical_prd_id,
     resolve_actor,
     resolve_prd_id,
+    validate_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
 
@@ -1006,6 +1008,8 @@ def next(  # noqa: A001
         None,
         "--max-blast",
         envvar="ANVIL_MAX_BLAST",
+        min=1,
+        max=5,
         help="[EXPERIMENTAL] Risk ceiling for a low-risk (e.g. local) runner: "
         "only recommend tasks whose blast_radius is CONFIRMED and <= N. "
         "Unconfirmed/unscored tasks are frontier-only (ineligible) even below "
@@ -1019,6 +1023,8 @@ def next(  # noqa: A001
         None,
         "--max-review-risk",
         envvar="ANVIL_MAX_REVIEW_RISK",
+        min=1,
+        max=5,
         help="[EXPERIMENTAL] Risk ceiling: only recommend tasks whose review_risk "
         "is confirmed and <= M (same safe-by-construction semantics as "
         "--max-blast; confirmed at the `anvil review tasks` gate).",
@@ -1067,6 +1073,14 @@ def next(  # noqa: A001
     from anvil.claims.manager import ClaimManager
     from anvil.clock import SystemClock
 
+    try:
+        selected_prd_id = validate_prd_id(prd) if prd is not None else None
+    except PrdSourceIngestError as exc:
+        if json_output:
+            fail("next", exc.message, code=exc.code)
+        typer.echo(f"Error: {exc.message}", err=True)
+        raise typer.Exit(code=1) from exc
+
     resolved_actor = resolve_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="next", json_output=json_output)
@@ -1088,7 +1102,6 @@ def next(  # noqa: A001
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
-        _reap_stale_claims(backend)
 
         # T019: only narrow the candidate pool when a PRD was explicitly named
         # (flag or $ANVIL_PRD, both surfaced via PRD_OPTION's envvar wiring).
@@ -1096,7 +1109,12 @@ def next(  # noqa: A001
         # no selection we pass prd_id=None so a single-PRD project's output
         # stays byte-identical to pre-T019. Collapse the default sentinel ('prd')
         # so `--prd prd` narrows to the stored prd_id='default' partition.
-        scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
+        scoped_prd_id = (
+            canonical_prd_id(resolve_prd_id(backend, selected_prd_id))
+            if selected_prd_id is not None
+            else None
+        )
+        _reap_stale_claims(backend)
         if bundle_mode:
             from anvil.state.rollup import compute_bundle_rollup
 
