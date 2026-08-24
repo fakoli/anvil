@@ -789,7 +789,7 @@ def _junit_evidence(path: Path) -> tuple[dict[str, int], str]:
         for key in ("tests", "failures", "errors", "skipped")
     }
     result["passed"] = result["tests"] - result["failures"] - result["errors"] - result["skipped"]
-    testcase_ids = sorted(
+    testcase_ids = [
         "\x1f".join(
             (
                 case.get("file", ""),
@@ -798,8 +798,23 @@ def _junit_evidence(path: Path) -> tuple[dict[str, int], str]:
             )
         )
         for case in root.iter("testcase")
-    )
+    ]
+    if len(testcase_ids) != result["tests"]:
+        raise ValueError("junit_testcase_count_mismatch")
+    if len(set(testcase_ids)) != len(testcase_ids):
+        raise ValueError("junit_testcase_identity_duplicate")
+    testcase_ids.sort()
     return result, _sha256_bytes(("\n".join(testcase_ids) + "\n").encode("utf-8"))
+
+
+def _junit_counts_pass(counts: dict[str, int] | None, expected: int) -> bool:
+    return counts == {
+        "tests": expected,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": expected,
+    }
 
 
 def _distribution(values: Sequence[float]) -> dict[str, float | None]:
@@ -1052,6 +1067,7 @@ def _run_one(
         and controls_match
     )
     count_matches = bool(counts and counts["tests"] == collection["count"])
+    junit_counts_pass = _junit_counts_pass(counts, collection["count"])
     timing_valid = bool(
         before_error is None
         and repository_after_error is None
@@ -1061,6 +1077,7 @@ def _run_one(
         and process_result["containment_verified"]
         and junit_error is None
         and count_matches
+        and junit_counts_pass
     )
     return {
         "sequence": sequence,
@@ -1078,6 +1095,7 @@ def _run_one(
         "repository_after_error": repository_after_error,
         "junit_error": junit_error,
         "junit_counts": counts,
+        "junit_counts_pass": junit_counts_pass,
         "junit_testcase_ids_sha256": testcase_ids_sha256,
         "collection_count_matches": count_matches,
         "control_before_fingerprint": control_before["comparison_fingerprint_sha256"],
@@ -1338,6 +1356,15 @@ def _finish_artifact(
         and all(run.get("junit_testcase_ids_sha256") is not None for run in runs)
         and len(testcase_hashes) == 1
     )
+    expected_count = artifact.get("collection", {}).get("count", 0)
+    junit_counts_pass = bool(
+        expected_count > 0
+        and runs
+        and all(
+            _junit_counts_pass(run.get("junit_counts"), expected_count)
+            for run in runs
+        )
+    )
     collection_valid = bool(
         artifact.get("collection")
         and artifact["collection"].get("error") is None
@@ -1352,6 +1379,7 @@ def _finish_artifact(
         and all(run["timing_valid"] for run in warmups)
         and junit_counts_identical
         and junit_testcase_ids_identical
+        and junit_counts_pass
         and collection_valid
         and artifact.get("repository_final_error") is None
     )
@@ -1379,6 +1407,8 @@ def _finish_artifact(
         reasons.append("junit_counts_differ_across_runs")
     if not junit_testcase_ids_identical:
         reasons.append("junit_testcase_ids_differ_across_runs")
+    if not junit_counts_pass:
+        reasons.append("junit_counts_do_not_show_all_tests_passed")
     if not collection_valid:
         reasons.append("collection_invalid")
     if artifact.get("repository_final_error") is not None:
@@ -1401,6 +1431,7 @@ def _finish_artifact(
         ),
         "junit_counts_identical_across_runs": junit_counts_identical,
         "junit_testcase_ids_identical_across_runs": junit_testcase_ids_identical,
+        "junit_counts_pass": junit_counts_pass,
         "collection_valid": collection_valid,
         "insufficient_reasons": reasons,
         "parallel_seconds": parallel_distribution,

@@ -614,6 +614,51 @@ def test_junit_count_change_invalidates_protocol(tmp_path: Path) -> None:
     assert artifact["result"]["junit_counts_identical_across_runs"] is False
 
 
+def test_junit_evidence_rejects_aggregate_without_testcases(tmp_path: Path) -> None:
+    junit = tmp_path / "aggregate-only.xml"
+    junit.write_text(
+        '<testsuites tests="10" failures="0" errors="0" skipped="0" />',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="junit_testcase_count_mismatch"):
+        timing._junit_evidence(junit)
+
+
+def test_junit_evidence_rejects_duplicate_testcase_identities(tmp_path: Path) -> None:
+    junit = tmp_path / "duplicate-testcases.xml"
+    junit.write_text(
+        '<testsuite tests="2" failures="0" errors="0" skipped="0">'
+        '<testcase file="tests/test_x.py" classname="TestX" name="test_same" />'
+        '<testcase file="tests/test_x.py" classname="TestX" name="test_same" />'
+        "</testsuite>",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="junit_testcase_identity_duplicate"):
+        timing._junit_evidence(junit)
+
+
+def test_identical_skipped_junit_counts_cannot_qualify(tmp_path: Path) -> None:
+    artifact, config = _qualified_artifact(tmp_path)
+    skipped_counts = {
+        "tests": 10,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 10,
+        "passed": 0,
+    }
+    for run in artifact["runs"]:
+        run["junit_counts"] = skipped_counts
+
+    assert timing._finish_artifact(config, artifact) == 1
+    assert artifact["result"]["status"] == "insufficient"
+    assert artifact["result"]["measurement_valid"] is False
+    assert artifact["result"]["junit_counts_identical_across_runs"] is True
+    assert artifact["result"]["junit_counts_pass"] is False
+    assert artifact["result"]["affected_slice_median_budget_met"] is None
+
+
 def test_invalid_collection_cannot_qualify_budget(tmp_path: Path) -> None:
     artifact, config = _qualified_artifact(tmp_path)
     artifact["collection"]["error"] = "CollectionNonzero"
