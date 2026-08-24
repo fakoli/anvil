@@ -34,7 +34,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 ### Added
 
 - **Revision-bound PRD approval and canonical source lineage
-  ([#180](https://github.com/fakoli/anvil/issues/180)).** Parsed
+  ([#180](https://github.com/fakoli/anvil/issues/180),
+  [#192](https://github.com/fakoli/anvil/issues/192)).** Parsed
   and revised PRDs now persist a domain-separated canonical material digest and
   exact content-event identity. Review and approval bind that revision, source,
   material, and content event; live append, Git replay, CLI, and MCP refuse
@@ -126,12 +127,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   graph, and persist every edit in one replay-safe event and transaction. The
   public API contract advances to version 8.
 - **Revision-bound PRD source provenance
-  ([#192](https://github.com/fakoli/anvil/issues/192)).** Parse and revision events now retain
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Parse and revision events now retain
   exact bounded UTF-8 source bytes, digest, size, encoding, and revision across
   CLI, MCP, migration, and events-only replay. Legacy rows remain explicitly
   unavailable rather than receiving fabricated provenance; schema version is 18.
 - **Versioned provider reads
-  ([#178](https://github.com/fakoli/anvil/issues/178)).** JSON-only `anvil project snapshot` and
+  ([#178](https://github.com/fakoli/anvil/issues/178),
+  [#192](https://github.com/fakoli/anvil/issues/192)).** JSON-only `anvil project snapshot` and
   `anvil prd show` expose bounded, non-mutating version-1 read contracts with
   packaged draft-2020-12 schemas, canonical fixtures, digest vectors, and a
   fail-closed Workbench hierarchy mapping. `anvil describe` now publishes the
