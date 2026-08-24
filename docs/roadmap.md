@@ -1,8 +1,8 @@
 # anvil roadmap
 
-**Last updated:** 2026-07-07 (restructured around Shipped / Now / Next / Later —
-the retired v1.11/v2.0/v2.1 version-target buckets are gone; see [How this is
-organized](#how-this-is-organized))
+**Last updated:** 2026-08-24 (v0.6.5 closeout; restructured around Shipped /
+Now / Next / Later — the retired v1.11/v2.0/v2.1 version-target buckets are
+gone; see [How this is organized](#how-this-is-organized))
 **Source of truth:** this file. Archived phase backlogs at [`phase-9-backlog.md`](archive/phase-9-backlog.md) and [`phase-11-backlog.md`](archive/phase-11-backlog.md) are kept for historical audit only — do not add new items there.
 **Companion:** [`tech-debt-backlog.md`](tech-debt-backlog.md) for non-roadmap debt (12 OPEN CL/TQ/PS items from PR #41 critics; tracked by origin PR, closed across phases). Items there are not duplicated here unless a roadmap item naturally touches the same file.
 
@@ -23,7 +23,8 @@ organized](#how-this-is-organized))
     capability expansion (multi-provider sync scale-out, push-based sync
     infra, per-provider config schemas).
   - **[Later](#later)** = follow-on capability and opportunistic hygiene —
-    additional sync providers, the snapshot subcommand, MCP sync tools,
+    additional sync providers, the local SQLite backup snapshot subcommand,
+    MCP sync tools,
     doc/composition cleanups, and items wanted but without a forcing function
     yet (formerly the separate `unscheduled` bucket; folded in here).
 - **Theme** = capability group (sync providers, conflict resolution,
@@ -392,13 +393,21 @@ steps cannot double-claim or fake "done").
 Wanted and scoped; picked up once [Now](#now) clears — see [What this track
 explicitly defers](#what-this-track-explicitly-defers) for why these wait.
 
-These are the Phase 10 plugin-audit deferrals — 56 live items the five critics raised at SHOULD FIX, CONSIDER, or NIT severity. None are breaking. The bulk close as mechanical batches; see [Cross-cutting themes](#cross-cutting-themes-high-leverage-batches) for the recommended welder fan-out.
+These are the Phase 10 plugin-audit deferrals. Items already satisfied by the
+current implementation are marked `SHIPPED` inline; the remaining findings are
+SHOULD FIX, CONSIDER, or NIT severity, not release blockers. The bulk close as
+mechanical batches; see [Cross-cutting themes](#cross-cutting-themes-high-leverage-batches)
+for the recommended welder fan-out.
 
 ### Theme: Audit honesty (mutating-tool input validation)
 
-- **[P11-MC-S1]** All 6 mutating MCP tools (`mcp_server.py:459-464,526-530,572-576,679-684,733-741,972-977`) accept actor as plain `str` with no non-empty validation; empty actor persists into audit trail at every emitted event. Add `_require_actor(name, field="actor") -> str` helper near `_resolve_state_dir`; call as first line of every mutating tool body. _Single helper closes 6 sites; highest forensics-criticality._
+- **[P11-MC-S1]** **SHIPPED in v0.6.5.** The canonical `_require_actor`
+  validator now rejects empty actor identity before mutating MCP operations and
+  preserves normalized actor continuity across lifecycle surfaces.
 - **[P11-MC-S2]** `list_tasks.status: str | None` not constrained — typo like `"in-progress"` or `"DONE"` returns silently empty list. Replace with `Literal[...]` matching `TaskCountsByStatus` fields verbatim.
-- **[P11-MC-S4]** `get_next_task` accepts `actor` parameter but never uses it — contract lie. Remove from signature. _Trivial; schema-truthfulness win._
+- **[P11-MC-S4]** **SHIPPED in v0.6.5.** `get_next_task.actor` is retained and
+  now selects the actor-specific accept-rate history used by the task-offer
+  governor; CLI and MCP expose the same calculation and recovery fields.
 
 ### Theme: MCP schema fidelity
 
@@ -446,6 +455,10 @@ See [Theme 5](#theme-5-phase-status-table-drift-across-skills).
 
 See [Theme 3](#theme-3-hot-path-perf-budget-on-hook-scripts).
 
+**Superseded for the active manifest.** `hooks/hooks.json` now invokes the
+shell-free Python dispatcher; the entries below describe cleanup of retained,
+unwired legacy scripts rather than current hook latency.
+
 - **[P11-HK-S1]** `hooks/check-claim.sh:36-59` — hot-path perf budget violation; spawns `python3` twice (100-300ms) on every Edit/Write/NotebookEdit; exceeds declared 200ms. Consolidate into single `python3 -c` printing both fields; mirror `record-file-change.sh:35-58` pattern.
 - **[P11-HK-S2]** `hooks/record-file-change.sh:95-106` — hot-path perf budget violation; `_escape_json()` spawns 4 `python3` instances on fallback path; 5-6 total spawns. Move JSON escaping into original extraction `python3` block; emit pre-escaped values.
 - **[P11-HK-N1]** `hooks/record-file-change.sh:55-57` — three `printf … | sed -n 'Np'` invocations; each `sed` is a fork. Replace with single `read` / `mapfile`. _Drive-by during P11-HK-S2._
@@ -459,9 +472,15 @@ See [Theme 4](#theme-4-hook-contract-undocumented-at-plugin-level).
 
 ### Theme: Hooks (robustness)
 
+**Superseded for the active manifest.** The shell-free Python dispatcher owns
+active error isolation and state resolution. Legacy-script findings remain as
+optional cleanup unless those scripts are wired again.
+
 - **[P11-HK-C2]** All four `.sh` files — no diagnostic fallback when hook silently fails. Support `ANVIL_HOOK_DEBUG=1` env var redirecting stderr to `.anvil/.hook-debug.log`.
 - **[P11-HK-C3]** `hooks/detect-state.sh:29` — `$("$CLI" status --hook-format 2>&1)` merges stderr into status line shown to Claude. Drop `2>&1`; capture separately for diagnostic-fallback branch.
-- **[P11-HK-C4]** `hooks/capture-evidence.sh:27` + `check-claim.sh:17` + `record-file-change.sh:14` — implicit assumption hook cwd is project root via relative `STATE_DIR=".anvil"`. Replace with `STATE_DIR="${CLAUDE_PROJECT_DIR:-$PWD}/.anvil"`.
+- **[P11-HK-C4]** **SHIPPED.** The active hook manifest no longer invokes the
+  legacy shell scripts. Its shell-free `anvil hook dispatch` path resolves the
+  same HOME/local/`ANVIL_ROOT` state layout as the CLI and MCP server.
 - **[P11-HK-C5]** `hooks/detect-state.sh:14-20` — language detection uses sequential overwrites; polyglot projects mislabeled. Either emit comma-joined list or guard each line. _Cross-plugin coordination opportunity with `fakoli-flow/hooks/detect-context.sh`._
 
 ### Theme: Agents (description completeness)
@@ -564,10 +583,9 @@ Items spanning multiple critics/areas that benefit from cohesive treatment. Thes
 
 ### Theme 2 — Non-empty actor validation across MCP mutating tools
 
-**Closes:** P11-MC-S1 (1 SHOULD FIX, 6 sites).
-**Pattern:** all 6 mutating MCP tools accept `actor: str` / `claimed_by: str` with no `.strip()` non-empty check; empty actor persists into the audit trail.
-**Fix shape:** single `_require_actor(name: str, field: str = "actor") -> str` helper near `_resolve_state_dir`; call as first line of every mutating tool body.
-**Welder effort:** define helper + 6 one-liners — single welder pass, ~30 minutes.
+**Closed in v0.6.5:** P11-MC-S1 (1 SHOULD FIX, originally 6 sites).
+The shared `_require_actor` validator now protects mutating MCP entry points;
+this batch remains here as the audit cross-reference.
 
 ### Theme 3 — Hot-path perf budget on hook scripts
 
@@ -616,7 +634,13 @@ Follow-on capability and opportunistic hygiene — wanted, but not next in line.
 
 ### Theme: Snapshot / replay
 
-- **[P9B-7]** `anvil snapshot` subcommand. **OPEN.** Phase 5 (v1.4.0) removed the pre-created `.anvil/snapshots/` directory because nothing wrote to it. Intent was always to ship a `sqlite3 .backup` wrapper. Acceptance: `anvil snapshot [--retention 30d|count:N]` writes `.anvil/snapshots/YYYY-MM-DDTHH-MM-SSZ.db`; `--list` shows existing snapshots with size + age; `--restore <name>` restores atomically (temp file, swap via rename); documented in `docs/specs/2026-05-24-anvil-v0.md` § Snapshots.
+- **[P9B-7]** `anvil snapshot` subcommand. **OPEN.** This is a local SQLite
+  `.backup` and retention workflow, distinct from the shipped read-only
+  `anvil project snapshot --json` provider operation. Phase 5 (v1.4.0) removed
+  the pre-created `snapshots/` directory because nothing wrote to it.
+  Acceptance: `anvil snapshot [--retention 30d|count:N]` writes timestamped
+  databases under the resolved state directory; `--list` shows size + age;
+  `--restore <name>` restores atomically (temp file, swap via rename).
 
 ### Theme: MCP surface (sync tools)
 

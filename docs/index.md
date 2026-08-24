@@ -33,7 +33,7 @@ PRD, plan, claim, evidence, done — in about five minutes.
 
 - **Claims are enforced, not conventional.** A claim is a database row with
   a lease and heartbeat; single-winner coordination spans sessions, loops,
-  and machines. Stale leases are reaped on every operation.
+  and machines. Stale leases are reaped at queue and coordination entry points.
 - **Status is downstream of proof.** Completion is evidence-gated: agents
   submit structured evidence (typed command/diff/link proofs), reviews gate
   acceptance, and every accepted task mints a signed, portable

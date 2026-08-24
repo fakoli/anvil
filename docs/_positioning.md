@@ -21,7 +21,7 @@ sessions. Project leads can audit what was claimed, reviewed, and completed.
 ## The 5 differentiators (vs CCPM, issue-trackers, chat-driven workflows)
 
 1. **Richer canonical state than issue text.** Pydantic v2 models in SQLite, validated at every transition, not free-form markdown in an issue body.
-2. **Explicit claim / lock / lease model.** A `Claim` row with an expiry timestamp and heartbeat; stale leases are detected and released on every CLI or MCP call, not assignment-by-label.
+2. **Explicit claim / lock / lease model.** A `Claim` row with an expiry timestamp and heartbeat; stale leases are detected and released at queue and coordination entry points, not assignment-by-label.
 3. **LLM-optimized work packets.** `anvil packet T012` renders the exact intent, acceptance criteria, scope, and non-goals an agent needs, not an entire issue thread the agent must summarize.
 4. **Six-dimension task scoring.** Complexity, parallelizability, context load, blast radius, review risk, and agent suitability drive routing and expand recommendations, not single-axis story points.
 5. **Runtime-neutral CLI + MCP.** The state engine is not coupled to any one agent runtime; the FastMCP stdio server exposes 36 registered tools (24 on the wire by default; 12 planning tools behind `ANVIL_MCP_PLANNING=1`) to any MCP-compatible client.

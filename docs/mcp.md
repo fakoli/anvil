@@ -1530,11 +1530,11 @@ None.
 ```json
 {
   "api_version": "14",
-  "engine_version": "0.6.4",
-  "display_version": "0.6.4",
+  "engine_version": "0.6.5",
+  "display_version": "0.6.5",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.4",
+  "tag": "v0.6.5",
   "tag_distance": 0,
   "dirty": false,
   "schema_version": 21,
@@ -1591,7 +1591,7 @@ inherit options from its descendants. Short aliases such as `-V` are intentional
 this skill/release contract.
 
 Provider consumers must fail closed before reading state unless the manifest
-contains API version 9, operation-catalog version 1, the required operation at
+contains API version 14, operation-catalog version 1, the required operation at
 version 1, and the exact version-1 schema resource paths. Do not infer
 compatibility from the engine version. The provider reads use their cataloged
 CLI transports; an MCP-only host can still discover and pin the same contract
@@ -1618,7 +1618,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":22,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":21}}
+{"error":{"code":"schema_mismatch","database_schema":22,"direction":"newer","engine_version":"0.6.5","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":21}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh

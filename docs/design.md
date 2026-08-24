@@ -55,34 +55,41 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 ### Why WAL specifically
 
-Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload (many `anvil status` reads from hooks, occasional `anvil claim` writes from agents) WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in `.anvil/`; both are git-ignored.
+Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload (many `anvil status` reads from hooks, occasional `anvil claim` writes from agents) WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in the resolved state directory; both are excluded from repository state.
 
 ---
 
 ## Why local-first
 
-**Choice:** state lives under `.anvil/` inside the user's repository. No hosted backend, no account, no telemetry, no network call unless the user opts into a sync provider.
+**Choice:** state lives in a local per-project directory. The default is a
+HOME workspace shared by every Git worktree; `ANVIL_STATE_LAYOUT=local` keeps
+the legacy in-repo `.anvil/` layout, and `ANVIL_ROOT` supplies an explicit
+root. No hosted backend, account, telemetry, or network call is required unless
+the user opts into a sync provider. See [Where anvil stores its state](how-to/state-location.md).
 
 ### Rejected alternative: SaaS-first
 
 A hosted control plane would let us ship a web dashboard, real-time collaboration, and a single sign-up funnel. Rejected because:
 
 1. **It changes the product category.** "Backend-neutral local-first state" is what distinguishes Anvil from CCPM-on-GitHub-Issues, Hamster Studio, and Jira/Rovo (see `competitive_gap_analysis_agentic_project_state.md` § "Strategic Positioning"). A SaaS control plane would compete in the task-management category instead.
-2. **Data ownership.** Users running PRDs through an LLM already worry about leakage; making the project plan itself leave the repo doubles that surface.
+2. **Data ownership.** Users running PRDs through an LLM already worry about leakage; making the project plan leave the developer's machine doubles that surface.
 3. **Offline-first is inherent.** Plane mode, airgapped networks, and unreliable Wi-Fi do not affect the core workflow. The system has no required online mode.
 4. **No auth flow.** `anvil init` is the entire onboarding.
 
 ### Trade-offs
 
 - **Accepted:** cross-machine collaboration goes through sync providers (a projection into GitHub Issues / Linear / Jira), not shared state.db. Slower and lossier than a CRDT, and that audience is buying Linear, not anvil.
-- **Accepted:** if `.anvil/` is git-ignored (sometimes recommended for `state.db` to avoid binary merge conflicts), the canonical state does not survive a `git clone` on a second machine. `events.jsonl` *can* be committed; `replay` rebuilds the DB. The user chooses the trade-off per repo.
+- **Accepted:** the default HOME workspace does not travel with `git clone`.
+  Cross-machine continuity uses `anvil backup` / `anvil restore`, a copied state
+  directory, or an explicitly committed `events.jsonl` in the opt-in local
+  layout; `replay` rebuilds the database.
 - **Lost:** hosted dashboard and cross-project search. Those are outside the local-first scope.
 
 ---
 
 ## Why claims with leases
 
-**Choice:** a `Claim` row is created on `anvil claim T012`, with `claimed_by`, `lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional branch/worktree binding. Heartbeats via `renew T012` every 5 min; stale leases detected and released on every CLI/MCP op.
+**Choice:** a `Claim` row is created on `anvil claim T012`, with `claimed_by`, `lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional branch/worktree binding. Heartbeats via `renew T012` every 5 min; stale leases are detected and released at queue and coordination entry points.
 
 ### Rejected alternatives
 
@@ -338,7 +345,9 @@ See "Why local-first" above.
 
 **Why not:** going SaaS is choosing a different product. A hosted dashboard would compete with Linear, Jira, and Asana in the task-management category.
 
-Anvil's direction is durable state that survives session resets, lives in the repo, and does not require an account. If a dashboard ships later, it should be a downstream viewer of the same `.anvil/` directory.
+Anvil's direction is durable state that survives session resets, stays local,
+and does not require an account. If a dashboard ships later, it should be a
+downstream viewer of the same resolved project-state directory.
 
 ### Real-time collaborative editing (out of scope)
 

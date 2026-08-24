@@ -1,6 +1,6 @@
 # anvil architecture
 
-> Condensed reference for the current **v0.6.4** standalone state. For the original v0
+> Condensed reference for the current **v0.6.5** standalone state. For the original v0
 > vision and aspirational items, see
 > [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 > For what is planned but not yet shipped, see
@@ -143,12 +143,12 @@ Source: [`assets/diagrams/component.mmd`](https://github.com/fakoli/anvil/blob/m
 | Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](https://github.com/fakoli/anvil/blob/main/.claude-plugin/plugin.json) |
 | CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
 | MCP server | Runtime-neutral capability surface — 36 registered stdio tools; the default execution surface serves 24 on the wire, and the 12 planning-tagged tools (including `assess_prd`) require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
-| Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json), [`hooks/*.sh`](https://github.com/fakoli/anvil/tree/main/hooks) |
+| Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json), [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py) |
 | Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](https://github.com/fakoli/anvil/tree/main/skills) |
 | Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](https://github.com/fakoli/anvil/tree/main/agents) |
 | Backend protocol | The seam between state-engine logic and storage; SqliteBackend is the only impl that ships | [`bin/src/anvil/state/backend.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/backend.py), [`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py) |
 | Transitions | Pure state machine — no I/O, no DB, no side-effects beyond `model_copy()` | [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) |
-| Claims manager | Atomic lease + heartbeat; stale detection on every operation | [`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py), [`bin/src/anvil/claims/stale.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py) |
+| Claims manager | Atomic lease + heartbeat; stale detection at coordination entry points | [`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py), [`bin/src/anvil/claims/stale.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py) |
 | Planning engine | Template-first PRD parser; deterministic behavioural-readiness assessor; optional LLM task generation; deterministic six-dim scorer | [`bin/src/anvil/planning/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/planning) |
 | Context engine | Renders work packets (markdown + JSON) from canonical state, including relevant typed PRD assumptions | [`bin/src/anvil/context/packets.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) |
 | Review engine | Pure transition-gate functions (readiness, evidence) | [`bin/src/anvil/review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py) |
@@ -159,8 +159,8 @@ The two iron rules of the layering:
 
 1. **CLI is the one-and-only mutator.** Hooks shell out to the CLI; the MCP
    server opens a `SqliteBackend` directly but only via the same engine
-   functions the CLI uses. Skills and agents do not write to `.anvil/`
-   directly — they call the CLI.
+   functions the CLI uses. Skills and agents do not write the resolved state
+   directory directly — they call the CLI.
 2. **Transitions are pure.** Every status change is a function from
    `(entity, context) -> new entity`. Persisting the result is the backend's
    job, not the transition's. This is what makes the JSONL replay possible.
@@ -171,15 +171,13 @@ The two iron rules of the layering:
 
 The full type system lives in
 [`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)
-— **35 Pydantic v2 classes** total (13 enums + 22 models). Every field is
-validated at every transition (`extra="forbid"`,
-`validate_assignment=True`); all timestamps are UTC-required. The tables
-below cover the core set; the newer `TaskType` / `ProofKind` enums and the
-proof models (`CommandProof`, `DiffProof`, `LinkProof`, `AssertionProof`,
-`ProofRequirement`), `EventRange`, `AcceptanceProof`, and `EventDraft` are
-not yet tabled.
+— Pydantic v2 models and enums validated at every transition
+(`extra="forbid"`, `validate_assignment=True`); all timestamps are
+UTC-required. The tables below intentionally summarize the core set. The
+generated CLI/MCP schemas and the source model file are authoritative for the
+complete public shape.
 
-### Enums (11)
+### Core enums
 
 | Enum | Values | Purpose |
 |---|---|---|
@@ -195,14 +193,14 @@ not yet tabled.
 | `SyncState` | in_sync, local_ahead, remote_ahead, conflict, external_deleted, remote_unknown | Per-mapping conflict / health label |
 | `ConflictResolutionStrategy` | local_wins, remote_wins, prompt, manual_merge | How to resolve a divergence |
 
-### Embedded value objects (2)
+### Selected embedded value objects
 
 | Model | Purpose |
 |---|---|
 | `Score` | Six-dimension scoring on a Task: complexity, parallelizability, context_load, blast_radius, review_risk, agent_suitability (each 1-5 or null) |
 | `Verification` | Embedded on Task: `commands`, `manual_steps`, `required_evidence` — the contract the evidence gate checks against |
 
-### Top-level entities (12)
+### Core top-level entities
 
 | Entity | Purpose |
 |---|---|
@@ -267,8 +265,9 @@ stateDiagram-v2
     note right of claimed
         Claim row holds lease +
         heartbeat. Stale leases
-        are reaped on every
-        mutating CLI / MCP call.
+        are reaped by queue,
+        claim, renewal, progress,
+        submission, and summary paths.
     end note
 
     note right of needs_review
@@ -334,8 +333,8 @@ Every state mutation appends one `Event` row to two places:
 
 The replay guarantee is the central audit property of the engine: **replaying
 `events.jsonl` from an empty database must reconstruct canonical SQLite state
-exactly**. This is what makes the engine safe to back up by copying
-`.anvil/` and what makes a corrupted database recoverable.
+exactly**. This is what makes the engine safe to back up by copying the
+resolved state directory and what makes a corrupted database recoverable.
 
 A native `anvil replay --from-events <jsonl> --into <db>` subcommand
 **ships today**
@@ -348,21 +347,19 @@ S3 push/pull of `events.jsonl` plus a replay-based restore. Only the
 `anvil snapshot` subcommand (item P9B-7, a local sqlite `.backup`
 wrapper — see
 [`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot-replay))
-remains open. Copying `.anvil/` wholesale stays as the fully-local
+remains open. Copying the resolved state directory wholesale stays as the fully-local
 fallback; the replay guarantee makes that safe and minimal:
 
 ```bash
 # Back up before destructive work.
-cp -r .anvil /backup/location/anvil-$(date +%Y-%m-%d)
-
-# Recover from a corrupted state.db by restoring the backup.
-rm -f .anvil/state.db .anvil/state.db-wal .anvil/state.db-shm
-cp /backup/location/anvil-YYYY-MM-DD/state.db .anvil/state.db
+ANVIL_STATE_DIR="$(anvil status --path-only)"
+cp -R "$ANVIL_STATE_DIR" "/backup/location/anvil-$(date +%Y-%m-%d)"
 ```
 
-`events.jsonl` is the durable audit log even without replay tooling —
-commit it to git alongside the repo and you have a distributed audit
-trail recoverable from any clone.
+`events.jsonl` is the durable audit log even without replay tooling. In the
+opt-in in-repo layout it may be committed alongside the repository; with the
+default HOME workspace, back it up with the rest of the resolved state
+directory or use `anvil backup`.
 
 Event ids are assigned inside the lock, not before it, to eliminate a
 read-before-lock race surfaced in PR #41 (Critic-3). The `Event.id`
@@ -373,11 +370,13 @@ assignment to the backend's `apply_event` method.
 
 ## Storage layout
 
-`anvil init` scaffolds this layout inside the user's project root
-(not inside the plugin):
+`anvil init` scaffolds this layout in the resolved state directory (not inside
+the plugin). By default that is a per-project HOME workspace shared by every
+Git worktree; `ANVIL_STATE_LAYOUT=local` opts into the legacy in-repo layout,
+and `ANVIL_ROOT` supplies an explicit root:
 
 ```text
-<user-project>/.anvil/
+<resolved-state-dir>/
 ├── config.yaml         # project-level config (sync providers, lease defaults, ...)
 ├── state.db            # SQLite — the canonical state for ALL PRDs (WAL mode)
 ├── events.jsonl        # append-only audit / event log for ALL PRDs (replay source)
@@ -389,22 +388,21 @@ assignment to the backend's `apply_event` method.
 ```
 
 One state.db and one events.jsonl hold **every** PRD's rows, partitioned by
-`prd_id`; there is no per-PRD database. The default PRD keeps its source at the
-bare `.anvil/prd.md`; each named release PRD has a portable markdown source
-under `.anvil/prds/` (resolved by `prd_source_path()` —
+`prd_id`; there is no per-PRD database. The default PRD keeps its source at
+`<resolved-state-dir>/prd.md`; each named release PRD has a portable markdown
+source under `<resolved-state-dir>/prds/` (resolved by `prd_source_path()` —
 [`cli/_helpers.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/_helpers.py)). Re-parsing one PRD
 replaces only that PRD's rows and leaves the others untouched.
 
 A `snapshots/` subdirectory was originally planned (and is shown in the v0
 spec) but the `anvil snapshot` subcommand has not yet shipped — see
-[Roadmap → v2.1 → snapshot subcommand](roadmap.md#theme-snapshot-replay).
+[Roadmap → Snapshot / replay](roadmap.md#theme-snapshot-replay).
 Backups today are done with `anvil backup` / `anvil restore` (S3 push/pull
-of `events.jsonl` plus a replay-based restore) or by copying `.anvil/`
-wholesale (`cp -R`); the replay guarantee makes that safe.
-
-`hooks` and the CLI alike resolve `STATE_DIR` relative to
-`${CLAUDE_PROJECT_DIR:-$PWD}/.anvil` so every agent invocation,
-regardless of cwd at call time, addresses the same project's state.
+of `events.jsonl` plus a replay-based restore) or by copying the resolved state
+directory wholesale (`cp -R`); the replay guarantee makes that safe. Run
+`anvil status --path-only` before filesystem operations; see
+[Where anvil stores its state](how-to/state-location.md) for the complete
+resolution order shared by CLI, hooks, and MCP.
 
 ---
 
@@ -425,23 +423,23 @@ mechanisms layered together:
    A renewal requires new hook-observed file progress or a pending verified
    claim-bound attestation. Accepted attestations are generation-bound and
    consumed once; audit-only free-text progress does not extend a lease.
-3. **Stale-claim reaping.** Every mutating CLI command and every mutating
-   MCP tool calls
+3. **Stale-claim reaping.** Coordination entry points call
    [`detect_and_release_stale()`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py)
-   at entry. Leases past their expiry are auto-released with
-   `release_reason="stale"`; the audit event preserves the original
-   claimant. Read-only listers skip reaping for latency.
+   before offering, claiming, renewing, progressing, submitting, or reporting
+   coordinated state. Leases past their expiry are auto-released with
+   `release_reason="stale"`; the audit event preserves the original claimant.
+   Read-only listers skip reaping for latency.
 4. **Conflict groups.** A `ConflictGroup` row names a set of tasks whose
    `expected_files` overlap. `anvil next` and the
    `get_next_task` MCP tool refuse to surface a task whose conflict group
    already has an active claim — preventing two agents from being routed
    to overlapping work even when neither task is itself claimed.
 
-The PreToolUse `check-claim.sh` hook adds a final layer of safety at the
-Claude Code editor surface: before an Edit / Write / NotebookEdit fires,
-the hook asks the CLI whether the current actor holds a claim covering the
-target file, and surfaces a warning (non-blocking, per the hook contract)
-when no claim is held.
+The shell-free PreToolUse `hook dispatch check-claim` path adds a final layer
+of safety at the Claude Code editor surface: before an Edit / Write /
+NotebookEdit fires, the dispatcher asks the CLI whether the current actor
+holds a claim covering the target file and surfaces a warning (non-blocking,
+per the hook contract) when no claim is held.
 
 ---
 
@@ -454,16 +452,22 @@ Full reference is available at
 in [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py):
 
 - Lifecycle setup and inspection: `init`, `status`, `describe`, `doctor`
-- PRD authoring: `prd parse`, `prd assess`, `prd review` (sub-app)
+- PRD authoring: `prd list`, `prd source-name`, `prd show`, `prd parse`,
+  `prd assess`, `prd find-decisions`, `prd resolve-decision`, `prd review`
 - Planning: `plan`, `score`, `assumptions`, `expand`, `deps`, `review tasks` (sub-app)
 - Listing / inspecting: `list`, `show`, `scan`, `drift`, `graph`, `conflicts`
-- Claiming: `claim`, `release`, `renew`, `next`, `claim-guard`
-- Working: `packet`, `submit`, `apply`, `gate-check`, `run-workflow`, `proof` (sub-app — `proof verify`)
+- Provider reads: `project snapshot`, `prd show` (bounded JSON-only contracts)
+- Task claiming and delivery: `next`, `claim`, `release`, `renew`, `progress`,
+  `packet`, `submit`, `apply`, `claim-guard`, `gate-check`
+- Coordinator bundles: `bundle create`, `list`, `show`, `status`, `claim`,
+  `renew`, `release`, `packet`, `progress`, `complete`, `review`,
+  `finalize-review`, `checkpoint`, `reconcile`, `supersede`
+- Workflows and proofs: `run-workflow`, `merge-check`, `proof verify`
 - Notifications: `notify-digest`
 - Harness config: `mcp-config`, `install`
 - Backup / restore: `backup`, `restore`
 - Migration / replay: `migrate state`, `migrate-events`, `migrate-workspace`, `replay`
-- Hooks: `hook ...` (sub-app — called by `hooks/*.sh`)
+- Hooks: `hook ...` (sub-app — the active manifest uses `hook dispatch`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
 ### MCP tools (36)
@@ -476,37 +480,22 @@ on the wire; the 12 planning-tagged tools (`parse_prd`, `assess_prd`, `plan_task
 `score_tasks`, ...) require `ANVIL_MCP_PLANNING=1` (`mcp_server.py`
 tag-disables them at startup).
 
-| # | Tool | Mutates | Reaps stale |
-|---|---|---|---|
-| 1 | `get_project_summary` | no | yes |
-| 2 | `get_project_status` | no | no |
-| 3 | `list_tasks` | no | no |
-| 4 | `get_task` | no | no |
-| 5 | `get_next_task` | yes (stale-claim sweep only) | yes |
-| 6 | `get_dependency_graph` | no | no |
-| 7 | `claim_task` | yes | yes |
-| 8 | `release_task` | yes | yes |
-| 9 | `renew_claim` | yes | yes |
-| 10 | `update_task_status` | yes | yes |
-| 11 | `submit_progress` | yes (audit-only) | yes |
-| 12 | `submit_completion_evidence` | yes | yes |
-| 13 | `generate_work_packet` | no | no |
-| 14 | `check_conflicts` | no | no |
-| 15 | `edit_dependencies` | yes | no |
-| 16 | `init_project` | yes | no |
-| 17 | `parse_prd` | yes | no |
-| 18 | `review_prd` | yes | no |
-| 19 | `plan_tasks` | yes | no |
-| 20 | `score_tasks` | yes | no |
-| 21 | `review_tasks` | yes | no |
-| 22 | `apply_review_decision` | yes | no |
-| 23 | `find_decisions` | no | no |
-| 24 | `describe_surface` | no | no |
+- **Default execution surface (24):** task/project reads, claim/evidence
+  mutation, dependency/conflict reads, and the complete coordinator-bundle
+  execution/review/reconciliation loop.
+- **Planning surface (12):** `init_project`, `parse_prd`, `assess_prd`,
+  `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+  `apply_review_decision`, `edit_dependencies`, `find_decisions`,
+  `describe_surface`, and `create_bundle`.
+- **Stale-sweep entry points:** `get_next_task`, `claim_task`, `claim_bundle`,
+  `release_task`, `renew_claim`, `submit_progress`,
+  `submit_completion_evidence`, `update_task_status`, and
+  `get_project_summary`.
 
 Sync tools (`sync_run`, `sync_health`, `sync_status`, `sync_reconcile`) are
 not yet on the MCP surface — agents that want sync today shell out via Bash
 to `anvil sync`. See
-[Roadmap → v2.1 → MCP sync tools](roadmap.md#theme-mcp-surface-sync-tools).
+[Roadmap → MCP sync tools](roadmap.md#theme-mcp-surface-sync-tools).
 
 ### Hooks (5)
 
@@ -591,28 +580,14 @@ points at a file you can grep.
 
 This document describes the current shipped behaviour only. The full backlog of
 planned-but-not-yet-shipped items is in [`roadmap.md`](roadmap.md);
-the high-level buckets:
+the notable open themes:
 
-- **v2.0 — sync providers + immediate-apply resolution.**
-  - `LinearIssuesProvider` (GraphQL transport).
-  - `MondayBoardsProvider` (REST + JSON, people-columns).
-  - Webhook-based sync as an alternative to polling (spec-first).
-  - `*_applied` conflict-resolution variants — wiring the
-    `remote_wins_applied` / `local_wins_applied` deferrals at
-    `cli/sync.py:1054, :1068`.
-  - Provider config schemas in `config.yaml` (per-provider settings).
-- **v2.1 — follow-on capability.**
-  - `JiraIssuesProvider` (per-project workflow discovery).
-  - `GitHubProjectsProvider` (Projects v2 board surface).
-  - `anvil snapshot` subcommand (`sqlite3 .backup` wrapper, retention).
-  - MCP sync surface — four new tools (`sync_run`, `sync_health`,
-    `sync_status`, `sync_reconcile`).
-- **v2.x — hygiene.**
-  - Composition deduplication across the three doc/state agents.
-  - Skill subdirectory extraction (`references/`, `examples/`, `scripts/`).
-  - Hook concurrency hardening (`flock` on shared append targets).
-- **Unscheduled.**
-  - Config-driven matcher framework for `capture-evidence.sh`.
+- additional workflow-aware sync providers and provider-specific configuration;
+- webhook-based sync and remaining conflict-resolution wiring;
+- the local SQLite `anvil snapshot` backup/retention command (distinct from the
+  shipped read-only `anvil project snapshot` provider operation);
+- an MCP sync surface; and
+- focused agent, skill, hook, and documentation hygiene.
 
 Each item carries a backlog id (`P9B-N` from the Phase 9 backlog or
 `P11-XX-XN` from the Phase 11 backlog) preserved across audits — see
