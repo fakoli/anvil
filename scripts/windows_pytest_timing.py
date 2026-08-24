@@ -789,6 +789,34 @@ def _junit_evidence(path: Path) -> tuple[dict[str, int], str]:
         for key in ("tests", "failures", "errors", "skipped")
     }
     result["passed"] = result["tests"] - result["failures"] - result["errors"] - result["skipped"]
+    testcases = list(root.iter("testcase"))
+    if len(testcases) != result["tests"]:
+        raise ValueError("junit_testcase_count_mismatch")
+    observed = {"tests": len(testcases), "failures": 0, "errors": 0, "skipped": 0}
+    for case in testcases:
+        outcomes = [
+            child.tag.rsplit("}", 1)[-1]
+            for child in case
+            if child.tag.rsplit("}", 1)[-1] in {"failure", "error", "skipped"}
+        ]
+        if len(outcomes) > 1:
+            raise ValueError("junit_testcase_has_multiple_outcomes")
+        if outcomes:
+            outcome_field = {
+                "failure": "failures",
+                "error": "errors",
+                "skipped": "skipped",
+            }[outcomes[0]]
+            observed[outcome_field] += 1
+    observed["passed"] = (
+        observed["tests"]
+        - observed["failures"]
+        - observed["errors"]
+        - observed["skipped"]
+    )
+    if observed != result:
+        raise ValueError("junit_aggregate_outcome_mismatch")
+
     testcase_ids = [
         "\x1f".join(
             (
@@ -797,14 +825,27 @@ def _junit_evidence(path: Path) -> tuple[dict[str, int], str]:
                 case.get("name", ""),
             )
         )
-        for case in root.iter("testcase")
+        for case in testcases
     ]
-    if len(testcase_ids) != result["tests"]:
-        raise ValueError("junit_testcase_count_mismatch")
     if len(set(testcase_ids)) != len(testcase_ids):
         raise ValueError("junit_testcase_identity_duplicate")
     testcase_ids.sort()
     return result, _sha256_bytes(("\n".join(testcase_ids) + "\n").encode("utf-8"))
+
+
+def _collection_junit_testcase_ids_sha256(nodes: Sequence[str]) -> str:
+    testcase_ids: list[str] = []
+    for node in nodes:
+        parts = node.replace("\\", "/").split("::")
+        if len(parts) < 2 or not parts[0].endswith(".py"):
+            raise ValueError("collection_nodeid_not_junit_compatible")
+        module = parts[0][:-3].replace("/", ".")
+        classname = ".".join((module, *parts[1:-1]))
+        testcase_ids.append("\x1f".join(("", classname, parts[-1])))
+    if len(set(testcase_ids)) != len(testcase_ids):
+        raise ValueError("collection_junit_identity_duplicate")
+    testcase_ids.sort()
+    return _sha256_bytes(("\n".join(testcase_ids) + "\n").encode("utf-8"))
 
 
 def _junit_counts_pass(counts: dict[str, int] | None, expected: int) -> bool:
@@ -1068,6 +1109,10 @@ def _run_one(
     )
     count_matches = bool(counts and counts["tests"] == collection["count"])
     junit_counts_pass = _junit_counts_pass(counts, collection["count"])
+    junit_identity_matches_collection = bool(
+        testcase_ids_sha256
+        and testcase_ids_sha256 == collection.get("junit_testcase_ids_sha256")
+    )
     timing_valid = bool(
         before_error is None
         and repository_after_error is None
@@ -1078,6 +1123,7 @@ def _run_one(
         and junit_error is None
         and count_matches
         and junit_counts_pass
+        and junit_identity_matches_collection
     )
     return {
         "sequence": sequence,
@@ -1097,6 +1143,7 @@ def _run_one(
         "junit_counts": counts,
         "junit_counts_pass": junit_counts_pass,
         "junit_testcase_ids_sha256": testcase_ids_sha256,
+        "junit_identity_matches_collection": junit_identity_matches_collection,
         "collection_count_matches": count_matches,
         "control_before_fingerprint": control_before["comparison_fingerprint_sha256"],
         "control_after_fingerprint": control_after["comparison_fingerprint_sha256"],
@@ -1186,6 +1233,7 @@ def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
             "command": ["python", "-c", "<fixed-probe-collection>"],
             "count": 1,
             "node_ids_sha256": _sha256_bytes(b"probe::test\n"),
+            "junit_testcase_ids_sha256": _sha256_bytes(b"probe::test\n"),
             "source_files_count": 1,
             "source_files_sha256": _sha256_bytes(b"probe\n"),
             "error": None,
@@ -1238,6 +1286,7 @@ def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
     error = None
     source_files: list[str] = []
     source_files_sha256: str | None = None
+    junit_testcase_ids_sha256: str | None = None
     node_ids_sha256 = _sha256_bytes(("\n".join(nodes) + "\n").encode("utf-8"))
     if completed.returncode != 0:
         error = "CollectionNonzero"
@@ -1249,12 +1298,14 @@ def _collect(config: Configuration, identity: GitIdentity) -> dict[str, Any]:
                 nodes, tracked_files
             )
             node_ids_sha256 = _validate_timing_collection(nodes, source_files)
+            junit_testcase_ids_sha256 = _collection_junit_testcase_ids_sha256(nodes)
         except Exception as exc:
             error = _safe_error(exc)
     return {
         "command": public_command,
         "count": len(nodes),
         "node_ids_sha256": node_ids_sha256,
+        "junit_testcase_ids_sha256": junit_testcase_ids_sha256,
         "expected_count": TIMING_EXPECTED_NODE_COUNT,
         "expected_node_ids_sha256": TIMING_EXPECTED_NODE_IDS_SHA256,
         "expected_source_files": list(TIMING_TEST_TARGETS),
@@ -1356,12 +1407,23 @@ def _finish_artifact(
         and all(run.get("junit_testcase_ids_sha256") is not None for run in runs)
         and len(testcase_hashes) == 1
     )
-    expected_count = artifact.get("collection", {}).get("count", 0)
+    expected_count = (artifact.get("collection") or {}).get("count", 0)
     junit_counts_pass = bool(
         expected_count > 0
         and runs
         and all(
             _junit_counts_pass(run.get("junit_counts"), expected_count)
+            for run in runs
+        )
+    )
+    collection_junit_digest = (artifact.get("collection") or {}).get(
+        "junit_testcase_ids_sha256"
+    )
+    junit_identities_match_collection = bool(
+        collection_junit_digest
+        and runs
+        and all(
+            run.get("junit_testcase_ids_sha256") == collection_junit_digest
             for run in runs
         )
     )
@@ -1380,6 +1442,7 @@ def _finish_artifact(
         and junit_counts_identical
         and junit_testcase_ids_identical
         and junit_counts_pass
+        and junit_identities_match_collection
         and collection_valid
         and artifact.get("repository_final_error") is None
     )
@@ -1409,6 +1472,8 @@ def _finish_artifact(
         reasons.append("junit_testcase_ids_differ_across_runs")
     if not junit_counts_pass:
         reasons.append("junit_counts_do_not_show_all_tests_passed")
+    if not junit_identities_match_collection:
+        reasons.append("junit_identities_differ_from_collection")
     if not collection_valid:
         reasons.append("collection_invalid")
     if artifact.get("repository_final_error") is not None:
@@ -1432,6 +1497,7 @@ def _finish_artifact(
         "junit_counts_identical_across_runs": junit_counts_identical,
         "junit_testcase_ids_identical_across_runs": junit_testcase_ids_identical,
         "junit_counts_pass": junit_counts_pass,
+        "junit_identities_match_collection": junit_identities_match_collection,
         "collection_valid": collection_valid,
         "insufficient_reasons": reasons,
         "parallel_seconds": parallel_distribution,
@@ -1521,6 +1587,7 @@ def _execute_protocol(
                 ],
                 "count": 0,
                 "node_ids_sha256": None,
+                "junit_testcase_ids_sha256": None,
                 "source_files_count": 0,
                 "source_files_sha256": None,
                 "error": _safe_error(exc),

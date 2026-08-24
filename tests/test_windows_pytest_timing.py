@@ -105,6 +105,7 @@ def _qualified_artifact(
             "error": None,
             "count": 10,
             "node_ids_sha256": "collected-nodes",
+            "junit_testcase_ids_sha256": "same-workload",
             "source_files_sha256": "tracked-sources",
         },
         "runs": runs,
@@ -639,6 +640,40 @@ def test_junit_evidence_rejects_duplicate_testcase_identities(tmp_path: Path) ->
         timing._junit_evidence(junit)
 
 
+@pytest.mark.parametrize("outcome", ["failure", "error", "skipped"])
+def test_junit_evidence_rejects_false_success_aggregate(
+    tmp_path: Path, outcome: str
+) -> None:
+    junit = tmp_path / f"hidden-{outcome}.xml"
+    junit.write_text(
+        '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase file="tests/test_x.py" classname="tests.test_x" name="test_x">'
+        f"<{outcome} />"
+        "</testcase></testsuite>",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="junit_aggregate_outcome_mismatch"):
+        timing._junit_evidence(junit)
+
+
+def test_junit_identity_digest_matches_collection_nodeids(tmp_path: Path) -> None:
+    junit = tmp_path / "identity.xml"
+    junit.write_text(
+        '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase classname="tests.test_x.TestX" name="test_case[param]" />'
+        "</testsuite>",
+        encoding="utf-8",
+    )
+
+    _, junit_digest = timing._junit_evidence(junit)
+    collection_digest = timing._collection_junit_testcase_ids_sha256(
+        ["tests/test_x.py::TestX::test_case[param]"]
+    )
+
+    assert junit_digest == collection_digest
+
+
 def test_identical_skipped_junit_counts_cannot_qualify(tmp_path: Path) -> None:
     artifact, config = _qualified_artifact(tmp_path)
     skipped_counts = {
@@ -676,6 +711,19 @@ def test_equal_counts_with_different_testcase_ids_cannot_qualify(
 
     assert timing._finish_artifact(config, artifact) == 1
     assert artifact["result"]["junit_testcase_ids_identical_across_runs"] is False
+    assert artifact["result"]["affected_slice_median_budget_met"] is None
+
+
+def test_consistently_different_junit_identities_cannot_qualify(
+    tmp_path: Path,
+) -> None:
+    artifact, config = _qualified_artifact(tmp_path)
+    for run in artifact["runs"]:
+        run["junit_testcase_ids_sha256"] = "different-workload"
+
+    assert timing._finish_artifact(config, artifact) == 1
+    assert artifact["result"]["junit_testcase_ids_identical_across_runs"] is True
+    assert artifact["result"]["junit_identities_match_collection"] is False
     assert artifact["result"]["affected_slice_median_budget_met"] is None
 
 
