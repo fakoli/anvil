@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "windows_pytest_timing.py"
 SPEC = importlib.util.spec_from_file_location("windows_pytest_timing", HELPER)

@@ -20,13 +20,13 @@ import sys
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable, Sequence
 from contextlib import ExitStack
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
-
+from typing import Any
 
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 ERROR_ALREADY_EXISTS = 183
@@ -122,7 +122,9 @@ def validate_no_reparse_components(path: Path) -> None:
                 raise ValueError("path_component_is_reparse_point")
 
 
-def validate_child_path(repo: Path, candidate: Path, *, direct_parent: Path | None = None) -> Path:
+def validate_child_path(
+    repo: Path, candidate: Path, *, direct_parent: Path | None = None
+) -> Path:
     repo_absolute = Path(os.path.abspath(repo))
     candidate_absolute = Path(os.path.abspath(candidate))
     try:
@@ -131,7 +133,9 @@ def validate_child_path(repo: Path, candidate: Path, *, direct_parent: Path | No
         raise ValueError("path_outside_repository") from exc
     if common != repo_absolute:
         raise ValueError("path_outside_repository")
-    if direct_parent is not None and candidate_absolute.parent != Path(os.path.abspath(direct_parent)):
+    if direct_parent is not None and candidate_absolute.parent != Path(
+        os.path.abspath(direct_parent)
+    ):
         raise ValueError("output_must_be_direct_artifacts_child")
     validate_no_reparse_components(candidate_absolute)
     return candidate_absolute
@@ -485,7 +489,9 @@ class WindowsJob:
             raise ctypes.WinError(ctypes.get_last_error())
 
     def assign(self, process: subprocess.Popen[bytes]) -> None:
-        if not self.kernel32.AssignProcessToJobObject(self.handle, wintypes.HANDLE(process._handle)):
+        if not self.kernel32.AssignProcessToJobObject(
+            self.handle, wintypes.HANDLE(process._handle)
+        ):
             raise ctypes.WinError(ctypes.get_last_error())
 
     def active_processes(self) -> int:
@@ -567,7 +573,10 @@ def _power_source() -> tuple[str, bool]:
     status = SYSTEM_POWER_STATUS()
     if not ctypes.WinDLL("kernel32").GetSystemPowerStatus(ctypes.byref(status)):
         return "unobservable", False
-    return {0: "battery", 1: "ac"}.get(status.ACLineStatus, "unknown"), status.ACLineStatus in {0, 1}
+    return (
+        {0: "battery", 1: "ac"}.get(status.ACLineStatus, "unknown"),
+        status.ACLineStatus in {0, 1},
+    )
 
 
 def _normalize_lines(text: str) -> str:
@@ -1054,8 +1063,16 @@ def _run_one(
             process_result["process_error"] = _safe_error(exc)
     control_after = control_snapshot()
 
-    stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
-    stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+    stdout = (
+        stdout_path.read_text(encoding="utf-8", errors="replace")
+        if stdout_path.exists()
+        else ""
+    )
+    stderr = (
+        stderr_path.read_text(encoding="utf-8", errors="replace")
+        if stderr_path.exists()
+        else ""
+    )
     raw = (
         f"command: {' '.join(public)}\n"
         f"exit_code: {process_result['exit_code']}\n"
@@ -1163,14 +1180,27 @@ def _run_one(
 
 def _metadata_probe(config: Configuration) -> dict[str, Any]:
     code = """
-import importlib.metadata as m,json,platform
+import importlib.metadata as m
+import json
+import platform
+
 eps=m.entry_points(group='pytest11')
 plugins={}
 for ep in eps:
     dist=getattr(ep,'dist',None)
     if dist:
         plugins[dist.metadata['Name']] = dist.version
-print(json.dumps({'python':platform.python_version(),'pytest':m.version('pytest'),'pytest_xdist':m.version('pytest-xdist'),'anvil_state':m.version('anvil-state'),'pytest11_plugin_distributions':[{'name':name,'version':plugins[name]} for name in sorted(plugins,key=str.lower)]}))
+payload = {
+    'python': platform.python_version(),
+    'pytest': m.version('pytest'),
+    'pytest_xdist': m.version('pytest-xdist'),
+    'anvil_state': m.version('anvil-state'),
+    'pytest11_plugin_distributions': [
+        {'name': name, 'version': plugins[name]}
+        for name in sorted(plugins, key=str.lower)
+    ],
+}
+print(json.dumps(payload))
 """
     try:
         output = _run_text(
@@ -1323,7 +1353,19 @@ def _host_metadata(label: str) -> dict[str, Any]:
 $c=Get-CimInstance Win32_ComputerSystem
 $p=Get-CimInstance Win32_Processor|Select-Object -First 1
 $o=Get-CimInstance Win32_OperatingSystem
-[ordered]@{ram_bytes=[int64]$c.TotalPhysicalMemory;cpu=[ordered]@{name=$p.Name.Trim();physical_cores=[int]$p.NumberOfCores;logical_processors=[int]$p.NumberOfLogicalProcessors};os=[ordered]@{caption=$o.Caption;version=$o.Version;build_number=$o.BuildNumber}}|ConvertTo-Json -Compress -Depth 4
+[ordered]@{
+  ram_bytes=[int64]$c.TotalPhysicalMemory
+  cpu=[ordered]@{
+    name=$p.Name.Trim()
+    physical_cores=[int]$p.NumberOfCores
+    logical_processors=[int]$p.NumberOfLogicalProcessors
+  }
+  os=[ordered]@{
+    caption=$o.Caption
+    version=$o.Version
+    build_number=$o.BuildNumber
+  }
+}|ConvertTo-Json -Compress -Depth 4
 """
         details = json.loads(
             subprocess.run(
@@ -1365,10 +1407,16 @@ def _artifact_base(config: Configuration, identity: GitIdentity) -> dict[str, An
             "pytest_plugin_metadata": (
                 "locked_exact_distribution_names_and_versions_only"
             ),
-            "control_observation": "comparable_snapshots_immediately_before_and_after_each_run",
-            "defender_exclusions": "record_when_visible_otherwise_redacted_context_not_elevation_gate",
+            "control_observation": (
+                "comparable_snapshots_immediately_before_and_after_each_run"
+            ),
+            "defender_exclusions": (
+                "record_when_visible_otherwise_redacted_context_not_elevation_gate"
+            ),
             "raw_logs": f"{config.log_relative_root}/",
-            "process_containment": "windows_job_kill_on_close_gated_before_assignment_zero_active_verified",
+            "process_containment": (
+                "windows_job_kill_on_close_gated_before_assignment_zero_active_verified"
+            ),
             "probe": config.probe,
         },
         "versions": None,
