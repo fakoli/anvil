@@ -17,14 +17,15 @@ For the Git-heavy fixture contract changed by the Windows performance work:
 uv run --project bin pytest tests/test_git_ops.py tests/test_reconciliation.py -n 16 -q
 ```
 
-The complete suite and CI run in parallel. A full serial run is not a routine
-project gate; it is only a comparator in an explicitly scoped performance
-measurement.
+The complete suite runs in parallel locally and in Linux CI. Windows CI uses
+separate focused contracts instead of repeating the complete suite. No
+maintained workflow requires or schedules a full serial run; the only broad
+serial result cited here is the revision-bound historical comparison below.
 
 For a faster local feedback loop that skips tests marked `slow`:
 
 ```powershell
-uv run --project bin pytest -m "not slow"
+uv run --project bin pytest -n auto -m "not slow"
 ```
 
 The fast command is only a local test selection. It does not reduce the
@@ -38,8 +39,11 @@ four-test contract:
 uv run --project bin pytest tests/test_cli.py::TestSampleSourceBindingContract -q
 ```
 
-This focused contract is the recurring Windows CI gate. Changes to lifecycle,
-Git, replay, schema, or platform behavior still require the complete suite.
+This focused contract is one recurring Windows CI gate. Windows CI also runs
+the 167-node Git fixture contract at 16 workers and the timing-harness mechanics
+tests as separate steps with isolated temporary roots; it does not run the
+optional timed measurement. Changes to lifecycle, Git, replay, schema, or
+platform behavior still require the complete suite.
 
 For the fixed native-Windows parallel regression measurement of the Git-heavy
 fixture contract, start from a clean, committed worktree, choose a public-safe
