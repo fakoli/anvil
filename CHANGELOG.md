@@ -33,7 +33,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
-- **Revision-bound PRD approval and canonical source lineage (#180).** Parsed
+- **Revision-bound PRD approval and canonical source lineage
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Parsed
   and revised PRDs now persist a domain-separated canonical material digest and
   exact content-event identity. Review and approval bind that revision, source,
   material, and content event; live append, Git replay, CLI, and MCP refuse
@@ -44,7 +45,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   conservatively to `draft`, requiring explicit parse/review/approve. This adds
   schema version 21; the command and envelope surface remains API version 14.
 
-- **Transactional task and bundle claim Git wiring (#180).** Claims now freeze
+- **Transactional task and bundle claim Git wiring
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Claims now freeze
   and persist the selected local base, exact claim-start ref and commit, branch,
   canonical repository root, and shared or isolated target before Git mutation.
   The engine revalidates those observations under one cross-process claim lock;
@@ -57,20 +59,24 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   owns the indistinguishable ref. Historical claims keep nullable Git metadata. This adds
   schema version 20 and advances the public API contract to version 11.
 
-- **PRD-scoped decision discovery and resolution (#180).** CLI decision reads
+- **PRD-scoped decision discovery and resolution
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** CLI decision reads
   and writes now resolve an explicit `--prd`, `ANVIL_PRD`, or the unambiguous
   default/single partition; `--file` selects content without changing that
   state scope. MCP discovery accepts the same PRD selector, and CLI/MCP JSON,
   human guidance, continuation argv, and audit events report the effective
   partition. This advances the public API contract to version 12.
 
-- **PRD-scoped task review (#180).** CLI and MCP task-review passes now resolve
+- **PRD-scoped task review
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** CLI and MCP
+  task-review passes now resolve
   one PRD by default and require an explicit `--all-prds` / `all_prds=true`
   opt-in for project-wide mutation. Drafted-to-reviewed, reviewed-to-ready, and
   durable risk-score confirmation all use the same reported partition scope.
   This advances the public API contract to version 13.
 
-- **PRD-scoped scoring and advisories (#180).** CLI and MCP scoring now resolve
+- **PRD-scoped scoring and advisories
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** CLI and MCP scoring now resolve
   one PRD by default and require explicit `--all-prds` / `all_prds=true` for a
   project-wide run. Scored and skipped counts, task-owner checks, recursive
   expansion queues, persisted confirmation state, and human/JSON/MCP output all
@@ -90,13 +96,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   enforce the same governor as CLI. This adds schema version 19 and advances the
   public API contract to version 10.
 
-- **Explicit lifecycle actor continuity (#180).** Claim, renewal, release,
+- **Explicit lifecycle actor continuity
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Claim, renewal, release,
   progress, submission, bundle, hook, work-packet, and MCP surfaces now carry
   one canonical actor identity with shell-safe continuation data. New actor
   identifiers are NFC-normalized and bounded, exact legacy owners remain
   addressable, normalized aliases cannot collide, and the local actor field is
   clearly identified as audit attribution rather than authentication.
-- **Claim-bound external progress attestations (#180).** Standalone Git-backed
+- **Claim-bound external progress attestations
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Standalone Git-backed
   claims now persist a generation and immutable repository/task/PRD context.
   CLI and MCP callers can submit bounded canonical commit or file attestations;
   the next renewal consumes one accepted attestation atomically and reports its
@@ -104,22 +112,26 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   evidence cannot extend a lease, and legacy/non-Git claims retain their prior
   renewal behavior. This introduced public API contract version 6 for the new
   CLI flag and MCP request/response fields.
-- **Claim-bound typed command-proof import (#180).** CLI and MCP evidence
+- **Claim-bound typed command-proof import
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** CLI and MCP evidence
   submission can now import bounded canonical command artifacts that bind exact
   command and output bytes to the active actor, claim generation, repository,
   working directory, task, and PRD revision. Mixed or stale batches fail before
   the single atomic evidence transition, legacy hook proofs remain supported,
   and descriptive `--output-file` content can no longer be mistaken for a typed
   proof. The public API contract advances to version 7.
-- **Atomic named-PRD dependency edits (#180).** CLI and MCP dependency batches
+- **Atomic named-PRD dependency edits
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** CLI and MCP dependency batches
   now select an explicit PRD, validate source ownership and the complete final
   graph, and persist every edit in one replay-safe event and transaction. The
   public API contract advances to version 8.
-- **Revision-bound PRD source provenance.** Parse and revision events now retain
+- **Revision-bound PRD source provenance
+  ([#192](https://github.com/fakoli/anvil/issues/192)).** Parse and revision events now retain
   exact bounded UTF-8 source bytes, digest, size, encoding, and revision across
   CLI, MCP, migration, and events-only replay. Legacy rows remain explicitly
   unavailable rather than receiving fabricated provenance; schema version is 18.
-- **Versioned provider reads.** JSON-only `anvil project snapshot` and
+- **Versioned provider reads
+  ([#178](https://github.com/fakoli/anvil/issues/178)).** JSON-only `anvil project snapshot` and
   `anvil prd show` expose bounded, non-mutating version-1 read contracts with
   packaged draft-2020-12 schemas, canonical fixtures, digest vectors, and a
   fail-closed Workbench hierarchy mapping. `anvil describe` now publishes the
@@ -129,18 +141,21 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
-- **Claim-isolated hook command capture (#180).** Hook-observed command proofs
+- **Claim-isolated hook command capture
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Hook-observed command proofs
   now require an explicit claim pin and retain digest-covered actor, generation,
   task, PRD, and repository attribution. Unscoped, stale, wrong-owner, or
   wrong-session captures stay in the orphan buffer instead of being inferred
   from the sole active claim or an actor-only match.
 
-- **Exact sample PRD source binding on Windows (#180).** `init --with-sample`
+- **Exact sample PRD source binding on Windows
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** `init --with-sample`
   now publishes the embedded PRD as canonical UTF-8 bytes, verifies the exact
   on-disk source before lifecycle approval, and keeps the first task claim from
   being refused solely because Windows translated LF newlines to CRLF.
 
-- **Transactional claim and decision recovery (#180).** Task and bundle claims
+- **Transactional claim and decision recovery
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Task and bundle claims
   now release state on cancellation as well as ordinary Git errors, absorbed
   submodules resolve their real worktree root, and the supported local `.anvil`
   layout is excluded from claim cleanliness checks without hiding unrelated
@@ -148,19 +163,22 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   a locked compare-and-swap source replacement and restores exact source bytes
   when the matching audit append is refused.
 
-- **Total, mutation-atomic planning contracts.** CLI and MCP PRD revisions keep
+- **Total, mutation-atomic planning contracts
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** CLI and MCP PRD revisions keep
   requirement identifiers structurally typed through diff construction, and
   scoring validates all six bounded dimensions for the entire request before
   appending any `task.scored` event. Incomplete mixed batches now fail with a
   bounded `score_incomplete` refusal and leave scores and event history intact;
   the strict planning/scoring mypy boundary is enforced in CI.
-- **Atomic canonical planning graphs.** CLI, MCP, sample, and scan planning now
+- **Atomic canonical planning graphs
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** CLI, MCP, sample, and scan planning now
   persist one validated canonical graph event and one SQLite transaction, so a
   later operation failure cannot leave a partial or transient raw graph in the
   audit log or projection. Graph batches bind the exact PRD revision, source
   digest, and Git causal content head they planned; stale local writers and
   complete graph lineages descended from losing Git branches fail closed.
-- **Crash-safe scan recovery.** Scan sessions now serialize across threads and
+- **Crash-safe scan recovery
+  ([#180](https://github.com/fakoli/anvil/issues/180)).** Scan sessions now serialize across threads and
   processes, reject competing recovery journals, and durably mark artifacts
   whose corresponding state commit succeeded before retiring recovery data.
   A retry therefore preserves authoritative PRD/scan artifacts after a crash or
