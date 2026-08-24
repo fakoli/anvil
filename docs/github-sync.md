@@ -364,5 +364,5 @@ and rollback notes.
 - [`mcp.md`](mcp.md) — MCP server (does not currently expose sync tools;
   agents call the CLI directly).
 - [`migrations.md`](migrations.md) — schema version history.
-- `specs/2026-05-24-anvil-v0.md` — canonical design spec
-  including the Phase 8 sync contract.
+- `specs/2026-05-24-anvil-v0.md` — historical v0 design record that includes
+  the original Phase 8 sync target; this page is the current sync reference.

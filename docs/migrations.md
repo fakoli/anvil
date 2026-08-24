@@ -372,6 +372,8 @@ a column's type, adding a NOT NULL with no default) requires:
    backend, and asserts the upgrade ran.
 5. Re-document in this file.
 
+### Replay audit
+
 The `events.jsonl` replay verifier is always available. It deliberately builds
 a scratch database and refuses to overwrite live state. Resolve the source log
 from the current state layout and choose an inspected, non-live destination:

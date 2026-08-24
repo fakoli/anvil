@@ -507,5 +507,5 @@ so interruption or refusal leaves either the complete plan or no graph mutation.
 - [`model-strategy.md`](model-strategy.md) — why agents default to specific tiers, the
   per-agent mapping, and override precedence.
 - [`prd-template.md`](prd-template.md) — the deterministic PRD format the parser expects.
-- `specs/2026-05-24-anvil-v0.md` — canonical design spec including the LLM
-  augmentation contract.
+- `specs/2026-05-24-anvil-v0.md` — historical v0 design record including the
+  original LLM augmentation target; this page is the current LLM reference.

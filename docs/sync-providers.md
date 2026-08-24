@@ -387,4 +387,5 @@ transient network).
 - `sync/registry.py` — registry mechanics + duplicate-registration
   guard.
 - `sync/errors.py` — exception hierarchy.
-- `specs/2026-05-24-anvil-v0.md` — canonical design spec.
+- `specs/2026-05-24-anvil-v0.md` — historical v0 design record; this page is
+  the current provider reference.
