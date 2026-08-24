@@ -312,9 +312,10 @@ cp -R "$STATE_DIR" "/backup/location/anvil-$(date +%Y-%m-%d)"
 ```
 
 That captures `state.db`, `events.jsonl`, `prd.md`, `config.yaml`, and any
-generated packets. Restore by copying back. Because `state.db` is in WAL
-mode, also capture the `*.wal` and `*.shm` sidecar files if the database
-is open at copy time — or shut down active sessions first.
+generated packets. Quiesce every Anvil writer before a file-level copy or
+restore, and preserve the complete state directory as one unit, including any
+`*.wal` and `*.shm` sidecars. Do not copy only the live database or discard its
+sidecars.
 
 The replay guarantee (see next question) means `events.jsonl` alone is
 enough to reconstruct `state.db`, so the audit log is the *minimum* you must
@@ -334,23 +335,25 @@ yet shipped; `anvil backup` / `restore` and the `anvil replay` command
 
 ### What if `state.db` gets corrupted?
 
-Restore from a backup of the state directory (safe to `cp -R` — see the
-previous question), or rebuild it directly from `events.jsonl` with the
-shipped `anvil replay` command. The fastest recovery path today:
+First quiesce every Anvil writer and preserve the complete resolved state
+directory for rollback and forensics. Restore from that backup with the
+supported `anvil restore` flow, or use the shipped `anvil replay` command to
+build a separate projection for inspection:
 
 ```bash
 STATE_DIR=$(anvil status --path-only)
-anvil replay --from-events "$STATE_DIR/events.jsonl" --into /tmp/state.db.rebuilt
-mv "$STATE_DIR/state.db" "$STATE_DIR/state.db.broken"   # keep the broken db for forensics
-rm -f "$STATE_DIR"/state.db-wal "$STATE_DIR"/state.db-shm
-mv /tmp/state.db.rebuilt "$STATE_DIR/state.db"
+anvil replay \
+  --from-events "$STATE_DIR/events.jsonl" \
+  --into "/safe/scratch/rebuilt-state.db"
 ```
 
 `anvil replay --from-events <path> --into <path>` reads every event from
-the source JSONL and replays it into a fresh SQLite database at `--into`
-(deleting and rebuilding that target from scratch). It refuses to target
-the live `state.db` directly, to prevent accidental data loss — which is
-why the example above rebuilds into a scratch path and swaps it in after.
+the source JSONL and replays it into a fresh SQLite database at `--into`. It
+refuses to target the live `state.db` directly. Inspect and compare that scratch
+projection; replay itself stops there. Replacing live state is a separate,
+explicitly authorized recovery operation that must keep writers quiesced and
+retain the complete original state directory as a verified rollback. See the
+[migration replay audit](migrations.md#replay-audit).
 
 The replay guarantee is the central audit property of the engine: replaying
 every event from `events.jsonl` against an empty database reconstructs
