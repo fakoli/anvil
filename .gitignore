@@ -23,6 +23,7 @@ packets/
 # Agent build scratch space — never commit
 .anvil-build/
 docs/plans/agent-*-status.md
+artifacts/windows-pytest-timing-logs/
 
 # MkDocs build output (docs site)
 site/

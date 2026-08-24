@@ -1,6 +1,7 @@
 """Tests for anvil.git_ops.branch and anvil.git_ops.worktree.
 
-Uses real git (tmp git init per test) — no mocking.
+Uses independent real Git repositories copied from an immutable session
+template; format-specific cases still initialize their own repositories.
 
 Coverage target: git_ops/ >= 85%.
 """
@@ -8,6 +9,8 @@ Coverage target: git_ops/ >= 85%.
 from __future__ import annotations
 
 import subprocess
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -39,34 +42,59 @@ from anvil.git_ops.worktree import (
 )
 
 # ---------------------------------------------------------------------------
-# Git repo fixture
+# Git repo fixture contract
 # ---------------------------------------------------------------------------
 
-
-def _init_git_repo(path: Path) -> Path:
-    """Initialise a git repo in *path* with one initial commit so HEAD exists."""
-    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.test"],
-        cwd=str(path), check=True, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test User"],
-        cwd=str(path), check=True, capture_output=True,
-    )
-    (path / "README.md").write_text("initial\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=str(path), check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial"],
-        cwd=str(path), check=True, capture_output=True,
-    )
-    return path
+GitRepoFactory = Callable[[Path], Path]
 
 
-@pytest.fixture
-def git_repo(tmp_path: Path) -> Path:
-    """A real git repository with one initial commit."""
-    return _init_git_repo(tmp_path / "repo")
+@pytest.fixture(autouse=True)
+def _allow_schema_probe_startup_under_parallel_windows_load(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Keep real schema probes reliable during the 16-worker Windows contract."""
+    if sys.platform != "win32" or not hasattr(request.config, "workerinput"):
+        return
+
+    from anvil.cli import _helpers
+
+    # Four virtual workers contend for each GitHub runner core.  The production
+    # two-second bound remains unchanged; only this Git-focused test module gets
+    # extra process-startup headroom while it exercises the real probe transport.
+    monkeypatch.setattr(_helpers, "SCHEMA_PROBE_TIMEOUT_SECONDS", 10.0)
+
+
+def test_git_repo_copies_do_not_share_mutations(
+    tmp_path: Path, git_repo_factory: GitRepoFactory
+) -> None:
+    """A branch and file mutation in one copy cannot leak into another."""
+    first = git_repo_factory(tmp_path / "first")
+    second = git_repo_factory(tmp_path / "second")
+
+    (first / "README.md").write_text("changed\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "checkout", "-b", "mutation"],
+        cwd=first,
+        check=True,
+        capture_output=True,
+    )
+
+    assert (second / "README.md").read_text(encoding="utf-8") == "initial\n"
+    assert subprocess.run(
+        ["git", "branch", "--list", "mutation"],
+        cwd=second,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == ""
+    assert subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=second,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +369,11 @@ class TestCreateBranchForTask:
 
 @pytest.mark.slow
 class TestCreateWorktreeForTask:
-    def test_create_worktree_happy_path(self, tmp_path: Path) -> None:
+    def test_create_worktree_happy_path(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         """A branch must exist before creating a worktree. Create branch then worktree."""
-        repo = _init_git_repo(tmp_path / "repo")
+        repo = git_repo_factory(tmp_path / "repo")
         # Create branch first
         branch_result = create_branch_for_task("T007", "Add feature", cwd=repo)
         assert branch_result.created is True
@@ -370,9 +400,11 @@ class TestCreateWorktreeForTask:
         assert result.path is not None
         assert "wt-t007" in result.path
 
-    def test_create_worktree_refuses_dirty_tree(self, tmp_path: Path) -> None:
+    def test_create_worktree_refuses_dirty_tree(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         """Dirty working tree (uncommitted changes) prevents worktree creation."""
-        repo = _init_git_repo(tmp_path / "repo")
+        repo = git_repo_factory(tmp_path / "repo")
         # Create a branch so we have something to attach a worktree to
         branch_result = create_branch_for_task("T008", "Dirty test", cwd=repo)
         assert branch_result.created is True
@@ -391,10 +423,12 @@ class TestCreateWorktreeForTask:
         assert result.reason is not None
         assert "dirty" in result.reason.lower() or "worktree" in result.reason.lower()
 
-    def test_create_worktree_sanitizes_namespaced_task_id(self, tmp_path: Path) -> None:
+    def test_create_worktree_sanitizes_namespaced_task_id(
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
+    ) -> None:
         """#105: the worktree directory name for a namespaced id has no ``:``
         (an NTFS alternate-data-stream separator / invalid Windows path char)."""
-        repo = _init_git_repo(tmp_path / "repo")
+        repo = git_repo_factory(tmp_path / "repo")
         # checkout=False so the branch isn't held by the main worktree.
         br = create_branch_for_task(
             "advise-and-defer:T005", "live validate", cwd=repo, checkout=False
@@ -431,13 +465,16 @@ class TestWorkspaceLayoutGitOps:
     created in the user's actual project repository."""
 
     def test_claim_creates_branch_in_project_repo_under_workspace_layout(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         from typer.testing import CliRunner
 
         from anvil.cli import app
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -469,7 +506,10 @@ class TestWorkspaceLayoutGitOps:
         assert "agent/t001" in branches, branches
 
     def test_claim_json_returns_branch_with_no_warnings_under_workspace_layout(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         """#104 regression (--json path): ``claim --json`` in the default
         HOME-workspace layout returns a NON-NULL ``branch`` with empty
@@ -488,7 +528,7 @@ class TestWorkspaceLayoutGitOps:
 
         from anvil.cli import app
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -509,7 +549,10 @@ class TestWorkspaceLayoutGitOps:
         assert data["warnings"] == [], data
 
     def test_claim_worktree_json_creates_worktree_and_leaves_main_branch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         """#104 (worktree half): ``claim --worktree --json`` in the default
         HOME-workspace layout creates a REAL worktree (non-null, empty warnings)
@@ -522,7 +565,7 @@ class TestWorkspaceLayoutGitOps:
 
         from anvil.cli import app
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -607,7 +650,10 @@ class TestWorkspaceLayoutGitOps:
         assert after == before, "main checkout must stay on its original branch"
 
     def test_claim_named_branch_worktree_leaves_main_and_creates_worktree(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         """#104: --branch + --worktree combined creates the worktree and leaves
         main's HEAD in place. (The T002 review found this combo still checked the
@@ -618,7 +664,7 @@ class TestWorkspaceLayoutGitOps:
 
         from anvil.cli import app
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -651,7 +697,10 @@ class TestWorkspaceLayoutGitOps:
         assert after == before, "main must not move onto the named branch"
 
     def test_claim_git_failure_releases_state_and_leaves_no_branch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         import json as _json
 
@@ -660,7 +709,7 @@ class TestWorkspaceLayoutGitOps:
         import anvil.git_ops as git_ops
         from anvil.cli import app
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -692,7 +741,10 @@ class TestWorkspaceLayoutGitOps:
         assert _git(project, "rev-parse", "HEAD") == original_sha
 
     def test_claim_cancellation_releases_state_and_leaves_no_branch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         from typer.testing import CliRunner
 
@@ -700,7 +752,7 @@ class TestWorkspaceLayoutGitOps:
         from anvil.cli import app
         from anvil.cli._helpers import _open_backend, _resolve_state_dir
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -732,7 +784,10 @@ class TestWorkspaceLayoutGitOps:
         assert not _ref_exists(project, f"refs/heads/{plan.branch}")
 
     def test_bundle_claim_worktree_persists_same_git_binding_on_members(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         import json as _json
 
@@ -741,7 +796,7 @@ class TestWorkspaceLayoutGitOps:
         from anvil.cli import app
         from anvil.cli._helpers import _open_backend, _resolve_state_dir
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -782,7 +837,10 @@ class TestWorkspaceLayoutGitOps:
             backend.close()
 
     def test_bundle_git_failure_releases_state_and_owned_ref(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         import json as _json
 
@@ -792,7 +850,7 @@ class TestWorkspaceLayoutGitOps:
         from anvil.cli import app
         from anvil.cli._helpers import _open_backend, _resolve_state_dir
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -832,7 +890,10 @@ class TestWorkspaceLayoutGitOps:
         assert not _ref_exists(project, f"refs/heads/{plan.branch}")
 
     def test_bundle_cancellation_releases_coordinator_and_member_claims(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_repo_factory: GitRepoFactory,
     ) -> None:
         from typer.testing import CliRunner
 
@@ -840,7 +901,7 @@ class TestWorkspaceLayoutGitOps:
         from anvil.cli import app
         from anvil.cli._helpers import _open_backend, _resolve_state_dir
 
-        project = _init_git_repo(tmp_path / "proj")
+        project = git_repo_factory(tmp_path / "proj")
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -1013,10 +1074,10 @@ class TestResolveClaimPlan:
         assert exc.value.code == "dirty_shared_tree"
 
     def test_absorbed_submodule_uses_real_submodule_worktree_root(
-        self, tmp_path: Path
+        self, tmp_path: Path, git_repo_factory: GitRepoFactory
     ) -> None:
-        child = _init_git_repo(tmp_path / "child")
-        parent = _init_git_repo(tmp_path / "parent")
+        child = git_repo_factory(tmp_path / "child")
+        parent = git_repo_factory(tmp_path / "parent")
         _git(
             parent,
             "-c",

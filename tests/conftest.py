@@ -6,7 +6,9 @@ are hermetically isolated and leave no on-disk state after completion.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import shutil
+import subprocess
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,69 @@ from typing import Any
 import pytest
 
 from anvil.clock import FrozenClock
+
+GitRepoFactory = Callable[[Path], Path]
+
+
+@pytest.fixture(scope="session")
+def git_repo_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build the immutable committed repository copied by Git-heavy tests."""
+    template = tmp_path_factory.mktemp("git-repo-template") / "repo"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(template)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=template,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=template,
+        check=True,
+        capture_output=True,
+    )
+    (template / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"],
+        cwd=template,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "initial"],
+        cwd=template,
+        check=True,
+        capture_output=True,
+    )
+    return template
+
+
+@pytest.fixture
+def git_repo_factory(git_repo_template: Path) -> GitRepoFactory:
+    """Return a physical copier that gives each test an independent repo."""
+
+    def copy_repo(destination: Path) -> Path:
+        if destination.exists() and any(destination.iterdir()):
+            raise ValueError(f"Git fixture destination is not empty: {destination}")
+        shutil.copytree(
+            git_repo_template,
+            destination,
+            dirs_exist_ok=True,
+            copy_function=shutil.copyfile,
+        )
+        return destination
+
+    return copy_repo
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path, git_repo_factory: GitRepoFactory) -> Path:
+    """A per-test working copy of the immutable session Git template."""
+    return git_repo_factory(tmp_path / "repo")
 
 
 def append_exact_approved_prd(

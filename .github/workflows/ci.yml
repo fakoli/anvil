@@ -53,8 +53,8 @@ jobs:
           tests/test_installed_wheel.py
           -q
 
-  windows-source-binding:
-    name: windows sample source binding
+  windows-contracts:
+    name: windows focused contracts
     runs-on: windows-latest
 
     steps:
@@ -71,17 +71,30 @@ jobs:
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Verify sample source binding and first claim
+      - name: Verify sample source-binding contract
         env:
           _TYPER_FORCE_DISABLE_TERMINAL: "1"
         run: >-
           uv run --project bin --locked --python 3.11 pytest
-          tests/test_cli.py::TestInitWithSample
-          tests/test_cli.py::TestClaimCommand::test_new_claim_refuses_canonical_source_drift_before_state_or_git
-          tests/test_git_ops.py::TestWorkspaceLayoutGitOps::test_claim_creates_branch_in_project_repo_under_workspace_layout
-          tests/test_git_ops.py::TestWorkspaceLayoutGitOps::test_claim_json_returns_branch_with_no_warnings_under_workspace_layout
+          tests/test_cli.py::TestSampleSourceBindingContract
           -q
-          --basetemp "${{ runner.temp }}/anvil-issue-180"
+          --basetemp "${{ runner.temp }}/anvil-source-binding"
+
+      - name: Verify Git fixture contract in parallel
+        run: >-
+          uv run --project bin --locked --python 3.11 pytest
+          tests/test_git_ops.py
+          tests/test_reconciliation.py
+          -n 16
+          -q
+          --basetemp "${{ runner.temp }}/anvil-git-fixture-contract"
+
+      - name: Verify Windows timing-harness mechanics
+        run: >-
+          uv run --project bin --locked --python 3.11 pytest
+          tests/test_windows_pytest_timing.py
+          -q
+          --basetemp "${{ runner.temp }}/anvil-timing-harness"
 
   test:
     name: test (python 3.11)
@@ -125,14 +138,14 @@ jobs:
           bin/src/anvil/planning/scoring.py
           bin/src/anvil/cli/plan.py
 
-      - name: Run test suite
+      - name: Run test suite in parallel
         env:
           # GitHub Actions sets GITHUB_ACTIONS=true which makes typer/rich
           # set FORCE_TERMINAL=True at import time, injecting ANSI codes into
           # CliRunner output. _TYPER_FORCE_DISABLE_TERMINAL overrides that so
           # --help assertions can match plain flag text (e.g. "--use-llm").
           _TYPER_FORCE_DISABLE_TERMINAL: "1"
-        run: uv run --project bin pytest
+        run: uv run --project bin pytest -n auto
 
       # Coordination benchmark smoke: drives the real anvil CLI against
       # a live SQLite state engine. Uses the venv materialized by `uv sync`
