@@ -336,9 +336,11 @@ yet shipped; `anvil backup` / `restore` and the `anvil replay` command
 ### What if `state.db` gets corrupted?
 
 First quiesce every Anvil writer and preserve the complete resolved state
-directory for rollback and forensics. Restore from that backup with the
-supported `anvil restore` flow, or use the shipped `anvil replay` command to
-build a separate projection for inspection:
+directory for rollback and forensics. If a configured S3 backup exists, use
+the supported `anvil restore` flow. Otherwise retain the local snapshot and
+treat any live replacement as a separately authorized managed recovery. Use
+the shipped `anvil replay` command to build a separate projection for
+inspection:
 
 ```bash
 STATE_DIR=$(anvil status --path-only)
