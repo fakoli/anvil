@@ -146,7 +146,7 @@ and another agent can claim it mid-work.
 
 ```
 Renewed claim 'C004'.
-  New lease until: 2026-05-25T14:35:00.000000+00:00
+  New lease until: 2026-05-25T17:35:00.000000+00:00
   Last heartbeat:  2026-05-25T13:35:00.000000+00:00
 ```
 

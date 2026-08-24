@@ -176,10 +176,19 @@ happens when:
   owner/session.
 
 `orphan.json` is currently **never auto-cleaned**. It accumulates indefinitely
-until the user deletes it manually:
+until the user deletes it manually. Resolve the state directory first; do not
+assume it lives in the repository:
 
 ```bash
-rm .anvil/.evidence-buffer/orphan.json
+anvil_state_dir="$(anvil status --path-only)"
+rm -- "$anvil_state_dir/.evidence-buffer/orphan.json"
+```
+
+PowerShell equivalent:
+
+```powershell
+$anvilStateDir = anvil status --path-only
+Remove-Item -LiteralPath (Join-Path $anvilStateDir '.evidence-buffer\orphan.json')
 ```
 
 This is a known limitation. `submit --output-file` can preserve an orphan
@@ -209,7 +218,8 @@ durable event, not the buffer.
 
 ## When to manually clean
 
-- After a hard reset of project state (`rm -rf .anvil/.evidence-buffer/`).
+- After a hard reset of project state, after resolving and inspecting the exact
+  `<resolved-state-dir>/.evidence-buffer/` target.
 - After resolving an orphan-accumulation issue (e.g., a stuck claim was force-released and never resubmitted).
 - Before sharing a project state snapshot — the buffer is transient and not part of the canonical audit log.
 

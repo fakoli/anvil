@@ -5,7 +5,10 @@ description: Acquire an exclusive lease on an anvil task — pick from the ready
 
 # Claim — Acquire an Exclusive Lease
 
-Turn a `ready` task into an active claim: a persisted claim record with a 60-minute lease, a branch checked out, and hooks watching every file touch. This is the entry point to the agentic execution loop. Nothing moves to `claimed` without going through here.
+Turn a `ready` task into an active claim: a persisted claim record with a
+configurable 240-minute default lease, a branch checked out, and hooks watching
+every file touch. This is the entry point to the agentic execution loop.
+Nothing moves to `claimed` without going through here.
 
 ---
 
@@ -193,7 +196,7 @@ already expired — re-claiming is the only option at that point.
 
 ```
 Renewed claim 'C0FCF72C8'.
-  New lease until: 2026-05-24T20:05:00.000000+00:00
+  New lease until: 2026-05-24T23:05:00.000000+00:00
   Last heartbeat:  2026-05-24T19:05:00.000000+00:00
 ```
 
@@ -275,8 +278,8 @@ For **decision-presentation discipline** — how to surface multi-option choices
 ## Common Pitfalls
 
 - **Claiming while PRD is still `draft`.** The claim gate checks the PRD status and raises `ClaimError` before touching anything else (only `reviewed` or `approved` pass). Run `anvil prd review` (then `--approve` if you want it approved) first.
-- **Ignoring the `agent_suitability` score.** Claiming a task scored `1` or `2` with a small or local model burns 60 minutes and produces output that needs complete rework. Check `anvil show TASK_ID` before committing.
-- **Skipping the heartbeat on long sessions.** Leases expire silently. The task returns to `ready` and another agent can claim it while work is still in progress. Set a timer and run `anvil renew CLAIM_ID` every 5 minutes.
+- **Ignoring the `agent_suitability` score.** Claiming a task scored `1` or `2` with an unsuitable model can consume an entire lease and produce output that needs complete rework. Check `anvil show TASK_ID` before committing.
+- **Ignoring the echoed expiry on long sessions.** Bundled PostToolUse heartbeats attempt progress-gated renewal, but they do not extend a claim without qualifying progress. Inspect status and run `anvil renew CLAIM_ID` before expiry when work is genuinely continuing.
 - **Calling `renew` after the lease has already expired.** `renew` raises `ClaimError` on an expired lease — the lease cannot be extended retroactively. Re-claim the task after it returns to `ready`.
 
 ---

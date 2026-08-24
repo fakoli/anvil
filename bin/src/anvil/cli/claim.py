@@ -109,7 +109,7 @@ def claim(
             "Lease duration in minutes for this claim. Overrides "
             "default_lease_minutes from project/global config.yaml "
             "(precedence: this flag > project config > global config > "
-            "built-in 60)."
+            "built-in 240)."
         ),
     ),
     branch: str | None = typer.Option(  # noqa: B008
@@ -172,13 +172,13 @@ def claim(
 
     # Load the project config once, up front, so the ClaimManager honours
     # default_lease_minutes / default_heartbeat_minutes from config.yaml
-    # instead of always falling back to the 60-min ClaimManager default
+    # instead of always falling back to the ClaimManager default
     # (BUG 2 — the MCP path wired these; the CLI did not). The same loaded
     # config also supplies branch_prefix below.
     #
     # T016/B17 — lease precedence: an explicit ``--lease`` flag wins over the
     # configured (project>global merged) lease, which wins over the built-in
-    # 60-min default.
+    # 240-min default.
     cfg = _load_config_optional(state_dir)
     lease_kwargs = _lease_manager_kwargs(cfg, lease_override=lease_minutes)
 
@@ -836,7 +836,7 @@ def renew(
         help=(
             "Lease extension in minutes. Overrides default_lease_minutes "
             "from project/global config.yaml (precedence: this flag > "
-            "project config > global config > built-in 60)."
+            "project config > global config > built-in 240)."
         ),
     ),
     json_output: bool = JSON_OPTION,
@@ -865,10 +865,10 @@ def renew(
 
     # BUG 2: renew must also honour config.yaml default_lease_minutes —
     # renew() extends the lease by default_lease_minutes, so without this the
-    # CLI would always extend by 60 min regardless of config.
+    # CLI would always use the built-in duration regardless of config.
     #
     # T016/B17 — same lease precedence as claim: explicit --lease flag wins
-    # over the merged project>global config, which wins over the 60-min default.
+    # over the merged project>global config, which wins over the 240-min default.
     cfg = _load_config_optional(state_dir)
     lease_kwargs = _lease_manager_kwargs(cfg, lease_override=lease_minutes)
 

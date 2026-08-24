@@ -6036,6 +6036,14 @@ def _git_current_branch(tmp_path: Path) -> str:
 
 
 class TestClaimCommand:
+    def test_help_reports_current_builtin_lease_default(self, tmp_path: Path) -> None:
+        result = _invoke_cmd(tmp_path, ["claim", "--help"])
+
+        assert result.exit_code == 0
+        normalized = " ".join(result.output.split())
+        assert "built-in 240" in normalized
+        assert "built-in 60" not in normalized
+
     def test_new_claim_refuses_canonical_source_drift_before_state_or_git(
         self, tmp_path: Path
     ) -> None:
@@ -6752,6 +6760,14 @@ class TestReleaseCommand:
 
 
 class TestRenewCommand:
+    def test_help_reports_current_builtin_lease_default(self, tmp_path: Path) -> None:
+        result = _invoke_cmd(tmp_path, ["renew", "--help"])
+
+        assert result.exit_code == 0
+        normalized = " ".join(result.output.split())
+        assert "built-in 240" in normalized
+        assert "built-in 60" not in normalized
+
     def test_renew_extends_lease(self, tmp_path: Path) -> None:
         """Renew prints new lease expiry and exits 0."""
         import sqlite3 as _sqlite3
@@ -7001,6 +7017,17 @@ class TestNextCommand:
 
 
 class TestHookSubcommands:
+    def test_help_describes_shell_free_dispatch_as_active(self, tmp_path: Path) -> None:
+        root_help = _invoke_cmd(tmp_path, ["hook", "--help"])
+        capture_help = _invoke_cmd(tmp_path, ["hook", "capture-evidence", "--help"])
+
+        assert root_help.exit_code == 0
+        assert "Shell-free hook dispatcher" in " ".join(root_help.output.split())
+        assert capture_help.exit_code == 0
+        normalized = " ".join(capture_help.output.split())
+        assert "shipped manifest calls this through" in normalized
+        assert "retained compatibility wrapper" in normalized
+
     def test_hook_check_claim_silent_when_no_state(self, tmp_path: Path) -> None:
         """hook check-claim exits 0 silently when no .anvil/ exists."""
         result = _invoke_cmd(
@@ -10326,6 +10353,23 @@ class TestDoctorHealthy:
         cfg_detail = by_check["config"]["detail"]
         assert cfg_detail["effective_lease_minutes"] == 240.0
         assert cfg_detail["effective_heartbeat_minutes"] == 5.0
+
+    def test_doctor_missing_config_reports_current_builtin_lease(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        (tmp_path / ".anvil" / "config.yaml").unlink()
+
+        env = _doctor_json(_invoke_cmd(tmp_path, ["doctor", "--json"]))
+        config = next(
+            finding
+            for finding in env["data"]["findings"]
+            if finding["check"] == "config"
+        )
+
+        assert config["severity"] == "info"
+        assert config["detail"]["effective_lease_minutes"] == 240.0
+        assert config["detail"]["effective_heartbeat_minutes"] == 5.0
 
     def test_doctor_verifies_replay_integrity(self, tmp_path: Path) -> None:
         _do_init(tmp_path)

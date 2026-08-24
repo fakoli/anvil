@@ -447,9 +447,9 @@ mechanisms layered together:
 
 The shell-free PreToolUse `hook dispatch check-claim` path adds a final layer
 of safety at the Claude Code editor surface: before an Edit / Write /
-NotebookEdit fires, the dispatcher asks the CLI whether the current actor
-holds a claim covering the target file and surfaces a warning (non-blocking,
-per the hook contract) when no claim is held.
+NotebookEdit fires, the dispatcher checks active claim scopes and surfaces a
+warning (non-blocking, per the hook contract) only when the target file overlaps
+another actor's `expected_files`. It stays silent when no claim holds the file.
 
 ---
 

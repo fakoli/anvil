@@ -45,6 +45,9 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 ### B02 — Thread config `default_lease_minutes` into the CLI `ClaimManager` and accept fractional minutes
 
 - **Priority:** P1  **Effort:** S  **Type:** bug
+- **Status:** DONE.
+- **Resolution:** CLI and MCP now honor merged fractional lease configuration
+  and explicit overrides; the current built-in lease default is 240 minutes.
 - **Rationale:** Benchmark-confirmed: cli/claim.py builds `ClaimManager(backend, clock, actor=...)` with no `default_lease_minutes`, so every CLI claim silently uses the hardcoded 60-min default regardless of config.yaml, while the MCP path (mcp_server.py) correctly passes `default_lease_minutes=lease_minutes`. Separately, config.py:358 coerces `default_lease_minutes` via `int(str(data.get(...)))`, which rejects/floors fractional minutes (e.g. 0.5). Silent config drop is exactly the failure class anvil positions against (durable, honored configuration).
 - **Acceptance:** cli/claim.py loads config.yaml (it already does for `branch_prefix`) and passes `default_lease_minutes` (and `default_heartbeat_minutes`) into `ClaimManager`. config.py accepts fractional minutes (e.g. 0.5) via float coercion with validation, rejecting only non-numeric/negative/boolean values. Test: a project config with `default_lease_minutes: 30` produces a CLI claim whose `lease_expires_at` is `created_at + 30min` (not 60); a config with `0.5` yields a 30-second lease; the MCP path is unchanged.
 - **Likely files:** `bin/src/anvil/cli/claim.py`, `bin/src/anvil/config.py`, `bin/tests/test_cli.py`, `bin/tests/test_config.py`

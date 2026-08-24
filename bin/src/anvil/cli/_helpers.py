@@ -2018,8 +2018,7 @@ def _lease_manager_kwargs(
     config.yaml, so a configured lease was silently ignored and every CLI
     claim used the 60-minute ClaimManager default (the MCP path did wire it).
     When *config* is None (no/broken config.yaml) we return an empty dict so
-    ClaimManager keeps its own 60/5 defaults — preserving prior behaviour for
-    projects without a config.
+    ClaimManager keeps its own 240-minute lease and 5-minute heartbeat defaults.
 
     T016/B17 — lease precedence: explicit CLI arg > project config > global
     config > built-in default. *config* is the already-merged

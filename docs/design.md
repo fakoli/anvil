@@ -92,7 +92,11 @@ A hosted control plane would let us ship a web dashboard, real-time collaboratio
 
 ## Why claims with leases
 
-**Choice:** a `Claim` row is created on `anvil claim T012`, with `claimed_by`, `lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional branch/worktree binding. Heartbeats via `renew T012` every 5 min; stale leases are detected and released at queue and coordination entry points.
+**Choice:** a `Claim` row is created on `anvil claim T012`, with `claimed_by`,
+`lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional
+branch/worktree binding. Bundled PostToolUse heartbeats attempt progress-gated
+renewal automatically; a human can run `anvil renew CLAIM_ID` before expiry.
+Stale leases are detected and released at queue and coordination entry points.
 
 ### Rejected alternatives
 

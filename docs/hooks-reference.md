@@ -18,36 +18,28 @@
 
 ## The non-blocking contract
 
-All 5 hooks follow these invariants. They are enforced by code review and by
-the hook test suite — any new hook script that violates them will be
-rejected.
+All five active dispatcher paths follow these invariants, enforced by tests:
 
-1. **No `set -e`, no `set -u`, no `set -o pipefail`.** A single failed
-   command must never abort the script. A hook that aborts mid-run leaves
-   partial files on disk (a half-written `orphan.json`, a missing audit
-   row) and trains the agent to mistrust the hook layer.
-2. **Always `exit 0`.** Every dispatcher path and shell wrapper exits 0
+1. **Always `exit 0`.** Every dispatcher path and shell wrapper exits 0
    regardless of whether the work succeeded. Failures are logged to stderr
    or silently swallowed — they are never propagated as a non-zero status
    to Claude Code.
-3. **Wrap CLI calls with `|| true`.** When a shell wrapper shells out to
-   `anvil hook ...`, the call is followed by `|| true` (or the exit
-   code is captured into a variable that the script then ignores). The
-   Python sub-app itself follows the same discipline: every command in
-   `cli/hooks.py` wraps its body in `try/except Exception: pass` and ends
-   with `raise typer.Exit(code=0)`.
-4. **<200ms internal target; 5s hard timeout.** Each entry in `hooks.json`
+2. **5s hard timeout.** Each entry in `hooks.json`
    declares `"timeout": 5` — the upper bound the Claude Code runtime will
-   wait. The scripts themselves aim for well under 200ms on the hot path,
-   per comments in each script header. Hooks fire on every matching tool
-   call, so the budget is tight.
-5. **Warnings go to stderr; tool hooks stay quiet on stdout.** Claude Code
+   wait. The active dispatcher has no separately claimed or measured <200ms
+   contract.
+3. **Warnings go to stderr; tool hooks stay quiet on stdout.** Claude Code
    surfaces hook stderr as a user-visible warning; stdout becomes part of
    the model's input context (which would pollute the conversation with
    bookkeeping noise). The hot-path tool hooks produce no stdout on success.
    The SessionStart dispatcher is the exception: it emits a Codex/Claude
    `hookSpecificOutput` JSON object whose `additionalContext` contains the
    one-line state banner.
+
+The retained legacy shell wrappers additionally avoid `set -e`, `set -u`, and
+`set -o pipefail`; wrap CLI calls with `|| true`; and carry a header-level
+<200ms target. Those wrapper-only constraints are compatibility guidance, not
+the active dispatcher's measured performance contract.
 
 ### Why non-blocking
 
