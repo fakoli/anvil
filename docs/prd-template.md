@@ -32,8 +32,10 @@ references resolve against deterministically. A suffixed ID like `R003a` is
 `ParseError` before anything is written to state. To split a requirement,
 renumber (`R003`, `R004`) instead.
 
-**Reference**: the canonical data model and CLI command set are defined in
-[`docs/specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
+**Reference**: the current data model and CLI command set are defined in
+[architecture](architecture.md) and the [CLI reference](cli-reference.md).
+The [original v0 build spec](specs/2026-05-24-anvil-v0.md) is retained only as
+a historical design record.
 
 Execution bundles are a post-plan coordination choice, not PRD syntax. Author stable task
 IDs, dependencies, acceptance criteria, and verification here; after tasks are approved
@@ -702,9 +704,10 @@ Once `anvil prd parse` succeeds, the PRD status is `draft`. From there:
    HOME-workspace layout). Evidence submitted via `anvil submit` releases the
    claim automatically.
 
-The full workflow is described in the spec at
-[`docs/specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md)
-under "Data Flows".
+The current workflow is described in
+[Getting started](how-to/getting-started.md). The original
+[v0 build spec](specs/2026-05-24-anvil-v0.md) retains the historical workflow
+target under "Data Flows" but is not an operational reference.
 
 ## Evidence contracts (optional): Claims and Artifact assertions
 

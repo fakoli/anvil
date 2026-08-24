@@ -81,7 +81,7 @@ _ERROR = "error"
 
 # ClaimManager's own fallback when no config.yaml supplies them (mirrors
 # Config.default_lease_minutes / default_heartbeat_minutes defaults).
-_DEFAULT_LEASE_MINUTES = 60.0
+_DEFAULT_LEASE_MINUTES = 240.0
 _DEFAULT_HEARTBEAT_MINUTES = 5.0
 
 
@@ -683,7 +683,7 @@ def _check_config(state_dir: Path) -> _Finding:
 
     Uses the shared soft-load (``_load_config_optional``): a missing or broken
     config never blocks a command — the CLI falls back to ClaimManager's
-    60/5-minute defaults. doctor mirrors that: a missing config is ``info``, a
+    240/5-minute defaults. doctor mirrors that: a missing config is ``info``, a
     broken one is a ``warning`` (the CLI will keep working on defaults), and a
     parsed config is ``ok``.
     """
@@ -807,7 +807,7 @@ def _check_max_claim_age(
     if now is None:
         now = SystemClock().now()
     cfg = _load_config_optional(state_dir)
-    lease = cfg.default_lease_minutes if cfg is not None else 60.0
+    lease = cfg.default_lease_minutes if cfg is not None else _DEFAULT_LEASE_MINUTES
     multiplier = cfg.max_claim_age_multiplier if cfg is not None else 4.0
     max_age = lease * multiplier
 

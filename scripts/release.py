@@ -183,19 +183,20 @@ def run(spec: str, date: str, dry_run: bool, verify: bool) -> int:
             rel, rf"anvil {semver} \(schema \d+\)",
             f"anvil {new} (schema {schema})", required=False,
         )
-    for key in ("engine_version", "display_version"):
+    for rel in ("docs/mcp.md", "bin/src/anvil/cli/describe.py"):
+        for key in ("engine_version", "display_version"):
+            ed.sub(
+                rel,
+                rf'("{key}"\s*:\s*"){semver}(")',
+                rf"\g<1>{new}\g<2>",
+                required=False,
+            )
         ed.sub(
-            "docs/mcp.md",
-            rf'("{key}"\s*:\s*"){semver}(")',
+            rel,
+            rf'("tag"\s*:\s*"v){semver}(")',
             rf"\g<1>{new}\g<2>",
             required=False,
         )
-    ed.sub(
-        "docs/mcp.md",
-        rf'("tag"\s*:\s*"v){semver}(")',
-        rf"\g<1>{new}\g<2>",
-        required=False,
-    )
     ed.sub("docs/architecture.md", rf"(\*\*v){old_q}(\*\*)", rf"\g<1>{new}\g<2>", required=False)
 
     # --- report ---

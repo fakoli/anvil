@@ -143,7 +143,7 @@ nav:
       - Running the bake-off: plans/bake-off.md
       - Packet quality: plans/packet-quality.md
       - Specs:
-          - v0 canonical spec: specs/2026-05-24-anvil-v0.md
+          - Historical v0 build spec: specs/2026-05-24-anvil-v0.md
           - Plugin audit & critics: specs/2026-05-26-plugin-audit-and-critics.md
           - Event-sourcing write path (SL-1): specs/2026-06-01-sl1-rr-1-event-sourcing-write-path.md
           - Git-backed events: specs/2026-06-10-git-backed-events.md

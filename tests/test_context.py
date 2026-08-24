@@ -310,6 +310,8 @@ class TestRenderPacket:
 
         # Update protocol mentions renew
         assert "renew" in md.lower()
+        assert "every 5 minutes" not in md
+        assert "When bundled PostToolUse hooks are active" in md
 
     def test_unscored_task_renders_unscored(self) -> None:
         """Task with all Score dimensions None → markdown shows 'unscored'."""

@@ -255,7 +255,8 @@ def pytest_collection_modifyitems(
 
 @pytest.fixture(autouse=True)
 def _local_state_layout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """Pin the in-repo (`<cwd>/.anvil`) state layout for the whole suite.
 
@@ -270,6 +271,23 @@ def _local_state_layout(
     monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
     keys = tmp_path_factory.mktemp("anvil-keys")
     monkeypatch.setenv("ANVIL_KEYS_DIR", str(keys))
+
+
+@pytest.fixture(autouse=True)
+def _parallel_schema_probe_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Keep production probe timing out of shared-runner scheduler tests."""
+    if hasattr(request.config, "workerinput"):
+        from anvil.cli import _helpers
+
+        # Parallel CI deliberately saturates the runner while thousands of tests
+        # start Git and schema-probe subprocesses. Keep production's two-second
+        # bound unchanged; test workers get scheduler headroom so the suite
+        # measures behavior instead of shared-runner process-start latency.
+        # Dedicated timeout tests construct their own explicit millisecond budget.
+        monkeypatch.setattr(_helpers, "SCHEMA_PROBE_TIMEOUT_SECONDS", 10.0)
 
 
 @pytest.fixture(autouse=True)

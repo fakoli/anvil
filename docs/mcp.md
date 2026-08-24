@@ -98,9 +98,11 @@ needed (covering cold starts and `git pull` updates), then delegates to
 `python -m anvil.mcp_server` without relying on a shell or emitting uv chatter into the
 stdio MCP stream.
 
-Each tool call opens a fresh `SqliteBackend` against `.anvil/state.db` resolved from
-the agent's current working directory at call time. Agents can invoke from any project
-directory — the server re-resolves state on every call.
+Each tool call opens a fresh `SqliteBackend` against the `state.db` in the
+resolved state directory for the agent's current project. Agents can invoke
+from any project directory — the server re-resolves state on every call. In
+the examples below, `.anvil/...` is shorthand for a path inside that resolved
+directory unless local layout is named explicitly.
 
 **Prerequisite**: `anvil init` must have been run in the project root before any tool
 call will succeed.
@@ -156,7 +158,7 @@ None.
 
 **Failure modes**
 
-- `ToolError` — project not initialized (`.anvil/` missing).
+- `ToolError` — project not initialized (resolved state directory missing).
 - `ToolError` — project row not found in state.db (run `anvil init`).
 
 **When to call**: at session start or before orchestrating a wave, to decide how many agents
@@ -519,7 +521,7 @@ PRD raises a bounded `ToolError`; no claim or Git mutation is created.
 to `ClaimManager`. The default 900 seconds gives a 15-minute MCP-side override — note that
 the CLI's `ClaimManager` ships with a 240-minute default (see
 [`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py)),
-and the project-level override is read from `.anvil/config.yaml`.
+and the project-level override is read from the resolved `config.yaml`.
 
 **Output**
 
@@ -952,9 +954,11 @@ single MCP session can target multiple project roots. None of them perform git o
 
 ### `init_project`
 
-Scaffolds a `.anvil/` directory in the target project root. Creates the canonical
-layout (`config.yaml`, `state.db`, `events.jsonl`, `packets/`), seeds the project row, and
-emits `project.created` + `state.initialized`. Mirrors `anvil init` minus git
+Scaffolds the resolved state directory for the target project. The default is a
+per-project HOME workspace; `ANVIL_STATE_LAYOUT=local` opts into
+`<project>/.anvil/`. Creates the canonical layout (`config.yaml`, `state.db`,
+`events.jsonl`, `packets/`), seeds the project row, and emits
+`project.created` + `state.initialized`. Mirrors `anvil init` minus git
 operations.
 
 **Inputs**
@@ -970,15 +974,15 @@ operations.
 {
   "project_id": "from-mcp",
   "project_name": "From MCP",
-  "state_dir": "/abs/path/.anvil",
+  "state_dir": "/home/user/.anvil/workspaces/from-mcp-1a2b3c4d/.anvil",
   "created": true
 }
 ```
 
 **Failure modes**
 
-- `ToolError` — directory is the plugin root (refuses to init inside the plugin).
-- `ToolError` — `.anvil/` already exists (use CLI `init --force` to reinit).
+- `ToolError` — local layout would write inside the plugin root.
+- `ToolError` — resolved state already exists (use CLI `init --force` to reinit).
 - `ToolError` — scaffold I/O failure.
 
 **When to call**: the very first MCP call against a fresh project root. `init_project` is
@@ -1204,9 +1208,9 @@ If any orphan has advanced past `ready` status (claimed, in progress, needs revi
 the tool raises `ToolError` rather than silently discarding claim/evidence history — pass
 `prune_force=true` to delete them anyway (the audit trail is preserved either way).
 
-`prd_id`: PRD partition to plan (multi-PRD). A non-default id reads its portable source under `.anvil/prds/`,
+`prd_id`: PRD partition to plan (multi-PRD). A non-default id reads its portable source under the resolved `prds/` directory,
 scopes orphan-prune to that partition, and stamps the partition into every feature/task
-event. `null` (or `"default"` / `"prd"`) keeps the bare `.anvil/prd.md` source and the
+event. `null` (or `"default"` / `"prd"`) keeps the bare resolved `prd.md` source and the
 default partition.
 
 **Output**
@@ -1530,11 +1534,11 @@ None.
 ```json
 {
   "api_version": "14",
-  "engine_version": "0.6.4",
-  "display_version": "0.6.4",
+  "engine_version": "0.6.5",
+  "display_version": "0.6.5",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.4",
+  "tag": "v0.6.5",
   "tag_distance": 0,
   "dirty": false,
   "schema_version": 21,
@@ -1590,8 +1594,9 @@ is visible. Each contract records long options owned by that exact node; a group
 inherit options from its descendants. Short aliases such as `-V` are intentionally outside
 this skill/release contract.
 
-Provider consumers must fail closed before reading state unless the manifest
-contains API version 9, operation-catalog version 1, the required operation at
+For the v0.6.5 / Workbench provider-v1 compatibility profile, consumers must
+fail closed before reading state unless the manifest reports exact
+`api_version == "14"`, operation-catalog version 1, the required operation at
 version 1, and the exact version-1 schema resource paths. Do not infer
 compatibility from the engine version. The provider reads use their cataloged
 CLI transports; an MCP-only host can still discover and pin the same contract
@@ -1618,7 +1623,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":22,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":21}}
+{"error":{"code":"schema_mismatch","database_schema":22,"direction":"newer","engine_version":"0.6.5","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":21}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh
@@ -1755,7 +1760,9 @@ wiring automatically.
 
 ## See also
 
-- [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — canonical
-  design spec: data model, task lifecycle, phasing plan, integration contracts.
-- [`hooks-reference.md`](hooks-reference.md) — claim discipline hooks: `check-claim.sh`,
-  `record-file-change.sh`, `capture-evidence.sh`, `detect-state.sh`.
+- [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — historical
+  v0 design record; this page and `anvil describe --json` define the current
+  MCP contract.
+- [`hooks-reference.md`](hooks-reference.md) — the shell-free claim-discipline,
+  evidence, heartbeat, and state-detection dispatcher paths plus their retained
+  legacy wrappers.

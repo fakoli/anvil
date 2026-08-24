@@ -1,6 +1,6 @@
 {
   "name": "@fakoli/anvil-finish-gate",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "private": true,
   "type": "module",
   "openclaw": {

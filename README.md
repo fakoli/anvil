@@ -8,7 +8,7 @@
 lease-coordinated state for multi-agent software work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.4-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.6.5-blue.svg)](.claude-plugin/plugin.json)
 [![PyPI](https://img.shields.io/badge/pypi-anvil--state-purple.svg)](https://pypi.org/project/anvil-state/)
 [![Docs](https://img.shields.io/badge/docs-fakoli.github.io%2Fanvil-informational.svg)](https://fakoli.github.io/anvil/)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
@@ -32,8 +32,28 @@ Two ideas separate it from an issue tracker:
   typed proofs, reviews gate acceptance, and every accepted task mints a signed,
   replayable `AcceptanceProof` you can verify off-host.
 
-> **Beta — v0.6.4.** The core loop is stable and dogfooded; some command
+> **Beta — v0.6.5.** The core loop is stable and dogfooded; some command
 > surfaces may change before 1.0.
+
+## What changed in v0.6.5
+
+- **Revision-safe PRDs** — review, approval, planning, and new claims bind the
+  exact source revision ([#180](https://github.com/fakoli/anvil/issues/180),
+  [#192](https://github.com/fakoli/anvil/issues/192)).
+- **Transactional Git claims** — branch/worktree setup now commits completely
+  or rolls claim state back cleanly ([#180](https://github.com/fakoli/anvil/issues/180)).
+- **Versioned provider reads** — bounded project snapshots and PRD content are
+  available without internal-database coupling
+  ([#178](https://github.com/fakoli/anvil/issues/178)).
+- **Safer task routing** — PRD scope, strict 1-5 risk ceilings, and actor review
+  history agree across CLI and MCP ([#56](https://github.com/fakoli/anvil/issues/56),
+  [#109](https://github.com/fakoli/anvil/issues/109)).
+- **Faster Windows tests** — the maintained parallel suite and focused contract
+  slice run without UAC or junction-dependent collection
+  ([#118](https://github.com/fakoli/anvil/issues/118)).
+
+See the [v0.6.5 changelog](CHANGELOG.md#065---2026-08-24) for the complete
+release-candidate-to-release history and related fixes.
 
 ## Install
 
@@ -122,7 +142,7 @@ walks through it on your own PRD.
 | | Anvil | GitHub Issues / markdown-file conventions |
 |---|---|---|
 | **State shape** | Pydantic models in SQLite, validated at every transition | Free-form markdown in an issue body or `.md` file |
-| **Coordination** | `Claim` row with lease + heartbeat; stale leases reaped on every call | Assignment-by-label — no enforcement |
+| **Coordination** | `Claim` row with lease + heartbeat; stale leases reaped at coordination entry points | Assignment-by-label — no enforcement |
 | **Agent hand-off** | Rendered work packet: intent, criteria, non-goals | Agent summarizes the whole thread |
 | **Completion** | Evidence-gated; signed, replayable proof | Trust the "done" checkbox |
 | **Context cost** | Measured ~2.4k always-on tokens ([audit](benchmarks/CONTEXT_AUDIT.md)) | Whole threads enter context on demand |
@@ -156,10 +176,10 @@ Full documentation: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)*
 
 ## Status
 
-Beta (v0.6.4). The full PRD → plan → claim → execute → verify → finish loop
+Beta (v0.6.5). The full PRD → plan → claim → execute → verify → finish loop
 works today, alongside GitHub Issues sync and multi-provider LLM support.
-Near-term focus is correctness for claim races, evidence gates, and replay;
-Linear/Monday providers and webhook sync are on the
+Near-term focus is provider expansion, usability, and remaining pre-1.0
+contract hardening; Linear/Monday providers and webhook sync are on the
 [roadmap](https://fakoli.github.io/anvil/roadmap/).
 
 ## License

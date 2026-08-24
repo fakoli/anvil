@@ -183,6 +183,7 @@ def test_publish_oidc_job_is_minimal_and_all_actions_are_immutable() -> None:
     assert '--out "$RUNNER_TEMP/anvil-benchmark-results.md"' in text
     assert "mkdocs build --strict" in text
     assert "(cd bin && uv run --locked ruff check ..)" in text
+    assert "uv run --project bin --locked pytest -n auto" in text
     assert f"--expected-api-version {API_VERSION}" in text
     assert (
         "printf '%s\\0' \"$wheel\" \"$sdist\" | sort -z | "

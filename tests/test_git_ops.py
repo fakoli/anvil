@@ -9,7 +9,6 @@ Coverage target: git_ops/ >= 85%.
 from __future__ import annotations
 
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -46,23 +45,6 @@ from anvil.git_ops.worktree import (
 # ---------------------------------------------------------------------------
 
 GitRepoFactory = Callable[[Path], Path]
-
-
-@pytest.fixture(autouse=True)
-def _allow_schema_probe_startup_under_parallel_windows_load(
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> None:
-    """Keep real schema probes reliable during the 16-worker Windows contract."""
-    if sys.platform != "win32" or not hasattr(request.config, "workerinput"):
-        return
-
-    from anvil.cli import _helpers
-
-    # Four virtual workers contend for each GitHub runner core.  The production
-    # two-second bound remains unchanged; only this Git-focused test module gets
-    # extra process-startup headroom while it exercises the real probe transport.
-    monkeypatch.setattr(_helpers, "SCHEMA_PROBE_TIMEOUT_SECONDS", 10.0)
 
 
 def test_git_repo_copies_do_not_share_mutations(

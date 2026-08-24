@@ -372,10 +372,18 @@ a column's type, adding a NOT NULL with no default) requires:
    backend, and asserts the upgrade ran.
 5. Re-document in this file.
 
-The "replay events.jsonl" escape hatch is always available for users who
-prefer to rebuild from the audit log:
+### Replay audit
+
+The `events.jsonl` replay verifier is always available. It deliberately builds
+a scratch database and refuses to overwrite live state. Resolve the source log
+from the current state layout and choose an inspected, non-live destination:
 
 ```bash
-$ rm .anvil/state.db .anvil/state.db-wal .anvil/state.db-shm
-$ anvil replay   # rebuilds state.db from events.jsonl
+anvil_state_dir="$(anvil status --path-only)"
+anvil replay \
+  --from-events "$anvil_state_dir/events.jsonl" \
+  --into "/safe/scratch/rebuilt-state.db"
 ```
+
+Compare the scratch projection before any separately authorized replacement of
+live state; replay itself never performs that replacement.

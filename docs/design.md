@@ -14,13 +14,13 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 | Terraform concept | anvil equivalent | Where it lives |
 |---|---|---|
-| `.tf` configuration | `prd.md` + parsed `Requirement`/`Feature`/`Task` rows | `.anvil/prd.md`, rows in `state.db` |
-| `terraform.tfstate` | `state.db` (Pydantic-validated SQLite) | `.anvil/state.db` |
+| `.tf` configuration | `prd.md` + parsed `Requirement`/`Feature`/`Task` rows | `<resolved-state-dir>/prd.md`, rows in `state.db` |
+| `terraform.tfstate` | `state.db` (Pydantic-validated SQLite) | `<resolved-state-dir>/state.db` |
 | `terraform plan` | `anvil packet T012` (work-packet preview before claim) | derived view, not stored |
 | `terraform apply` | `anvil apply T012` (reviewed transition to `done`) | `Review` row + `apply.*` event |
 | State locking | `Claim` row with `lease_expires_at` + heartbeat | `claims` table, `BEGIN IMMEDIATE` txn |
 | Drift detection | stale-claim sweep + `sync --fix` reconciliation | `claims/stale.py`, `sync.reconcile` |
-| Workspace | `.anvil/` per repo | created by `anvil init` |
+| Workspace | one resolved state directory per project | HOME workspace by default; local layout is opt-in |
 | Backend protocol | `Backend` Protocol (SQLite ships) | `state/backend.py` |
 
 ### What the analogy gets right
@@ -39,7 +39,10 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 ## Why SQLite + WAL
 
-**Choice:** one SQLite database per project at `.anvil/state.db`, opened in WAL mode with `BEGIN IMMEDIATE` for mutating transactions. Append-only JSONL event log alongside (`events.jsonl`) as the replay source of truth.
+**Choice:** one SQLite database per project at
+`<resolved-state-dir>/state.db`, opened in WAL mode with `BEGIN IMMEDIATE` for
+projection mutations. An append-only JSONL event log lives alongside it as the
+log-first replay source of truth.
 
 ### Rejected alternatives
 
@@ -55,34 +58,45 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 ### Why WAL specifically
 
-Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload (many `anvil status` reads from hooks, occasional `anvil claim` writes from agents) WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in `.anvil/`; both are git-ignored.
+Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload (many `anvil status` reads from hooks, occasional `anvil claim` writes from agents) WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in the resolved state directory; both are excluded from repository state.
 
 ---
 
 ## Why local-first
 
-**Choice:** state lives under `.anvil/` inside the user's repository. No hosted backend, no account, no telemetry, no network call unless the user opts into a sync provider.
+**Choice:** state lives in a local per-project directory. The default is a
+HOME workspace shared by every Git worktree; `ANVIL_STATE_LAYOUT=local` keeps
+the legacy in-repo `.anvil/` layout, and `ANVIL_ROOT` supplies an explicit
+root. No hosted backend, account, telemetry, or network call is required unless
+the user opts into a sync provider. See [Where anvil stores its state](how-to/state-location.md).
 
 ### Rejected alternative: SaaS-first
 
 A hosted control plane would let us ship a web dashboard, real-time collaboration, and a single sign-up funnel. Rejected because:
 
 1. **It changes the product category.** "Backend-neutral local-first state" is what distinguishes Anvil from CCPM-on-GitHub-Issues, Hamster Studio, and Jira/Rovo (see `competitive_gap_analysis_agentic_project_state.md` § "Strategic Positioning"). A SaaS control plane would compete in the task-management category instead.
-2. **Data ownership.** Users running PRDs through an LLM already worry about leakage; making the project plan itself leave the repo doubles that surface.
+2. **Data ownership.** Users running PRDs through an LLM already worry about leakage; making the project plan leave the developer's machine doubles that surface.
 3. **Offline-first is inherent.** Plane mode, airgapped networks, and unreliable Wi-Fi do not affect the core workflow. The system has no required online mode.
 4. **No auth flow.** `anvil init` is the entire onboarding.
 
 ### Trade-offs
 
 - **Accepted:** cross-machine collaboration goes through sync providers (a projection into GitHub Issues / Linear / Jira), not shared state.db. Slower and lossier than a CRDT, and that audience is buying Linear, not anvil.
-- **Accepted:** if `.anvil/` is git-ignored (sometimes recommended for `state.db` to avoid binary merge conflicts), the canonical state does not survive a `git clone` on a second machine. `events.jsonl` *can* be committed; `replay` rebuilds the DB. The user chooses the trade-off per repo.
+- **Accepted:** the default HOME workspace does not travel with `git clone`.
+  Cross-machine continuity uses `anvil backup` / `anvil restore`, a copied state
+  directory, or an explicitly committed `events.jsonl` in the opt-in local
+  layout; `replay` rebuilds the database.
 - **Lost:** hosted dashboard and cross-project search. Those are outside the local-first scope.
 
 ---
 
 ## Why claims with leases
 
-**Choice:** a `Claim` row is created on `anvil claim T012`, with `claimed_by`, `lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional branch/worktree binding. Heartbeats via `renew T012` every 5 min; stale leases detected and released on every CLI/MCP op.
+**Choice:** a `Claim` row is created on `anvil claim T012`, with `claimed_by`,
+`lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional
+branch/worktree binding. Bundled PostToolUse heartbeats attempt progress-gated
+renewal automatically; a human can run `anvil renew CLAIM_ID` before expiry.
+Stale leases are detected and released at queue and coordination entry points.
 
 ### Rejected alternatives
 
@@ -118,8 +132,8 @@ A 1-hour lease without heartbeat means stale claims wait the full hour to releas
 The `Evidence` Pydantic model captures the following (the *content* fields are optional at the model level; the identifiers `id`/`task_id`/`claim_id` and the `submitted_at`/`submitted_by` metadata are always present; the per-task evidence gate decides which content must be present for a given task):
 
 - `commands_run: list[str]`: the shell commands the agent cites as having run during the work
-- `files_changed: list[str]`: paths touched, cross-checked against `record-file-change.sh` events
-- `output_excerpt: str`: last N lines of test/build output, captured by `capture-evidence.sh`
+- `files_changed: list[str]`: paths touched, cross-checked against `hook dispatch record-file-change` events
+- `output_excerpt: str`: last N lines of test/build output, captured by `hook dispatch capture-evidence`
 - `pr_url` / `commit_sha`: where the work landed
 - `screenshots: list[str]`, `known_limitations: str`: optional supporting context
 
@@ -127,7 +141,15 @@ Note: `Evidence` now carries typed proofs — `CommandProof` (command / exit_cod
 
 ### Why hooks capture, not the agent
 
-`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records the verification commands the agent runs that match a hardcoded set of patterns (pytest, ruff, and the like), capturing their output (stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
+The shell-free `hook dispatch capture-evidence` path runs as a PostToolUse hook
+on `Bash` and records verification commands that match its fixed pattern set,
+including output and exit status. The retained `capture-evidence.sh` wrapper
+delegates to the same subcommand. The agent's job is to *cite* what to include
+in the submission; the hook supplies the ground truth. An agent that fabricates
+`commands_run: ["pytest"]` without having actually run pytest gets caught
+because the hook stream does not show a pytest invocation in the claim's
+window. The split is deliberate: agent-supplied evidence is auditable against
+system-captured evidence.
 
 ### Trade-off accepted
 
@@ -172,25 +194,40 @@ external-authority policy.
 
 ## Why MCP + CLI both
 
-**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`anvil claim T012`), and a FastMCP stdio server exposing 36 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
+**Choice:** CLI and MCP are complementary public state surfaces. The Typer CLI
+serves humans, shell-capable agents, hooks, and provider transports; the
+FastMCP stdio server exposes 36 structured tools to agents. Overlapping
+operations delegate to the same state engine. The two bounded provider reads
+(`project snapshot` and `prd show`) are intentionally CLI-only execution
+operations whose contracts MCP clients discover with `describe_surface`.
 
 ### Rejected alternatives
 
 - **CLI only.** Agents would have to shell out and parse stdout. Some can (Claude Code, with Bash); some cannot (Cursor, with no shell). Shell-out loses structured errors.
-- **MCP only.** Humans, shell scripts, and hooks still need a command-line surface. `anvil status` in a terminal during debugging is faster than starting an MCP client. Hooks are sh, not Python, so they shell out to the CLI.
+- **MCP only.** Humans, scripts, and hooks still need a command-line surface.
+  `anvil status` in a terminal during debugging is faster than starting an MCP
+  client, and the active hook manifest delegates through the Python CLI
+  dispatcher.
 - **REST/HTTP server.** A long-running process. Daemon problems (see below). Authentication. Port collisions. We get the agent-tool benefits via MCP stdio without any of that.
 
 ### The principle
 
-From `_positioning.md` § MCP vs plugin: **MCP exposes capabilities; the plugin layer encodes operating discipline.** The MCP tool `claim_task` does not decide *when* to claim, *which* specialist should execute, or *what* evidence is required; those decisions live in skills (`execute/SKILL.md`), agents (`sentinel.md`), and hooks (`check-claim.sh`).
+From `_positioning.md` § MCP vs plugin: **MCP exposes capabilities; the plugin
+layer encodes operating discipline.** The MCP tool `claim_task` does not decide
+*when* to claim, *which* specialist should execute, or *what* evidence is
+required; those decisions live in skills (`execute/SKILL.md`), agents
+(`sentinel.md`), and the active `anvil hook dispatch` paths.
 
 ### Trade-off accepted
 
-Two front doors means two surfaces to keep in sync. We mitigate by sharing the engine: both surfaces construct the same `Backend`, call the same `ClaimManager.claim()`, surface the same exceptions. If the engine layer is correct, both surfaces are correct.
+Overlapping front doors mean two surfaces to keep in sync. We mitigate by
+sharing the engine: both surfaces construct the same `Backend`, call the same
+state contracts, and surface bounded exceptions. Provider reads avoid a false
+parity promise by declaring their CLI-only transport in the operation catalog.
 
 ### Who calls which
 
-- **Hooks** call the CLI (sh scripts can't speak MCP).
+- **Hooks** call the shell-free Python CLI dispatcher.
 - **Humans** call the CLI (faster than spinning up an MCP client).
 - **Skills** call the CLI (they are markdown choreography invoking shell).
 - **Agents inside MCP-capable runtimes** call MCP (typed responses, structured errors).
@@ -220,7 +257,11 @@ Both paths are first-class. Neither is the "main" API.
 
 ### Trade-off accepted
 
-Six dimensions is more cognitive load than one. We mitigated by making LLM scoring the default (`score --use-llm`) so humans rarely score by hand; the template-based fallback gives reasonable defaults from heuristics on the task description. Lost: comparability with existing story-point velocity charts. The audience is not running sprint retros.
+Six dimensions is more cognitive load than one. Deterministic rule-based
+numeric scoring is therefore the default and remains reproducible offline;
+`score --use-llm` may augment explanations but never changes the six numeric
+scores. Lost: comparability with existing story-point velocity charts. The
+audience is not running sprint retros.
 
 ---
 
@@ -240,7 +281,11 @@ A blocking hook would refuse the Edit tool call when an agent tries to write a f
 
 ### The right shape
 
-Warn + log + audit trail. The check-claim hook prints a one-line warning to stderr ("warning: editing src/foo.py outside active claim T012 scope") and appends an event to `events.jsonl`. The human or downstream sentinel decides whether the warning matters.
+Warn, then record what actually happened. The check-claim path prints a
+one-line stderr warning when an edit overlaps another actor's active claim; it
+does not mutate state. After an edit, `record-file-change` independently writes
+the actual file-change event through the normal backend. Humans and reviewers
+can evaluate the warning and recorded work without blocking the edit tool.
 
 ### What gets enforced anyway
 
@@ -254,7 +299,11 @@ The discipline is layered: hooks observe and warn, the engine enforces invariant
 
 ### Trade-off accepted
 
-Hooks observe and report; the engine enforces state transitions. An agent that ignores warnings and submits evidence anyway is checked at `apply` time by the sentinel, which cross-references `files_changed` against the warning stream. Performance remains a constraint; see `roadmap.md` Theme 3 for the next hot-path pass on the 200ms budget.
+Hooks observe and report; the engine enforces state transitions. Claim-time
+file and conflict-group overlaps are enforced atomically, while post-claim
+scope warnings remain advisory and actual file changes remain auditable.
+The shell-free dispatcher is the active hot path; roadmap Theme 3 now preserves
+legacy-wrapper performance findings only as historical cleanup context.
 
 ---
 
@@ -338,7 +387,9 @@ See "Why local-first" above.
 
 **Why not:** going SaaS is choosing a different product. A hosted dashboard would compete with Linear, Jira, and Asana in the task-management category.
 
-Anvil's direction is durable state that survives session resets, lives in the repo, and does not require an account. If a dashboard ships later, it should be a downstream viewer of the same `.anvil/` directory.
+Anvil's direction is durable state that survives session resets, stays local,
+and does not require an account. If a dashboard ships later, it should be a
+downstream viewer of the same resolved project-state directory.
 
 ### Real-time collaborative editing (out of scope)
 

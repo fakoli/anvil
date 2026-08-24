@@ -125,13 +125,11 @@ markerless bare dirs lack. Behavior pinned by `test_existing_bare_key_workspace_
 origin marker for bare workspaces and matching it before honoring.
 
 ### B44-2 · PostToolUse hooks inert under the home-workspace layout
-**Status**: OPEN. `capture-evidence.sh` / `record-file-change.sh` / `heartbeat.sh`
-fast-path on a LOCAL `.anvil` (`[ ! -d .anvil ] && exit 0`), so they no-op under the
-default home-workspace layout (the repo has no local `.anvil`). B44 fixed the
-SessionStart hook (`detect-state.sh`) but NOT these — the fix is a perf-vs-correctness
-trade-off (a per-tool-call CLI spawn vs the cheap local check). Close by giving the
-wrappers a home-workspace-aware fast-path (or a cheap CLI probe) without paying a
-spawn on every tool call in non-anvil projects.
+**Status**: DONE / superseded. The active `hooks.json` manifest uses the
+shell-free Python dispatcher, whose state resolver supports the default HOME
+workspace plus local layout and `ANVIL_ROOT`. The legacy wrappers retain their
+local fast-path but are no longer wired; their limitation is compatibility-only
+unless a future manifest restores them.
 
 ### B44-3 · migrate-workspace copies a live SQLite db without quiescing
 **Status**: OPEN (low risk). `migrate-workspace` copies the whole `.anvil/` (incl.
@@ -497,7 +495,10 @@ SKILL.md line 99 states "Two events are appended to `events.jsonl`: `review.crea
 
 **From**: PR #41 Critic-2. **Status**: DONE (this PR — docs/evidence-buffer.md covers format, lifecycle, orphan.json policy, sentinel interaction, cleanup).
 
-Written by `capture-evidence.sh` + `hook capture-evidence`; consumed only by `sentinel` agent. No README/spec/skill mentions the format, lifecycle, or cleanup policy. `orphan.json` accumulates indefinitely.
+Historical discovery: the legacy wrapper and hook subcommand wrote the buffer,
+but its lifecycle was undocumented. The active shell-free dispatcher now owns
+capture, `anvil submit` reconciles claim-bound records, and `orphan.json`
+remains explicit diagnostic data until manually cleaned.
 
 **Fix**: add a `docs/evidence-buffer.md` covering format, relationship to `submit`, sentinel's consume-and-rotate behavior, and rotation policy.
 

@@ -6,6 +6,11 @@ coordinate on without conflicts.
 
 `anvil-state` installs the `anvil` CLI and the `anvil-mcp` MCP server.
 
+Current release: **v0.6.5** (schema 21, public API contract 14). The release
+adds revision-safe PRD lifecycle gates, transactional Git claims, bounded
+provider reads, scoped task routing, and faster no-UAC Windows test feedback;
+see the [full changelog](https://github.com/fakoli/anvil/blob/v0.6.5/CHANGELOG.md).
+
 Runtime compatibility: the published package requires Python 3.11+,
 Pydantic 2.11.7+, and FastMCP 3.x (3.0.0 or newer). These are the lowest
 versions that both resolve and provide Anvil's MCP registration and

@@ -34,6 +34,7 @@ _PINNED = [
 ]
 _USER_DOCS = [
     "README.md",
+    "bin/src/anvil/cli/describe.py",  # public manifest example in the docstring
     "docs/how-to/getting-started.md",
     "docs/cli-reference.md",
     "docs/architecture.md",

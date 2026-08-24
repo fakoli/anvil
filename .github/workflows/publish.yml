@@ -53,7 +53,7 @@ jobs:
         run: |
           uv sync --project bin --locked --extra custom
           (cd bin && uv run --locked ruff check ..)
-          uv run --project bin --locked pytest
+          uv run --project bin --locked pytest -n auto
           uv run --project bin --locked python benchmarks/run_benchmark.py --scenarios overlapping_files --quick --out "$RUNNER_TEMP/anvil-benchmark-results.md"
           uvx --with-requirements docs/requirements.txt mkdocs build --strict
 

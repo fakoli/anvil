@@ -1,6 +1,7 @@
-"""hook sub-app: check-claim, record-file-change, capture-evidence.
+"""Hook dispatch and internal claim/evidence subcommands.
 
-Internal helpers invoked by the plugin's bash hooks.
+The shipped manifest invokes the shell-free ``hook dispatch`` path. Retained
+bash wrappers call the same internal subcommands for compatibility and tests.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from anvil.naming import session_discriminator, task_claim_buffer_path
 
 hook_app = typer.Typer(
     name="hook",
-    help="Internal hook helpers — invoked by the plugin's bash hooks.",
+    help="Shell-free hook dispatcher and internal compatibility helpers.",
     no_args_is_help=True,
 )
 
@@ -892,7 +893,10 @@ def hook_check_claim(
         hidden=True,
     ),
 ) -> None:
-    """Used by hooks/check-claim.sh — exit 0 always; output goes to stderr.
+    """Check one edit against active claim scopes; exit 0 always.
+
+    The shipped manifest invokes this through ``hook dispatch check-claim``;
+    ``hooks/check-claim.sh`` is the retained compatibility wrapper.
 
     Checks whether FILE is within the scope of an active claim.
     - If FILE is in expected_files of a claim by THIS actor: silent exit 0.
@@ -957,9 +961,12 @@ def hook_record_file_change(
         hidden=True,
     ),
 ) -> None:
-    """Used by hooks/record-file-change.sh — appends a file_changed event.
+    """Append a file_changed event from the active dispatcher or legacy wrapper.
 
-    Writes a file_changed event to both the SQLite events table and events.jsonl.
+    The shipped manifest invokes this through ``hook dispatch
+    record-file-change``; ``hooks/record-file-change.sh`` is the retained
+    compatibility wrapper. The backend writes the event log first and then the
+    SQLite projection.
     Exits 0 always; any failure is silently swallowed so the hook never blocks
     the tool that triggered it.
     """
@@ -1060,9 +1067,11 @@ def hook_capture_evidence(
         hidden=True,
     ),
 ) -> None:
-    """Append a verification-command capture to .anvil/.evidence-buffer/.
+    """Append a verification-command capture to the resolved evidence buffer.
 
-    Called by hooks/capture-evidence.sh after every bash tool invocation.
+    The shipped manifest calls this through ``hook dispatch capture-evidence``
+    after matching Bash tool invocations. ``hooks/capture-evidence.sh`` is the
+    retained compatibility wrapper.
     Failures are swallowed — this hook must never break the session.
     Always exits 0.
     """

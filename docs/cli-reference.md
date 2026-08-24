@@ -74,9 +74,14 @@
   <project>` is how you inspect a specific project's state. (Passing a workspace
   path where a project is expected — e.g. `anvil status --workspace …` — fails
   with `No such option '--workspace'`.)
-- Mutating commands write to `state.db` (SQLite) **and** append a JSON line to
-  `events.jsonl` in the same transaction. The event log is the source of
-  truth; `state.db` is a derived projection that can be rebuilt by replaying
+- In the path examples below, `.anvil/...` means a path relative to that
+  resolved state directory unless the text explicitly says `<cwd>/.anvil/...`
+  for local layout.
+- Mutating commands use a locked, log-first critical section: append the event
+  to `events.jsonl`, then apply it to `state.db` inside `BEGIN IMMEDIATE`. If
+  SQLite fails after the append, it rolls back and the next initialization
+  forward-catches up from the retained log line. The event log is the source
+  of truth; `state.db` is a derived projection that can be rebuilt by replaying
   `events.jsonl`. See [`architecture.md`](architecture.md) for the replay
   contract.
 - Actor identity for claims, submissions, and reviews defaults to `$USER`,
@@ -122,7 +127,7 @@ highest:
    (`$XDG_CONFIG_HOME/anvil/config.yaml`) and can be pinned outright
    with the `ANVIL_GLOBAL_CONFIG` environment variable. This file is
    optional — most projects never need one.
-3. **Project config** — `.anvil/config.yaml`. Per-project overrides.
+3. **Project config** — `<resolved-state-dir>/config.yaml`. Per-project overrides.
    Any key set here wins over the same key in the global config. The project
    config is the one that must carry the required `project_name` /
    `project_id` (though the global layer *may* supply a default
@@ -132,7 +137,7 @@ highest:
 
 So a global default lease of `45` is overridden to `30` by a project
 `config.yaml` and to `15` by `claim --lease 15`. The same precedence applies
-to `ANVIL_ROOT` (which selects *which* project's `.anvil/` the
+  to `ANVIL_ROOT` (which selects *which* project's resolved state the
 merge reads) and every other config key. A broken or missing global config
 never blocks a command: a missing/empty file means "no global defaults", and
 a malformed one surfaces a warning while the command proceeds on the
@@ -142,7 +147,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 21)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.5 (schema 21)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -153,11 +158,13 @@ These appear on the root `anvil` invocation, before any subcommand.
 
 ### `anvil init` { #init }
 
-**Synopsis:** Scaffold a `.anvil/` directory in the current working
-directory. Creates `config.yaml`, `state.db` (SQLite, with the canonical
-schema), an empty append-only `events.jsonl`, and an empty `packets/`
-subdirectory. Emits `project.created` and `state.initialized` events to seed
-the project row.
+**Synopsis:** Scaffold the resolved state directory for the project selected by
+the current working directory (or `ANVIL_ROOT`). By default this is a
+per-project HOME workspace; `ANVIL_STATE_LAYOUT=local` opts into
+`<project>/.anvil/`. Creates `config.yaml`, `state.db` (SQLite, with the
+canonical schema), an empty append-only `events.jsonl`, and an empty
+`packets/` subdirectory. Emits `project.created` and `state.initialized` events
+to seed the project row.
 
 **Flags:**
 
@@ -165,7 +172,7 @@ the project row.
   basename of the current directory.
 - `--id TEXT` *(optional)* — project identifier slug (e.g. `my-project`).
   Defaults to a slug derived from `--name`.
-- `--force` *(flag)* — overwrite an existing `.anvil/` directory.
+- `--force` *(flag)* — overwrite an existing resolved state directory.
   Wipes `state.db` (including the `-wal` / `-shm` sidecars), `events.jsonl`,
   and `config.yaml`. Preserves `packets/` and `snapshots/` (user-generated).
 - `--with-sample` *(flag)* — seed a runnable toy project (sample `prd.md` +
@@ -178,9 +185,8 @@ the project row.
 **Exit codes:**
 
 - `0` — initialisation succeeded.
-- `1` — `.anvil/` already exists and `--force` was not passed; or the
-  current directory is the anvil plugin root itself (init refuses to
-  scaffold inside the plugin).
+- `1` — the resolved state directory already exists and `--force` was not
+  passed; or local layout would scaffold inside the anvil plugin root.
 
 **Example:**
 
@@ -1577,16 +1583,18 @@ for the full cross-harness walkthrough.
 
 ## Hook subcommands (internal — invoked by `hooks.json`)
 
-These commands are called by the plugin's bash hooks (in `hooks/`) — not by
-end users directly. They are documented here because they are the
-machine-facing surface of `anvil` and contributors writing custom
-hooks need the flag list. Every hook subcommand **always exits 0**: hook
+These commands are called by the shell-free Python dispatcher wired in
+`hooks/hooks.json`; retained bash wrappers in `hooks/` call the same
+subcommands for compatibility. They are not end-user commands. They are
+documented here because contributors writing custom hooks need the flag list.
+Every hook subcommand **always exits 0**: hook
 failures must never block the calling tool or session.
 
 ### `anvil hook check-claim` { #hook-check-claim }
 
-**Synopsis:** Used by `hooks/check-claim.sh` (PreToolUse on Edit / Write /
-NotebookEdit). Checks whether `FILE` is within the scope of an active claim.
+**Synopsis:** Used by `hook dispatch check-claim` (PreToolUse on Edit / Write /
+NotebookEdit) and its legacy `hooks/check-claim.sh` wrapper. Checks whether
+`FILE` is within the scope of an active claim.
 If `FILE` is in the `expected_files` of a claim owned by a *different* actor,
 warns to stderr. Silent in every other case.
 
@@ -1601,19 +1609,21 @@ warns to stderr. Silent in every other case.
 - `0` — always. Errors are silently swallowed; hooks must never block the
   tool.
 
-**Example (from `hooks/check-claim.sh`):**
+**Example (equivalent legacy-wrapper call):**
 
 ```bash
 anvil hook check-claim --file "src/auth/login.py" --actor "$SESSION_ID"
 ```
 
-**See also:** [`docs/architecture.md`](architecture.md) for the hook
-contract; `hooks/check-claim.sh`.
+**See also:** [`docs/architecture.md`](architecture.md) for the hook contract;
+`bin/src/anvil/cli/hooks.py` for the active dispatcher; `hooks/check-claim.sh`
+for the legacy wrapper.
 
 ### `anvil hook record-file-change` { #hook-record-file-change }
 
-**Synopsis:** Used by `hooks/record-file-change.sh` (PostToolUse on Edit /
-Write / NotebookEdit). Appends a `file_changed` event to both the SQLite
+**Synopsis:** Used by `hook dispatch record-file-change` (PostToolUse on Edit /
+Write / NotebookEdit) and its legacy `hooks/record-file-change.sh` wrapper.
+Appends a `file_changed` event to both the SQLite
 events table and `events.jsonl` so the audit log has a record of every file
 mutation made during a session.
 
@@ -1629,14 +1639,15 @@ mutation made during a session.
 
 - `0` — always. Errors are silently swallowed.
 
-**Example (from `hooks/record-file-change.sh`):**
+**Example (equivalent legacy-wrapper call):**
 
 ```bash
 anvil hook record-file-change \
   --file "src/auth/login.py" --tool "Edit" --actor "$SESSION_ID"
 ```
 
-**See also:** `hooks/record-file-change.sh`.
+**See also:** `bin/src/anvil/cli/hooks.py` for the active dispatcher;
+`hooks/record-file-change.sh` for the legacy wrapper.
 
 ### `anvil hook capture-evidence` { #hook-capture-evidence }
 

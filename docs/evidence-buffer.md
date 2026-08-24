@@ -2,7 +2,7 @@
 
 > **Audience:** users and operators inspecting or troubleshooting captured verification evidence.
 
-`.anvil/.evidence-buffer/` is a transient, append-only directory used by the
+`<resolved-state-dir>/.evidence-buffer/` is a transient, append-only directory used by the
 shell-free `anvil hook dispatch capture-evidence` hook to record command output
 between the moment a verification command runs and the moment `anvil submit`
 packages that output into a durable `evidence.submitted` event. The legacy
@@ -11,7 +11,8 @@ available.
 
 Only a fixed set of verification commands is captured: the hook matches on
 `pytest`, `ruff check`, `mypy`, `npm test`, `cargo test`, and `bun test`
-(`hooks/capture-evidence.sh`'s `VERIFICATION_PATTERNS`). Any other bash
+(`bin/src/anvil/cli/hooks.py`'s `_VERIFICATION_PATTERNS`; the legacy wrapper
+mirrors it). Any other bash
 command exits the hook silently and is never written to a buffer file — it
 is not just "not a verification command," it leaves no trace at all. A
 future phase may move this list to config.
@@ -175,10 +176,19 @@ happens when:
   owner/session.
 
 `orphan.json` is currently **never auto-cleaned**. It accumulates indefinitely
-until the user deletes it manually:
+until the user deletes it manually. Resolve the state directory first; do not
+assume it lives in the repository:
 
 ```bash
-rm .anvil/.evidence-buffer/orphan.json
+anvil_state_dir="$(anvil status --path-only)"
+rm -- "$anvil_state_dir/.evidence-buffer/orphan.json"
+```
+
+PowerShell equivalent:
+
+```powershell
+$anvilStateDir = anvil status --path-only
+Remove-Item -LiteralPath (Join-Path $anvilStateDir '.evidence-buffer\orphan.json')
 ```
 
 This is a known limitation. `submit --output-file` can preserve an orphan
@@ -208,13 +218,14 @@ durable event, not the buffer.
 
 ## When to manually clean
 
-- After a hard reset of project state (`rm -rf .anvil/.evidence-buffer/`).
+- After a hard reset of project state, after resolving and inspecting the exact
+  `<resolved-state-dir>/.evidence-buffer/` target.
 - After resolving an orphan-accumulation issue (e.g., a stuck claim was force-released and never resubmitted).
 - Before sharing a project state snapshot — the buffer is transient and not part of the canonical audit log.
 
 ## See also
 
-- `hooks/capture-evidence.sh` — the bash hook that writes to the buffer.
-- `bin/src/anvil/cli/hooks.py::capture-evidence` — the CLI subcommand the hook calls.
+- `bin/src/anvil/cli/hooks.py` — the active dispatcher and CLI subcommand that write the buffer.
+- `hooks/capture-evidence.sh` — the retained legacy wrapper for the same subcommand.
 - `bin/src/anvil/cli/packet_apply.py::submit` — the read side that reconciles the buffer into `evidence.submitted`.
 - [`docs/hooks-reference.md`](hooks-reference.md) — the broader hook lifecycle.

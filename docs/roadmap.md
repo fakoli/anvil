@@ -1,8 +1,8 @@
 # anvil roadmap
 
-**Last updated:** 2026-07-07 (restructured around Shipped / Now / Next / Later —
-the retired v1.11/v2.0/v2.1 version-target buckets are gone; see [How this is
-organized](#how-this-is-organized))
+**Last updated:** 2026-08-24 (v0.6.5 closeout; restructured around Shipped /
+Now / Next / Later — the retired v1.11/v2.0/v2.1 version-target buckets are
+gone; see [How this is organized](#how-this-is-organized))
 **Source of truth:** this file. Archived phase backlogs at [`phase-9-backlog.md`](archive/phase-9-backlog.md) and [`phase-11-backlog.md`](archive/phase-11-backlog.md) are kept for historical audit only — do not add new items there.
 **Companion:** [`tech-debt-backlog.md`](tech-debt-backlog.md) for non-roadmap debt (12 OPEN CL/TQ/PS items from PR #41 critics; tracked by origin PR, closed across phases). Items there are not duplicated here unless a roadmap item naturally touches the same file.
 
@@ -23,7 +23,8 @@ organized](#how-this-is-organized))
     capability expansion (multi-provider sync scale-out, push-based sync
     infra, per-provider config schemas).
   - **[Later](#later)** = follow-on capability and opportunistic hygiene —
-    additional sync providers, the snapshot subcommand, MCP sync tools,
+    additional sync providers, the local SQLite backup snapshot subcommand,
+    MCP sync tools,
     doc/composition cleanups, and items wanted but without a forcing function
     yet (formerly the separate `unscheduled` bucket; folded in here).
 - **Theme** = capability group (sync providers, conflict resolution,
@@ -73,7 +74,7 @@ shipped.
   ([`state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)),
   and tasks can declare typed `Verification.required_proofs`; a `command`
   requirement is satisfiable only by a `CommandProof` whose real `exit_code`
-  is in the passing set. `hooks/capture-evidence.sh` records each command's
+  is in the passing set. The shell-free capture-evidence dispatcher records each command's
   real exit code and an `output_sha256`; `anvil submit` (CLI and MCP)
   reconciles the per-claim buffer into `Evidence.proofs`. Additive and
   non-breaking — the legacy free-text `required_evidence` path stayed
@@ -258,7 +259,7 @@ Theme: typed proof. The substrate stops trusting strings.
   ([`state/models.py:233`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)); the
   unified gate ([`review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py))
   evaluates typed predicates;
-  [`hooks/capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) emits `CommandProof`
+  shell-free `hook dispatch capture-evidence` path emits `CommandProof`
   with real exit codes and output hashes. The substring path stayed
   enforced alongside the typed path rather than being deleted (additive, not
   breaking — old event logs replay unchanged). Depended on SL-0.
@@ -392,13 +393,21 @@ steps cannot double-claim or fake "done").
 Wanted and scoped; picked up once [Now](#now) clears — see [What this track
 explicitly defers](#what-this-track-explicitly-defers) for why these wait.
 
-These are the Phase 10 plugin-audit deferrals — 56 live items the five critics raised at SHOULD FIX, CONSIDER, or NIT severity. None are breaking. The bulk close as mechanical batches; see [Cross-cutting themes](#cross-cutting-themes-high-leverage-batches) for the recommended welder fan-out.
+These are the Phase 10 plugin-audit deferrals. Items already satisfied by the
+current implementation are marked `SHIPPED` inline; the remaining findings are
+SHOULD FIX, CONSIDER, or NIT severity, not release blockers. The bulk close as
+mechanical batches; see [Cross-cutting themes](#cross-cutting-themes-high-leverage-batches)
+for the recommended welder fan-out.
 
 ### Theme: Audit honesty (mutating-tool input validation)
 
-- **[P11-MC-S1]** All 6 mutating MCP tools (`mcp_server.py:459-464,526-530,572-576,679-684,733-741,972-977`) accept actor as plain `str` with no non-empty validation; empty actor persists into audit trail at every emitted event. Add `_require_actor(name, field="actor") -> str` helper near `_resolve_state_dir`; call as first line of every mutating tool body. _Single helper closes 6 sites; highest forensics-criticality._
+- **[P11-MC-S1]** **SHIPPED in v0.6.5.** The canonical `_require_actor`
+  validator now rejects empty actor identity before mutating MCP operations and
+  preserves normalized actor continuity across lifecycle surfaces.
 - **[P11-MC-S2]** `list_tasks.status: str | None` not constrained — typo like `"in-progress"` or `"DONE"` returns silently empty list. Replace with `Literal[...]` matching `TaskCountsByStatus` fields verbatim.
-- **[P11-MC-S4]** `get_next_task` accepts `actor` parameter but never uses it — contract lie. Remove from signature. _Trivial; schema-truthfulness win._
+- **[P11-MC-S4]** **SHIPPED in v0.6.5.** `get_next_task.actor` is retained and
+  now selects the actor-specific accept-rate history used by the task-offer
+  governor; CLI and MCP expose the same calculation and recovery fields.
 
 ### Theme: MCP schema fidelity
 
@@ -446,6 +455,10 @@ See [Theme 5](#theme-5-phase-status-table-drift-across-skills).
 
 See [Theme 3](#theme-3-hot-path-perf-budget-on-hook-scripts).
 
+**Superseded for the active manifest.** `hooks/hooks.json` now invokes the
+shell-free Python dispatcher; the entries below describe cleanup of retained,
+unwired legacy scripts rather than current hook latency.
+
 - **[P11-HK-S1]** `hooks/check-claim.sh:36-59` — hot-path perf budget violation; spawns `python3` twice (100-300ms) on every Edit/Write/NotebookEdit; exceeds declared 200ms. Consolidate into single `python3 -c` printing both fields; mirror `record-file-change.sh:35-58` pattern.
 - **[P11-HK-S2]** `hooks/record-file-change.sh:95-106` — hot-path perf budget violation; `_escape_json()` spawns 4 `python3` instances on fallback path; 5-6 total spawns. Move JSON escaping into original extraction `python3` block; emit pre-escaped values.
 - **[P11-HK-N1]** `hooks/record-file-change.sh:55-57` — three `printf … | sed -n 'Np'` invocations; each `sed` is a fork. Replace with single `read` / `mapfile`. _Drive-by during P11-HK-S2._
@@ -459,9 +472,15 @@ See [Theme 4](#theme-4-hook-contract-undocumented-at-plugin-level).
 
 ### Theme: Hooks (robustness)
 
+**Superseded for the active manifest.** The shell-free Python dispatcher owns
+active error isolation and state resolution. Legacy-script findings remain as
+optional cleanup unless those scripts are wired again.
+
 - **[P11-HK-C2]** All four `.sh` files — no diagnostic fallback when hook silently fails. Support `ANVIL_HOOK_DEBUG=1` env var redirecting stderr to `.anvil/.hook-debug.log`.
 - **[P11-HK-C3]** `hooks/detect-state.sh:29` — `$("$CLI" status --hook-format 2>&1)` merges stderr into status line shown to Claude. Drop `2>&1`; capture separately for diagnostic-fallback branch.
-- **[P11-HK-C4]** `hooks/capture-evidence.sh:27` + `check-claim.sh:17` + `record-file-change.sh:14` — implicit assumption hook cwd is project root via relative `STATE_DIR=".anvil"`. Replace with `STATE_DIR="${CLAUDE_PROJECT_DIR:-$PWD}/.anvil"`.
+- **[P11-HK-C4]** **SHIPPED.** The active hook manifest no longer invokes the
+  legacy shell scripts. Its shell-free `anvil hook dispatch` path resolves the
+  same HOME/local/`ANVIL_ROOT` state layout as the CLI and MCP server.
 - **[P11-HK-C5]** `hooks/detect-state.sh:14-20` — language detection uses sequential overwrites; polyglot projects mislabeled. Either emit comma-joined list or guard each line. _Cross-plugin coordination opportunity with `fakoli-flow/hooks/detect-context.sh`._
 
 ### Theme: Agents (description completeness)
@@ -478,14 +497,21 @@ See [Theme 4](#theme-4-hook-contract-undocumented-at-plugin-level).
 
 See [Theme 7](#theme-7-install-messaging-drift-in-readme-changelog).
 
-- **[P11-ST-S1]** `README.md:37-48` — install section says "not yet in marketplace" but root `.claude-plugin/marketplace.json` contains v1.9.0 entry. Replace manual-clone paragraph with `/plugin marketplace add fakoli/fakoli-plugins && /plugin install anvil@fakoli-plugins` flow.
-- **[P11-ST-S2]** `CHANGELOG.md:7-14` — `[Unreleased]` opens with past-tense summary of v1.9.0; content already lives under dated section. Trim leading sentence; keep forward-looking notes.
-- **[P11-ST-S3]** `.gitignore:7` — covers `bin/.pytest_cache/` but plugin-root `.pytest_cache/` not ignored locally. Add `.pytest_cache/` so rule survives a future repo split.
-- **[P11-ST-S4]** `README.md:17,39,49,190` — internally inconsistent install messaging — 4 different phrasings about "once published". Settle on single install story; sweep all 4 sites. _Batches with P11-ST-S1._
-- **[P11-ST-C1]** `README.md` (new section near top) — no top-level surface-count table. Add header: "ships 6 agents, 7 skills, 4 hooks, 0 commands, 1 CLI, 1 MCP server with 36 tools."
-- **[P11-ST-C2]** `CHANGELOG.md:9-14` — forward-looking items name LinearIssuesProvider / MondayBoardsProvider / webhooks without issue/PR links. Append `(see docs/roadmap.md § Next — P9B-1 / P9B-2 / P9B-5)` or equivalent anchor links.
+- **[P11-ST-S1]** **SHIPPED.** README uses the public
+  `/plugin marketplace add fakoli/anvil` and `/plugin install anvil@anvil`
+  flow, with source installation kept as an explicit alternative.
+- **[P11-ST-S2]** **SHIPPED.** `[Unreleased]` is empty; dated release entries
+  own past-tense changes.
+- **[P11-ST-S3]** **SHIPPED.** Root `.pytest_cache/` is ignored.
+- **[P11-ST-S4]** **SHIPPED.** README presents one published-package install
+  story and labels alternate paths consistently.
+- **[P11-ST-C1]** **CLOSED as superseded.** A hand-maintained README count
+  table would immediately drift. `anvil describe --json` is the authoritative
+  live CLI/MCP inventory; architecture documents the current surface split.
+- **[P11-ST-C2]** **SHIPPED.** `[Unreleased]` no longer carries unlinked
+  forward-looking provider claims; roadmap items own that planning detail.
 - **[P11-ST-C3]** `README.md:5-7` — minimal badge set; no CI / test-count badges. Add CI status badge (once live-GitHub nightly workflow public) and a test-count badge.
-- **[P11-ST-N1]** `README.md:132` — "Phase 9 (this release, v1.9.0)" parenthetical will stale on the next release. Replace with "Phase 9 shipped in v1.9.0" for tense-stability. _Drive-by during P11-ST-S1/S4._
+- **[P11-ST-N1]** **SHIPPED.** The stale "this release" parenthetical is gone.
 
 ### Theme: Sync providers (multi-provider expansion)
 
@@ -564,23 +590,23 @@ Items spanning multiple critics/areas that benefit from cohesive treatment. Thes
 
 ### Theme 2 — Non-empty actor validation across MCP mutating tools
 
-**Closes:** P11-MC-S1 (1 SHOULD FIX, 6 sites).
-**Pattern:** all 6 mutating MCP tools accept `actor: str` / `claimed_by: str` with no `.strip()` non-empty check; empty actor persists into the audit trail.
-**Fix shape:** single `_require_actor(name: str, field: str = "actor") -> str` helper near `_resolve_state_dir`; call as first line of every mutating tool body.
-**Welder effort:** define helper + 6 one-liners — single welder pass, ~30 minutes.
+**Closed in v0.6.5:** P11-MC-S1 (1 SHOULD FIX, originally 6 sites).
+The shared `_require_actor` validator now protects mutating MCP entry points;
+this batch remains here as the audit cross-reference.
 
 ### Theme 3 — Hot-path perf budget on hook scripts
 
-**Closes:** P11-HK-S1, P11-HK-S2 (and P11-HK-N1 as drive-by).
-**Pattern:** `check-claim.sh` spawns python3 twice; `record-file-change.sh` spawns python3 5-6 times. Each cold python3 spawn is 50-150ms; declared budget is 200ms on hot events. Pattern in `record-file-change.sh:35-58` already proves the consolidation works (1 spawn).
-**Welder effort:** consolidate each script's extraction + escaping into single python3 round-trip — ~2 hours per script, 2 scripts.
+**Superseded for the active manifest:** P11-HK-S1, P11-HK-S2, and
+P11-HK-N1 now describe only retained, unwired legacy wrappers. Active hooks use
+the shell-free Python dispatcher. Revisit this batch only if the wrappers are
+wired again or retained compatibility itself gains a measured performance
+requirement.
 
 ### Theme 4 — Hook contract undocumented at plugin level
 
-**Closes:** P11-HK-S3 (1 SHOULD FIX).
-**Pattern:** the non-blocking contract lives only in script-header comments (3/4 hooks have identical "Rules: no set -e, no piped grep, always exit 0, complete in < 200ms" comments) but is absent from README and `docs/`. Future maintainer who hasn't read every script will reintroduce `set -e` and silently break PreToolUse.
-**Fix shape:** new `hooks/README.md` OR `docs/hooks.md` section OR README "Hooks" row expansion. Single paragraph: "All anvil hooks are non-blocking: must `exit 0` regardless of internal failure, must not use `set -e`/`set -u`/`set -o pipefail`, must wrap CLI calls with `|| true`, and must complete in < 200ms on hot events. SessionStart hook may take up to 1s."
-**Welder effort:** ~15 minutes.
+**Closed:** P11-HK-S3. Architecture and design now document the shell-free
+dispatcher, the five active hooks, their non-blocking `exit 0` contract, and
+the separately opt-in blocking stop gate.
 
 ### Theme 5 — Phase-status table drift across skills
 
@@ -598,10 +624,10 @@ Items spanning multiple critics/areas that benefit from cohesive treatment. Thes
 
 ### Theme 7 — Install messaging drift in README + CHANGELOG
 
-**Closes:** P11-ST-S1, P11-ST-S2, P11-ST-S4, P11-ST-N1 (3 SHOULD FIX + 1 NIT).
-**Pattern:** README has 4 different phrasings about "once published"; CHANGELOG `[Unreleased]` narrates the just-shipped release; README has a stale "Phase 9 (this release)" parenthetical. All four are downstream effects of a release shipping without a docs-scribe sweep.
-**Fix shape:** single README sweep + CHANGELOG trim. Single docs-scribe pass.
-**Welder effort:** ~1 hour.
+**Closed:** P11-ST-S1, P11-ST-S2, P11-ST-S4, and P11-ST-N1. README now has
+one published-package install story, `[Unreleased]` is empty, and release-bound
+phrasing has been removed. The release helper and its tests keep current-version
+examples synchronized.
 
 ---
 
@@ -616,7 +642,13 @@ Follow-on capability and opportunistic hygiene — wanted, but not next in line.
 
 ### Theme: Snapshot / replay
 
-- **[P9B-7]** `anvil snapshot` subcommand. **OPEN.** Phase 5 (v1.4.0) removed the pre-created `.anvil/snapshots/` directory because nothing wrote to it. Intent was always to ship a `sqlite3 .backup` wrapper. Acceptance: `anvil snapshot [--retention 30d|count:N]` writes `.anvil/snapshots/YYYY-MM-DDTHH-MM-SSZ.db`; `--list` shows existing snapshots with size + age; `--restore <name>` restores atomically (temp file, swap via rename); documented in `docs/specs/2026-05-24-anvil-v0.md` § Snapshots.
+- **[P9B-7]** `anvil snapshot` subcommand. **OPEN.** This is a local SQLite
+  `.backup` and retention workflow, distinct from the shipped read-only
+  `anvil project snapshot --json` provider operation. Phase 5 (v1.4.0) removed
+  the pre-created `snapshots/` directory because nothing wrote to it.
+  Acceptance: `anvil snapshot [--retention 30d|count:N]` writes timestamped
+  databases under the resolved state directory; `--list` shows size + age;
+  `--restore <name>` restores atomically (temp file, swap via rename).
 
 ### Theme: MCP surface (sync tools)
 
