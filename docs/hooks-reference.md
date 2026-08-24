@@ -37,9 +37,10 @@ All five active dispatcher paths follow these invariants, enforced by tests:
    one-line state banner.
 
 The retained legacy shell wrappers additionally avoid `set -e`, `set -u`, and
-`set -o pipefail`; wrap CLI calls with `|| true`; and carry a header-level
-<200ms target. Those wrapper-only constraints are compatibility guidance, not
-the active dispatcher's measured performance contract.
+`set -o pipefail`; wrap CLI calls with `|| true` or capture and consume their
+exit status; and carry a header-level <200ms target. Those wrapper-only
+constraints are compatibility guidance, not the active dispatcher's measured
+performance contract.
 
 ### Why non-blocking
 

@@ -753,8 +753,9 @@ def _render_markdown(
         if active_claim is not None:
             if safe_packet_actor is not None:
                 lines.append(
-                    f"- Bundled PostToolUse heartbeats normally renew on qualifying"
-                    f" progress; if the claim nears expiry, run `anvil renew {active_claim.id}"
+                    f"- When bundled PostToolUse hooks are active, heartbeats normally"
+                    f" renew on qualifying progress; if the claim nears expiry, run"
+                    f" `anvil renew {active_claim.id}"
                     f" --actor {_quote_packet_actor(packet_actor)}`"
                 )
             else:

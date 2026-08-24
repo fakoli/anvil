@@ -145,8 +145,9 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 - **Lease diagnostics and guidance match runtime defaults.** `claim` / `renew`
   help, `doctor` fallback calculations, generated work packets, shipped skills,
-  and active hook docs now consistently use the 240-minute default and
-  progress-gated automatic heartbeat contract.
+  and active hook docs now consistently use the 240-minute default and, when
+  bundled PostToolUse hooks are active, the progress-gated automatic heartbeat
+  contract.
 
 - **Claim-isolated hook command capture
   ([#180](https://github.com/fakoli/anvil/issues/180)).** Hook-observed command proofs
