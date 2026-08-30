@@ -1,7 +1,7 @@
 {
   "name": "anvil",
   "version": "0.6.5",
-  "description": "Local-first, runtime-neutral project state for humans and AI coding agents — turn PRDs into lockable, evidence-backed work packets.",
+  "description": "Local-first, runtime-neutral project state for humans and AI coding agents \u2014 turn PRDs into lockable, evidence-backed work packets.",
   "author": {
     "name": "Sekou Doumbouya",
     "url": "https://github.com/fakoli"
@@ -20,18 +20,5 @@
     "sqlite",
     "terraform-for-work"
   ],
-  "skills": "./skills/",
-  "interface": {
-    "displayName": "Anvil",
-    "shortDescription": "Local-first project state for AI coding agents",
-    "longDescription": "Anvil turns PRDs into lockable, evidence-backed work packets agents can claim, execute, and verify — durable SQLite state, claim/lease coordination for parallel agents, and evidence-gated completion. Runtime-neutral: the same project state drives Codex, Claude, and other harnesses.",
-    "developerName": "Sekou Doumbouya",
-    "category": "Productivity",
-    "websiteURL": "https://github.com/fakoli/anvil",
-    "defaultPrompt": [
-      "Start a PRD for this project",
-      "Plan the PRD into ready tasks",
-      "Claim the next ready task and execute it"
-    ]
-  }
+  "skills": "./skills/"
 }
