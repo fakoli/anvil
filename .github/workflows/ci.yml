@@ -30,6 +30,10 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
+          # Job-scoped suffix: setup-uv keys otherwise collide across
+          # same-OS/same-Python jobs and the losers fail to save (README:
+          # "the first job which starts uploading its cache will win").
+          cache-suffix: ${{ github.job }}
 
       - name: Set up Python 3.11
         run: uv python install 3.11
@@ -67,6 +71,10 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
+          # Job-scoped suffix: setup-uv keys otherwise collide across
+          # same-OS/same-Python jobs and the losers fail to save (README:
+          # "the first job which starts uploading its cache will win").
+          cache-suffix: ${{ github.job }}
 
       - name: Set up Python 3.11
         run: uv python install 3.11
@@ -115,6 +123,10 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
+          # Job-scoped suffix: setup-uv keys otherwise collide across
+          # same-OS/same-Python jobs and the losers fail to save (README:
+          # "the first job which starts uploading its cache will win").
+          cache-suffix: ${{ github.job }}
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -166,6 +178,10 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
+          # Job-scoped suffix: setup-uv keys otherwise collide across
+          # same-OS/same-Python jobs and the losers fail to save (README:
+          # "the first job which starts uploading its cache will win").
+          cache-suffix: ${{ github.job }}
 
       # Same command Read the Docs effectively runs (.readthedocs.yaml).
       # --strict: any broken relative link or anchor fails the build
