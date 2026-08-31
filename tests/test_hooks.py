@@ -103,6 +103,17 @@ class _FakeProcess:
         self.returncode = 1
 
 
+class _DelayedFakeProcess(_FakeProcess):
+    def __init__(self, *, delay: float, stdout: bytes) -> None:
+        super().__init__(stdout=stdout, returncode=None)
+        self._ready_at = hooks.time.monotonic() + delay
+
+    def poll(self) -> int | None:
+        if self.returncode is None and hooks.time.monotonic() >= self._ready_at:
+            self.returncode = 0
+        return self.returncode
+
+
 def _future_schema_project(tmp_path: Path) -> Path:
     original_cwd = os.getcwd()
     os.chdir(tmp_path)
@@ -677,6 +688,28 @@ def test_path_probe_response_budget_starts_after_worker_launch(
     probe = hooks._probe_path_engine(
         which_fn=lambda _name: "C:/Anvil/anvil.exe",
         popen_fn=delayed_launch,
+    )
+
+    assert probe == hooks._InstallationProbe("ok", "0.7.0", 17)
+
+
+def test_path_probe_accepts_valid_response_after_old_timeout_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_timeout_boundary = 0.01
+    process = _DelayedFakeProcess(
+        delay=old_timeout_boundary * 1.5,
+        stdout=b"anvil 0.7.0 (schema 17)\n",
+    )
+    monkeypatch.setattr(
+        hooks,
+        "_HOOK_ENGINE_PROBE_TIMEOUT_SECONDS",
+        old_timeout_boundary * 2,
+    )
+
+    probe = hooks._probe_path_engine(
+        which_fn=lambda _name: "C:/Anvil/anvil.exe",
+        popen_fn=lambda *_args, **_kwargs: process,
     )
 
     assert probe == hooks._InstallationProbe("ok", "0.7.0", 17)

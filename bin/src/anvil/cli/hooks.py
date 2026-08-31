@@ -51,7 +51,7 @@ _VERIFICATION_PATTERNS = (
     "cargo test",
     "bun test",
 )
-_HOOK_ENGINE_PROBE_TIMEOUT_SECONDS = 1.0
+_HOOK_ENGINE_PROBE_TIMEOUT_SECONDS = 2.0
 _MAX_HOOK_CONTEXT_BYTES = 4_096
 _MAX_PLUGIN_MANIFEST_BYTES = 4_096
 _MAX_VERSION_OUTPUT_BYTES = 1_024
@@ -239,7 +239,7 @@ def _probe_path_engine(*, which_fn=None, popen_fn=None) -> _InstallationProbe:  
     """Probe trusted PATH with capped streams and a killable process tree.
 
     PATH resolution is an executable trust boundary, just as it is for an
-    interactive ``anvil`` command. The one-second budget covers the contained
+    interactive ``anvil`` command. The two-second budget covers the contained
     probe response; the hook manifest's five-second timeout bounds synchronous
     operating-system process setup. Windows job handles and the POSIX worker's
     parent-death monitor tear down the contained process tree with this parent.
