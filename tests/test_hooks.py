@@ -697,6 +697,14 @@ def test_path_probe_accepts_valid_response_after_old_timeout_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old_timeout_boundary = 0.01
+    monotonic_values = iter((0.0, 0.0, 0.0, 0.0, 0.0, 0.015, 0.019))
+
+    class _Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return next(monotonic_values)
+
+    monkeypatch.setattr(hooks, "time", _Clock())
     process = _DelayedFakeProcess(
         delay=old_timeout_boundary * 1.5,
         stdout=b"anvil 0.7.0 (schema 17)\n",
