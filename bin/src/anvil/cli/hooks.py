@@ -82,11 +82,30 @@ class _InstallationProbe:
     schema_version: int | None = None
 
 
-def _active_hook_identity() -> _EngineIdentity:
+def _active_engine_version() -> str:
     from anvil import __version__
+    from anvil.build_identity import get_build_identity
+
+    try:
+        identity = get_build_identity()
+    except OSError:
+        # Build provenance is diagnostic context, not a prerequisite for the
+        # SessionStart status record. Preserve an explicit unknown identity
+        # when checkout or symlink inspection is unavailable.
+        return f"{__version__}+source.unknown"
+    if (
+        identity.tag == f"v{__version__}"
+        and identity.tag_distance == 0
+        and not identity.dirty
+    ):
+        return __version__
+    return identity.display_version
+
+
+def _active_hook_identity() -> _EngineIdentity:
     from anvil.state.schema import get_schema_version
 
-    return _EngineIdentity(__version__, get_schema_version())
+    return _EngineIdentity(_active_engine_version(), get_schema_version())
 
 
 def _probe_plugin_manifest() -> _InstallationProbe:
@@ -110,6 +129,13 @@ def _probe_plugin_manifest() -> _InstallationProbe:
         r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", version
     ):
         return _InstallationProbe("malformed")
+    # The manifest carries the release-line version. When that line matches the
+    # running plugin package, attach the plugin's bounded build provenance so a
+    # source-installed fix can be compared exactly with the PATH artifact.
+    from anvil import __version__
+
+    if version == __version__:
+        version = _active_engine_version()
     return _InstallationProbe("ok", engine_version=version)
 
 
