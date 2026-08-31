@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from anvil import __version__
 from anvil.build_identity import BuildIdentity
 from anvil.cli import hooks
@@ -43,6 +45,18 @@ def test_active_engine_version_collapses_exact_clean_release_tag(monkeypatch) ->
     )
 
     assert hooks._active_engine_version() == __version__
+
+
+@pytest.mark.parametrize("failure", [PermissionError("denied"), OSError("loop")])
+def test_active_engine_version_keeps_context_when_provenance_is_unavailable(
+    monkeypatch, failure: OSError
+) -> None:  # noqa: ANN001
+    def unavailable() -> BuildIdentity:
+        raise failure
+
+    monkeypatch.setattr("anvil.build_identity.get_build_identity", unavailable)
+
+    assert hooks._active_engine_version() == f"{__version__}+source.unknown"
 
 
 def test_plugin_manifest_attaches_matching_source_provenance(

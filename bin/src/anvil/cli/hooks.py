@@ -86,7 +86,13 @@ def _active_engine_version() -> str:
     from anvil import __version__
     from anvil.build_identity import get_build_identity
 
-    identity = get_build_identity()
+    try:
+        identity = get_build_identity()
+    except OSError:
+        # Build provenance is diagnostic context, not a prerequisite for the
+        # SessionStart status record. Preserve an explicit unknown identity
+        # when checkout or symlink inspection is unavailable.
+        return f"{__version__}+source.unknown"
     if (
         identity.tag == f"v{__version__}"
         and identity.tag_distance == 0
