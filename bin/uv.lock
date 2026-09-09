@@ -88,6 +88,9 @@ bedrock = [
 custom = [
     { name = "openai" },
 ]
+openai = [
+    { name = "openai" },
+]
 s3 = [
     { name = "boto3" },
 ]
@@ -114,13 +117,14 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.0.0,<4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "markdown-it-py", specifier = ">=4.0" },
-    { name = "openai", marker = "extra == 'all-providers'", specifier = ">=1.0" },
+    { name = "openai", marker = "extra == 'all-providers'", specifier = ">=2.38.0" },
     { name = "openai", marker = "extra == 'custom'", specifier = ">=1.0" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=2.38.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.13,<0.28" },
 ]
-provides-extras = ["bedrock", "custom", "s3", "all-providers"]
+provides-extras = ["bedrock", "custom", "openai", "s3", "all-providers"]
 
 [package.metadata.requires-dev]
 dev = [

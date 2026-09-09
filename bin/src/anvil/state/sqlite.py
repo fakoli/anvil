@@ -12193,7 +12193,6 @@ class SqliteBackend:
             or row[0] != payload.task_id
             or row[1] != payload.submitted_by
             or row[2] != "active"
-            or row[3] is not None
             or row[8] is not None
         ):
             return False
@@ -12224,6 +12223,31 @@ class SqliteBackend:
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
+        if row[3] is not None:
+            # Bundle members still use exact claim-bound hook proofs. Only the
+            # active coordinator may submit, while both leases remain valid.
+            parent = conn.execute(
+                "SELECT bc.claimed_by, bc.status, bc.released_at, bc.lease_expires_at, "
+                "bc.member_claim_ids, b.coordinator, b.status "
+                "FROM bundle_claims bc JOIN execution_bundles b ON b.id = bc.bundle_id "
+                "WHERE bc.id = ?", (row[3],),
+            ).fetchone()
+            if parent is None:
+                return False
+            try:
+                members = json.loads(parent[4])
+                parent_expiry = datetime.datetime.fromisoformat(parent[3])
+                if (
+                    parent[0] != payload.submitted_by or parent[1] != "active"
+                    or parent[2] is not None or parent[5] != payload.submitted_by
+                    or parent[6] != "active" or not isinstance(members, dict)
+                    or members.get(payload.task_id) != payload.claim_id
+                    or event_time >= parent_expiry
+                    or (live_now is not None and live_now >= parent_expiry)
+                ):
+                    return False
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False
         project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
         task_row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (payload.task_id,)

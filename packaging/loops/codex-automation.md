@@ -20,9 +20,11 @@ needed, because the queue itself is the cursor.
 
 In the Codex app, create a scheduled automation (cron — e.g. `0 9 * * 1-5`) and
 paste the prompt below. The automation must run where `anvil` is on PATH and
-`.anvil/` exists (your project checkout or a worktree). Codex's approval mode
-gates the write step (`apply`); set it to allow writes if the automation should
-ship, or leave it report-only to stop at `submit`.
+`anvil status` resolves the initialized project from the intended checkout or
+worktree. Select GPT-6 Astra with high reasoning effort and ChatGPT subscription
+login. Use the current harness for implementation. API execution requires
+explicit user enablement, including for Claude; credentials in the environment
+are not permission. Every scheduled run stops at evidence submission.
 
 ## The prompt (one governed task per fire)
 
@@ -43,9 +45,10 @@ Advance exactly ONE Anvil task, then stop. Do not loop.
 6. `anvil submit <task> --commands "<commands run>" --files-changed "<paths>"`
    — the evidence is the typed proof; this auto-releases the claim and moves the
    task to needs_review.
-7. `anvil apply <task> --approve --strict` — the gate. --strict refuses approval
-   when required evidence is missing. (Omit this step if the automation is
-   report-only; a human runs apply from the evidence.)
+7. Run three independent adversarial reviews with distinct angles before
+   presenting the task for acceptance. Fix blocking findings and repeat affected
+   reviews. Keep the task in needs_review; human confirmation is required before
+   anvil apply --approve.
 8. Stop. Report the task id and outcome. The NEXT scheduled fire picks up the
    next ready task from durable state.
 ```

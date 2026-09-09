@@ -8140,13 +8140,18 @@ class TestUseLlmDefaultProvider:
     Previously --use-llm without ANTHROPIC_API_KEY exited 1 (the old default
     was the direct Anthropic API). The default is now ``agent-sdk`` —
     subscription auth, no API key — so resolution succeeds and the command
-    runs. We patch ``claude_agent_sdk.query`` so the test exercises the real
-    resolver + provider path without spawning the actual ``claude`` CLI.
+    runs. We patch subscription authentication and ``claude_agent_sdk.query``
+    so the test exercises the real resolver + provider path without a host
+    login or spawning the actual ``claude`` CLI.
     """
 
     def _patch_agent_sdk_query(self, monkeypatch, text: str, capture=None) -> None:  # type: ignore[no-untyped-def]
         claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        monkeypatch.setattr(
+            "anvil.planning.llm.require_subscription", lambda *args, **kwargs: "mock-claude"
+        )
 
         async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
             if capture is not None:
@@ -8176,7 +8181,8 @@ class TestUseLlmDefaultProvider:
         exits 0 (no longer the old exit-1 missing-key failure)."""
         pytest.importorskip("claude_agent_sdk")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        self._patch_agent_sdk_query(monkeypatch, "A concise trade-off note.")
+        cap: dict = {}
+        self._patch_agent_sdk_query(monkeypatch, "A concise trade-off note.", capture=cap)
 
         _do_init(tmp_path)
         _write_prd(tmp_path, _FULL_PRD_CONTENT)
@@ -8190,6 +8196,7 @@ class TestUseLlmDefaultProvider:
         )
         # The old contract is gone: no missing-key error.
         assert "ANTHROPIC_API_KEY" not in combined
+        assert "model" in cap, "Scoring must reach the mocked subscription provider."
 
     def test_score_use_llm_model_flag_threads_to_provider(
         self, tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]

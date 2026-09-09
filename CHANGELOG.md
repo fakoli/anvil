@@ -6,6 +6,27 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- GPT-6 Astra planning through Codex's ChatGPT subscription, explicit reasoning
+  effort, and an optional native OpenAI Responses provider.
+- Current-session execution guidance for subscription and local-model harnesses,
+  with `llm_provider: harness` preventing nested model calls.
+- Opt-in Codex/Claude behavioral execution checks and Astra automation templates
+  that stop at evidence submission and preserve human acceptance.
+
+### Fixed
+
+- Bundle-member hook proofs now validate active coordinator ownership and both
+  leases instead of rejecting all typed command evidence for bundles.
+
+### Changed
+
+- Direct OpenAI, Anthropic, Bedrock, and custom API providers now require
+  `llm_allow_api: true`. Existing API users must explicitly enable that setting.
+  Subscription children ignore API credentials and ambient provider overrides.
+
+
 ## [0.6.5] - 2026-08-24
 
 > v0.6.4 remained an untagged release candidate and was never published.

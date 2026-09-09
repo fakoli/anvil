@@ -7,8 +7,15 @@
 > [`docs/research/2026-06-19-maximize-anvil-codex.md`](../research/2026-06-19-maximize-anvil-codex.md)
 > (ranked opportunities) — this file is the **map**, that file is the **bets**.
 
-**Verified against:** `codex-cli 0.130.0`, macOS, 2026-06-19. The running model on
-this machine is `gpt-5.5` (reasoning `low|medium|high|xhigh`). Codex moves fast —
+**Astra integration (2026-09-09):** Anvil now supports `llm_provider: codex`
+with `gpt-6-astra` through a ChatGPT subscription. Work-queue and reconciliation
+templates pin Astra with `high` effort and remain paused on installation.
+Use [LLM configuration](../llm.md) for provider selection and
+[current-harness execution](../how-to/execute-in-your-harness.md) for local or
+subscription sessions. The inventory below retains its original observation
+date; it is not evidence of current host configuration.
+
+**Historical inventory verified against:** `codex-cli 0.130.0`, macOS, 2026-06-19. The recorded model was `gpt-5.5` (reasoning `low|medium|high|xhigh`). Codex moves fast —
 re-verify flags with `codex <cmd> --help` and re-read `~/.codex/` before relying on
 any "needs smoke test" item below.
 

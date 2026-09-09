@@ -1,125 +1,47 @@
-# anvil behavioral evals (Layer 3, opt-in, costed)
+# Anvil behavioral evaluations
 
-A small **behavioral-regression** harness that drives a *real* Claude Code agent
-through one anvil skill end-to-end against a throwaway anvil project, then asserts
-anvil's **own state** (`anvil status`, the workspace `prd.md`, `events.jsonl`)
-matches the skill's promise.
-
-This is the **complement** to the deterministic static contract evals:
-
-| Layer | Lives in | Checks | Cost | In fast CI? |
-|---|---|---|---|---|
-| Static contract | `tests/test_layout_assumptions.py`, `tests/test_skill_cli_contract.py` | Skills cite *real* `anvil` commands/flags; never hard-code an in-repo `.anvil/` path | free, ms | yes |
-| **Behavioral (this)** | `evals/` | A real agent, handed the skill, actually drives anvil to the promised *state* | real subscription capacity, ~minutes | **no — opt-in** |
-
-The static evals can prove a skill *says* the right commands. They cannot prove a
-real agent *follows* them to the right outcome. Behavioral evals catch semantic /
-instruction drift the static checks structurally cannot (e.g. wording that leads
-the agent to write the PRD to the wrong place, or skip the parse).
-
-## What the prototype covers
-
-One happy-path flow: the **`start-prd`** skill.
-
-Promise under test: given a rough idea and the six interview answers, `start-prd`
-authors a parseable PRD into the workspace and parses it, advancing
-`prd-status: none -> draft`.
-
-Assertions (all over anvil's own state, in `cases/start_prd.yaml`):
-- `anvil status --json` -> `data.prd_status == "draft"`
-- the workspace `prd.md` exists and contains the parser-required sections
-- `state.db` and `events.jsonl` exist
-- `events.jsonl` carries a `prd.parsed` event
-
-## How it works
-
-1. **Isolate** — `mkdtemp` a scratch project; run every `anvil` command with
-   `ANVIL_ROOT=<scratch>`. `ANVIL_ROOT` always wins and is literal
-   (`<ANVIL_ROOT>/.anvil`, see `bin/src/anvil/cli/_helpers.py`), so all state
-   lands under the scratch dir, a single `rmtree` cleans it up, and the real
-   `~/.anvil` is never touched. (`IsolatedEnv`, a context manager.)
-2. **Drive** — `claude-agent-sdk` runs a real agent (over its bundled Claude Code
-   CLI) with the skill body + the six interview answers inlined into the prompt,
-   so it runs unattended. The skill is also copied into
-   `<scratch>/.claude/skills/` (mirrors the agent-eval isolator).
-3. **Assert** — deterministic pure-Python checks over the resulting state.
-
-## Running it
-
-It is **double-gated** so it never spends capacity by accident:
-- it refuses unless `RUN_BEHAVIORAL_EVALS=1`;
-- the pytest wrapper additionally skips if `claude-agent-sdk` is not installed.
-
-`claude-agent-sdk` is an **eval-only dependency** (not in `bin/pyproject.toml`,
-because it is CLI-wrapper-only and costed). Install it into a throwaway venv:
+These opt-in checks run a real Codex or Claude agent in a disposable Anvil
+project, then verify Anvil's own state and the resulting artifact. They consume
+subscription capacity and never run in ordinary CI.
 
 ```bash
-uv venv /tmp/anvil-evals
-uv pip install --python /tmp/anvil-evals/bin/python claude-agent-sdk anyio pyyaml
+RUN_BEHAVIORAL_EVALS=1 uv run --project bin python evals/run.py \
+  evals/cases/start_prd.yaml --provider codex --model gpt-6-astra \
+  --reasoning-effort high --report /tmp/anvil-start-prd-report.json
+RUN_BEHAVIORAL_EVALS=1 uv run --project bin python evals/run.py \
+  evals/cases/execute.yaml --provider codex --report /tmp/anvil-execute-report.json
+RUN_BEHAVIORAL_EVALS=1 uv run --project bin python evals/run.py \
+  evals/cases/execute.yaml --provider claude
 ```
 
-Then run the standalone runner (prints a pass/fail report):
+The provider must have an existing subscription login. The shared adapter
+checks public CLI auth status, ignores ambient user settings, and removes or
+masks API credentials and provider overrides in child environments. It does not
+read credential files, request a key, or change a running harness's provider.
+Claude's SDK is a core dependency; Codex execution uses its installed CLI.
 
-```bash
-RUN_BEHAVIORAL_EVALS=1 /tmp/anvil-evals/bin/python evals/run.py
-# or a specific case:
-RUN_BEHAVIORAL_EVALS=1 /tmp/anvil-evals/bin/python evals/run.py evals/cases/start_prd.yaml
-```
+Cases:
 
-Or via pytest (point pytest at the file from a venv that has both pytest and the
-SDK):
+- `start_prd.yaml`: author and parse a PRD; require draft status, required
+  sections, and the parse event.
+- `execute.yaml`: claim a ready task, implement a program, verify it, and submit
+  evidence. Require `needs_review`, a submission event, and independently
+  verified program output. Never automatically accept the task.
 
-```bash
-RUN_BEHAVIORAL_EVALS=1 pytest evals/test_behavioral_eval.py -s
-```
+The runner uses `uv run --project <checkout>/bin` with its working directory and
+`ANVIL_ROOT` pinned to the scratch project. It puts that checkout's `anvil` on
+the agent PATH. State and artifacts are removed on exit. Reports contain case,
+provider/model selection, latency, available token counts, and assertion
+results; they exclude prompts, account metadata, and credentials. Codex token
+counts measure subscription usage, not billable API dollars.
 
-### Why it is NOT in the fast CI gate
+The same state operations work when the current harness uses a locally served
+model. Configure that connection in the harness and use Anvil's `harness`
+provider mode; see [the execution guide](../docs/how-to/execute-in-your-harness.md).
+The subscription drivers here do not qualify a particular local-model deployment.
 
-- It **spends real Claude subscription capacity** (one agent run per case).
-- It is **latency-nondeterministic** (real model, real tool loop).
-
-The repository-root `pytest.ini` pins `testpaths = tests`, so
-`uv run --project bin pytest` **never collects `evals/`**. The static evals
-stay the fast gate; this is the deliberate, opt-in behavioral gate.
-
-## Auth (important)
-
-The SDK drives the underlying CLI, which resolves auth like interactive Claude
-Code:
-- if `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` are set, the CLI uses that **API key**;
-- if they are unset, it falls back to the **logged-in subscription session**.
-
-The harness **scrubs `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` from `os.environ`**
-for the duration of the run (and restores them after), so it uses the
-subscription session. This is mandatory: the SDK transport builds the subprocess
-env as `{**os.environ, **options.env}`, where `options.env` can only *add* keys,
-never *remove* an inherited one — so scrubbing the real `os.environ` is the only
-way to keep a quota-capped API key from breaking every run with a
-`400 usage-limit` error.
-
-Other hardening baked in: `setting_sources=[]` (so ambient Claude Code
-hooks/settings don't leak into the subprocess); tolerate the harmless
-`opentelemetry` ImportError; and ignore the SDK's trailing terminal control-frame
-error *if* a `ResultMessage` was already delivered (the run actually finished).
-
-## Files
-
-- `harness.py` — `IsolatedEnv` (isolation + cleanup), `run_agent` (SDK driver ->
-  `ExecutionTrace`), and the `check_*` / `run_assertion` deterministic assertions.
-- `cases/start_prd.yaml` — the case: prompt inputs + allowed tools + assertions.
-- `run.py` — standalone runner: load a case, isolate, drive, assert, report.
-- `test_behavioral_eval.py` — opt-in pytest wrapper (gated + SDK-guarded).
-
-## Extending
-
-Add a `cases/*.yaml` and run it with `run.py <path>`. The assertion vocabulary
-(`status_field`, `file_exists`, `file_contains`, `events_contains_action`) covers
-most skill outcomes; add a new `check_*` in `harness.py` and wire it into
-`run_assertion` for anything else. Natural next flows: `plan` (assert task counts)
-and `claim` (assert claim-lease state).
-
-## Last verified run
-
-`start_prd_happy_path`: **PASS** — 6/6 assertions, agent `is_error=False`, 4
-turns, `prd_status` advanced `none -> draft`, `prd.parsed` event present. Scratch
-dir cleaned up on teardown.
+Add YAML cases with `prompt` (or interview answers), optional `prd_source`,
+`config`, and `setup_commands`, plus deterministic assertions. The production
+CLI performs every state mutation. Static and offline contract tests in
+`tests/` remain the ordinary CI gate; live tests require
+`RUN_BEHAVIORAL_EVALS=1` at both runner and driver entry points.

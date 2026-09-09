@@ -17,6 +17,11 @@ independent and separate accepted deliveries are desirable.
 - A progress note is an audit heartbeat, not evidence and not a subagent heartbeat.
 - Every member still needs fresh completion evidence bound to the current bundle member
   authorization. Historical evidence remains readable but cannot complete a new bundle.
+- For typed command evidence, pin `ANVIL_CLAIM_ID` to the member authorization
+  and `ANVIL_ACTOR` to the coordinator when capturing the real command result.
+  Hook proofs retain their exact member claim/generation; submission additionally
+  checks the active coordinator, member mapping, and both lease expiries.
+  Imported external claim-command artifacts still require an ordinary claim.
 - Reviewers must be distinct from the coordinator and from one another. Required angles,
   review count, and re-review budget come from the bundle policy.
 

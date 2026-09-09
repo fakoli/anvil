@@ -91,6 +91,13 @@ This check costs one minute. A wrong interpretation discovered at submit costs t
 
 ### Step 3 — Do the work
 
+This loop runs in the current harness: a Codex/Claude subscription session or a
+harness connected to an explicitly selected local model. Anvil's CLI/MCP owns
+state; the harness owns reasoning and tools. `llm_provider: harness` disables
+nested planning calls. Do not switch the user's selected model, start a model
+server, or use API credentials unless explicitly enabled. See
+[execution in your harness](../../docs/how-to/execute-in-your-harness.md).
+
 Do the work directly in this session. Read the work packet, implement against the acceptance criteria, and run the verification commands yourself (Step 5) when the implementation is complete.
 
 ---

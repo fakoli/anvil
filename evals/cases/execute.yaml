@@ -1,0 +1,80 @@
+id: execute_in_current_harness
+skill: execute
+description: >
+  Execute a ready task in the current harness, verify the artifact independently,
+  and require evidence submission with acceptance still pending.
+project_name: harness-token-echo
+max_turns: 25
+timeout_seconds: 600
+allowed_tools: [Bash, Read, Write, Edit]
+config:
+  llm_provider: harness
+  llm_allow_api: false
+  llm_fallback: false
+  worktree_isolation: "off"
+  actor: eval-harness
+prd_source: |
+  # Project: Harness token echo
+
+  ## Summary
+  A tiny Python command for verifying harness execution.
+
+  ## Goals
+  - Print a fixed token.
+
+  ## Non-Goals
+  - Network or model API calls.
+
+  ## Requirements
+  - R001: Running echo.py prints ANVIL and exits zero.
+
+  ## Acceptance Criteria
+  - Running python echo.py prints exactly ANVIL followed by a newline.
+
+  ## Features
+  ### F001: Token output
+  **Requirements:** R001
+  Print a fixed token.
+
+  ## Tasks
+  ### T001: Implement token output
+  **Feature:** F001
+  **Priority:** high
+  **Likely files:** echo.py
+
+  Implement a small Python program that prints the required token.
+
+  **Acceptance criteria:**
+  - Running python echo.py prints exactly ANVIL followed by a newline.
+
+  **Verification:**
+  - `python echo.py`
+setup_commands:
+  - [prd, parse]
+  - [prd, review]
+  - [prd, review, --approve]
+  - [plan, --no-llm]
+  - [score]
+  - [review, tasks]
+prompt: >
+  Complete task T001 in this scratch project. The PRD is already approved and
+  the task is ready. Claim it as eval-harness using --actor eval-harness, then fetch and read its work packet. Implement echo.py, run the
+  verification command, capture its real stdout/stderr and exit code with
+  anvil hook capture-evidence --command "python echo.py" --exit-code CODE
+  --stdout-file STDOUT_PATH --stderr-file STDERR_PATH --actor eval-harness,
+  setting ANVIL_CLAIM_ID to the actual claim id in the capture process. Then submit the actual file list and command with
+  --actor eval-harness. This scratch directory intentionally has no git repo;
+  no branch or commit is required. Stop at needs_review. Do not invoke any
+  nested LLM provider or accept the task.
+assertions:
+  - check: task_status
+    task: T001
+    equals: needs_review
+  - check: events_contains_action
+    action: evidence.submitted
+  - check: project_command
+    argv: [python, echo.py]
+    stdout: "ANVIL\n"
+  - check: command_proof
+    task: T001
+    command: python echo.py

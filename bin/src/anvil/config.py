@@ -86,7 +86,10 @@ class Config:
     # predictability and surprises ops teams during incidents. Pick one per
     # process; re-launch to switch.
     # ---------------------------------------------------------------------
-    llm_provider: Literal["agent-sdk", "anthropic", "bedrock", "custom"] | None = None
+    llm_provider: (
+        Literal["agent-sdk", "codex", "harness", "openai", "anthropic", "bedrock", "custom"]
+        | None
+    ) = None
 
     # Opt back into env-based provider auto-detection (the pre-agent-sdk
     # behavior). Default ``False``: with no explicit ``llm_provider``, anvil
@@ -94,6 +97,14 @@ class Config:
     # CUSTOM_LLM_BASE_URL. Set ``True`` to let those env vars pick the provider
     # again (with ``agent-sdk`` as the final fallback).
     llm_fallback: bool = False
+
+    # API execution requires permission independently of provider selection.
+    # Subscription-backed agent-sdk/codex never read API keys or fall back.
+    llm_allow_api: bool = False
+    llm_reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # Extra reasoning allowance for Responses only; zero preserves caller caps.
+    # Explicitly increase after measuring a workload, never retry with more silently.
+    openai_reasoning_budget: int = 0
 
     # Explicit model id (overrides ``llm_tier``). Pass when you need a
     # specific Anthropic-API id (``claude-opus-4-7-20260124``), a Bedrock
@@ -755,10 +766,11 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
     llm_provider_raw = _str_or_none(data.get("llm_provider"))
     if llm_provider_raw is not None:
         llm_provider_value: (
-            Literal["agent-sdk", "anthropic", "bedrock", "custom"] | None
+            Literal["agent-sdk", "codex", "harness", "openai", "anthropic", "bedrock", "custom"]
+            | None
         ) = _validate_literal(  # type: ignore[assignment]
             llm_provider_raw,
-            ("agent-sdk", "anthropic", "bedrock", "custom"),
+            ("agent-sdk", "codex", "harness", "openai", "anthropic", "bedrock", "custom"),
             "llm_provider",
         )
     else:
@@ -775,6 +787,17 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         )
     else:
         llm_tier_value = None
+
+    llm_allow_api = data.get("llm_allow_api", False)
+    if not isinstance(llm_allow_api, bool):
+        raise ValueError("llm_allow_api must be a boolean")
+    llm_reasoning_effort = _validate_literal(
+        data.get("llm_reasoning_effort", "medium"),
+        ("low", "medium", "high", "xhigh", "max"), "llm_reasoning_effort",
+    )
+    openai_reasoning_budget = data.get("openai_reasoning_budget", 0)
+    if type(openai_reasoning_budget) is not int or not 0 <= openai_reasoning_budget < 128000:
+        raise ValueError("openai_reasoning_budget must be an integer from 0 to 127999")
 
     # S3 durable storage knobs. Mirror bedrock_region/bedrock_profile pattern.
     durable_store = _validate_literal(
@@ -794,6 +817,9 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         project_id=str(data["project_id"]),
         llm_provider=llm_provider_value,
         llm_fallback=llm_fallback,
+        llm_allow_api=llm_allow_api,
+        llm_reasoning_effort=llm_reasoning_effort,  # type: ignore[arg-type]
+        openai_reasoning_budget=openai_reasoning_budget,
         llm_model=_str_or_none(data.get("llm_model")),
         llm_tier=llm_tier_value,
         bedrock_region=_str_or_none(data.get("bedrock_region")),
@@ -1140,13 +1166,13 @@ events_path: events.jsonl
 # ---------------------------------------------------------------------------
 # LLM integration (optional — used by `anvil plan/score/expand --use-llm`)
 #
-# `llm_provider` picks ONE of: agent-sdk | anthropic | bedrock | custom.
+# Providers: agent-sdk | codex | harness | openai | anthropic | bedrock | custom.
 # When blank, the default is `agent-sdk` — the Claude Agent SDK driving the
-# bundled `claude` CLI over your logged-in subscription (no API key). This is
+# installed `claude` CLI over your logged-in subscription (no API key). This is
 # the capacity-bound default; it needs the `claude` CLI on PATH at call time.
 #
 # `llm_fallback: true` (default false) restores env auto-detection before
-# falling through to agent-sdk:
+# falling through to agent-sdk; it also requires llm_allow_api: true:
 #   ANTHROPIC_API_KEY → anthropic    (direct API)
 #   AWS_REGION + anthropic[bedrock] installed → bedrock
 #   CUSTOM_LLM_BASE_URL → custom     (any OpenAI-compatible /v1 endpoint)
@@ -1164,9 +1190,13 @@ events_path: events.jsonl
 #
 # See docs/llm.md for the full setup guide.
 # ---------------------------------------------------------------------------
-llm_provider:                       # agent-sdk | anthropic | bedrock | custom (blank = agent-sdk)
-llm_fallback:                       # true = env auto-detect before agent-sdk (default false)
-llm_tier:                           # opus|sonnet|haiku; blank=sonnet, agent-sdk=sub default
+# Providers: agent-sdk | codex | harness | openai | anthropic | bedrock | custom
+llm_provider:                       # blank = agent-sdk
+llm_fallback: false                 # env auto-detect also requires llm_allow_api: true
+llm_allow_api: false                # explicit permission for any API provider
+llm_reasoning_effort: medium        # codex/openai: low|medium|high|xhigh|max
+openai_reasoning_budget: 0          # additional Responses output tokens; explicit opt-in
+llm_tier:                           # Claude only: opus|sonnet|haiku
 llm_model:                          # explicit model id (overrides tier)
 
 # Bedrock-only knobs (ignored unless llm_provider resolves to "bedrock").

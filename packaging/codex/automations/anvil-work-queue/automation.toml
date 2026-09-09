@@ -2,10 +2,10 @@ version = 1
 id = "{{ID}}"
 kind = "cron"
 name = "Anvil — work the task queue"
-prompt = "Work the anvil task queue for this project. Use the anvil MCP tools (or the `anvil` CLI): find the next ready task (get_next_task / `anvil next`), claim it, fetch its work packet, implement it to satisfy the acceptance criteria, run the verification commands, then submit completion evidence — never mark work complete without passing evidence. If no task is ready, say so and stop. Work in the provided worktree; open one PR per task and do not merge."
+prompt = "Advance exactly one Anvil task in this invocation using the current harness and its ChatGPT subscription. Do not start a nested model or use API credentials unless the user explicitly enables API execution. Use the anvil MCP tools (or the `anvil` CLI): find the next ready task (get_next_task / `anvil next`), claim it, fetch its work packet, implement it to satisfy the acceptance criteria, run the verification commands, then submit completion evidence — never mark work complete without passing evidence. If no task is ready, say so and stop. Work in the provided worktree; open one PR per task and do not merge. Stop at needs_review after submitting evidence. Run three independent adversarial reviews with distinct angles before presenting it for acceptance; unresolved blocking findings fail the gate. Never run anvil apply --approve without human confirmation."
 status = "PAUSED"
 rrule = "FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=9;BYMINUTE=0"
-model = "gpt-5-codex"
+model = "gpt-6-astra"
 reasoning_effort = "high"
 execution_environment = "worktree"
 cwds = [{{CWDS}}]
