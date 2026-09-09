@@ -107,6 +107,7 @@ def test_harness_executes_cli_work_with_real_claim_bound_proof(monkeypatch, bund
 def test_claude_driver_cancels_on_timeout(monkeypatch, tmp_path):
     import anyio
     import claude_agent_sdk
+
     from anvil.planning import subscription
 
     closed = []

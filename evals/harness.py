@@ -175,8 +175,11 @@ def run_codex_agent(
         is_error=False, result=result.text, num_turns=result.num_turns,
         session_id=result.session_id, raw=result.events,
         duration_seconds=time.monotonic() - started,
-        usage={"input_tokens": result.input_tokens, "cached_input_tokens": result.cached_input_tokens,
-               "output_tokens": result.output_tokens},
+        usage={
+            "input_tokens": result.input_tokens,
+            "cached_input_tokens": result.cached_input_tokens,
+            "output_tokens": result.output_tokens,
+        },
     )
 
 
@@ -202,9 +205,9 @@ def run_agent(
     if os.environ.get("RUN_BEHAVIORAL_EVALS") != "1":
         raise RuntimeError("Subscription behavioral evaluation requires RUN_BEHAVIORAL_EVALS=1.")
     from anvil.planning.subscription import (
+        claude_subscription_env,
         require_subscription,
         subscription_env,
-        claude_subscription_env,
     )
 
     if not math.isfinite(timeout) or timeout <= 0:
@@ -382,11 +385,14 @@ def check_events_contains_action(env: IsolatedEnv, action: str) -> AssertResult:
 def run_assertion(env: IsolatedEnv, spec: dict[str, Any]) -> AssertResult:
     check = spec["check"]
     if check == "command_proof":
-        submitted = [e for e in _events(env.state_dir)
-                     if e.get("action") == "evidence.submitted" and e.get("target_id") == spec["task"]]
+        submitted = [
+            e for e in _events(env.state_dir)
+            if e.get("action") == "evidence.submitted" and e.get("target_id") == spec["task"]
+        ]
         proofs = submitted[-1]["payload_json"].get("proofs", []) if submitted else []
-        from anvil.state.models import CommandProof
         from pydantic import ValidationError
+
+        from anvil.state.models import CommandProof
 
         passed = False
         for raw in proofs:
