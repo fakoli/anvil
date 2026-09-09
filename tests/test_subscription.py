@@ -152,3 +152,38 @@ def test_runner_timeout_has_no_unbounded_pipe_drain(monkeypatch, tmp_path):
     terminate.assert_called_once()
     assert process.wait.call_count == 1
     process.communicate.assert_not_called()
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_taskkill_failure_preserves_timeout_or_cancellation(monkeypatch, tmp_path, cancelled):
+    from unittest.mock import Mock, call
+
+    original = KeyboardInterrupt() if cancelled else subprocess.TimeoutExpired("codex", 1)
+    process = Mock(pid=123)
+    process.wait.side_effect = [original, 0]
+    # The launcher exits after the initial wait fails, before taskkill runs.
+    process.poll.return_value = 0
+    taskkill_error = subprocess.CalledProcessError(128, ["taskkill"])
+    taskkill = Mock(side_effect=taskkill_error)
+    monkeypatch.setattr(sub.subprocess, "run", taskkill)
+    monkeypatch.setattr(sub.subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(sub, "require_subscription", lambda *a, **k: "/fake/codex")
+    terminate = sub._terminate_process_tree
+    monkeypatch.setattr(
+        sub, "_terminate_process_tree", lambda process, **kwargs: terminate(process, windows=True)
+    )
+
+    if cancelled:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            sub.run_codex("input", cwd=tmp_path, timeout=1)
+        assert caught.value is original
+        assert "cleanup also failed" in original.__notes__[0]
+    else:
+        with pytest.raises(sub.SubscriptionError, match="timed out.*cleanup also failed") as caught:
+            sub.run_codex("input", cwd=tmp_path, timeout=1)
+        assert isinstance(caught.value.__cause__, sub.SubscriptionError)
+        assert caught.value.__cause__.__cause__ is taskkill_error
+    assert process.wait.call_args_list == [call(timeout=1), call(timeout=5)]
+    assert taskkill.call_args.kwargs["timeout"] == 5
+    process.kill.assert_not_called()
+    process.communicate.assert_not_called()

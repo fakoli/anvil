@@ -238,10 +238,18 @@ def run_codex(
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                _terminate_process_tree(process, windows=os.name == "nt")
+                try:
+                    _terminate_process_tree(process, windows=os.name == "nt")
+                except Exception as cleanup_error:
+                    raise SubscriptionError(
+                        "Codex subscription request timed out; process-tree cleanup also failed."
+                    ) from cleanup_error
                 raise SubscriptionError("Codex subscription request timed out.") from None
-            except BaseException:
-                _terminate_process_tree(process, windows=os.name == "nt")
+            except BaseException as error:
+                try:
+                    _terminate_process_tree(process, windows=os.name == "nt")
+                except Exception as cleanup_error:
+                    error.add_note(f"Codex process-tree cleanup also failed: {cleanup_error}")
                 raise
             if process.returncode != 0:
                 raise SubscriptionError(
