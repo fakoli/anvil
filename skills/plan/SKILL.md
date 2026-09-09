@@ -5,7 +5,7 @@ description: Turn a reviewed PRD into a ready-to-execute task graph — generate
 
 # Plan — PRD to Ready Task Graph
 
-Convert an approved PRD into a queue of agent-ready tasks. This skill drives four sequential state transitions: PRD requirements → features and tasks → scored tasks → reviewed-and-ready tasks. Once the queue contains at least one `ready` task, agents can claim work.
+Turn an approved PRD into features and tasks, score them, then review them into a ready queue. Agents can claim ready tasks.
 
 ---
 
@@ -108,9 +108,17 @@ On `proceed anyway`, continue to Step 1. The task graph will reflect the ambigui
 
 On `show me the list`, surface a compact one-line-per-item view, then re-ask.
 
-The soft-gate design is deliberate: `find-decisions` non-empty does NOT block planning. The agent surfaces the cost of proceeding without resolving and lets the user choose the cadence.
+Unresolved decisions are a soft gate: explain their impact and let the user choose whether to resolve them before planning.
 
 ---
+
+### Current-harness planning mode
+
+With `llm_provider: harness`, this session authors tasks in the resolved PRD,
+then parses, reviews, runs `anvil plan --no-llm`, and scores deterministically.
+This also applies to a harness using a local model. Do not invoke nested LLM
+providers; direct APIs require explicit user enablement and `llm_allow_api: true`.
+See [harness execution](../../docs/how-to/execute-in-your-harness.md).
 
 ### Step 1 — Generate features and tasks (`plan` guarantees tasks as of v1.15.0)
 
@@ -139,7 +147,7 @@ When you see `(N generated via LLM ...)`, surface it explicitly in chat so the u
 
 > Plan generated 3 features and 19 tasks. The PRD had no `## Tasks` section, so I generated them via LLM and appended a `## Tasks` block to the PRD file (the path is echoed in the `appended to …` line, auditable on disk). Want to review the generated tasks before continuing? (show me / looks good / I want to edit first)
 
-If the LLM call fails (no `ANTHROPIC_API_KEY`, network failure, malformed response), the CLI exits non-zero with a clear message. **Do not paper over a failure by dispatching the planner subagent as a workaround** — surface the error to the user and ask whether they want to set up the LLM path or author tasks manually in `## Tasks`.
+If the LLM call fails (subscription unavailable, network failure, malformed response), the CLI exits non-zero with a clear message. **Do not paper over a failure by dispatching the planner subagent as a workaround** — surface the error to the user and ask whether they want to set up the LLM path or author tasks manually in `## Tasks`.
 
 If you genuinely don't want LLM auto-gen for a specific call (e.g. on a CI machine without API keys), pass `--no-llm`. The CLI exits 1 with a clear "0 tasks generated; author them manually" message.
 
@@ -150,7 +158,7 @@ same selected ID and present titles, features, and priorities in chat:
 > [list output]
 > Anything mis-scoped or missing before I run `score`? (yes / looks good / let me check first)
 
-Catching mis-scoped tasks here costs one loop; catching them after scoring or claiming costs three.
+
 
 ### Step 1.5 — Present post-plan decisions as structured Q&A
 
@@ -160,20 +168,14 @@ When the LLM-generated task list lands, it may carry decisions the user has to m
 
 For Claude Code runtimes, use the `AskUserQuestion` tool so the user gets a structured pick UI rather than free-form text to type. For other runtimes, fall back to explicit numbered prompts:
 
-> **Decision 1 — Scope overrun (87h vs 80h budget)**
-> The generated tasks total ~87h of work; your declared phase budget is 80h. How should we resolve the 7h overrun?
-> 1. Cut T014 + trim T002 (lands at ~80h; F004 keeps T012+T013)
-> 2. Cut T008 + T018 + trim T007 (distributed across features)
-> 3. Defer T017 (Wasm network policy — affects F005)
-> 4. Keep all tasks and accept the overrun
->
-> Pick 1 / 2 / 3 / 4 (or describe your own).
+For example, explain a schedule overrun and offer concrete scope reductions or
+an explicit budget increase, then wait for the user's choice.
 
-Always: agent generates the question, proposes 2-4 candidate answers when the surrounding context allows, accepts the pick, applies the choice (edit `prd.md`, re-parse, etc.). One decision per turn — do NOT batch three decisions into one question.
+Offer concrete choices, wait for the answer, apply it, then continue to the next decision.
 
 When the LLM flagged tasks for expansion, do **not** open a per-task Q&A here — expansion is no longer a decision the user makes task-by-task. Scoring (Step 2) emits an EXPANSION QUEUE for every task at/above the configured `auto_expand_threshold`, and Step 3 auto-expands the whole queue with one summary checkpoint at the end. Only surface expansion as a question if the project has opted out (`auto_expand: false` in `.anvil/config.yaml`) or the user has said they want to pick manually.
 
-The one-decision-per-turn rule still applies whenever the post-plan output surfaces structural concerns about the PRD (e.g., "R010 vs F003 drift"). Each concern is one Q&A turn with proposed fix options, not a wall of "issues to consider."
+Apply the same one-decision-per-turn flow to structural PRD conflicts.
 
 ---
 
@@ -209,7 +211,9 @@ EXPANSION QUEUE (complexity >= 4)
 2 task(s) queued for expansion. ...
 ```
 
-**The queue drives Step 3 automatically — do not ask the user per task.** Unless the user opted out (`auto_expand: false` in `.anvil/config.yaml`, or they said so in chat), proceed straight to Step 3 and expand every queued task. The queue replaces the old "flag for expand and ask" dance: the score already made the decision; your job is to execute it and present one summary afterward.
+**In `llm_provider: harness` mode, author the smaller task blocks in this session, then parse, review, plan with `--no-llm`, and score again. Never invoke the nested expansion provider.**
+
+**For other providers, the queue drives Step 3 automatically — do not ask the user per task.** Unless the user opted out (`auto_expand: false` in `.anvil/config.yaml`, or they said so in chat), proceed straight to Step 3 and expand every queued task. The queue replaces the old "flag for expand and ask" dance: the score already made the decision; your job is to execute it and present one summary afterward.
 
 Two score signals still warrant explicit attention in chat (these are NOT auto-handled):
 
@@ -219,6 +223,10 @@ Two score signals still warrant explicit attention in chat (these are NOT auto-h
 ---
 
 ### Step 3 — Auto-expand the queued tasks (v1.21.0)
+
+**Harness mode:** follow Current-harness planning mode above and split the task
+in the resolved source within this session. The nested-provider commands in
+this step apply only to other explicitly selected providers.
 
 **Default behavior: expand every task in the EXPANSION QUEUE automatically — no per-task user Q&A.** Dispatch the planner agent (`agents/planner.md`) to work the queue, or drive the commands yourself when the runtime has a shell:
 
@@ -234,7 +242,7 @@ anvil plan [--prd <PRD_ID>]
 anvil score [--prd <PRD_ID>]
 ```
 
-**Skip auto-expansion only when the user opted out** — `auto_expand: false` in `.anvil/config.yaml` (the queue section will not even render), or an explicit instruction in chat ("don't split anything yet"). In the opt-out case, fall back to asking once: "N tasks scored at/above the expansion threshold — want me to expand them?"
+**Outside harness mode, skip auto-expansion only when the user opted out** — `auto_expand: false` in `.anvil/config.yaml` (the queue section will not even render), or an explicit instruction in chat ("don't split anything yet"). In the opt-out case, fall back to asking once: "N tasks scored at/above the expansion threshold — want me to expand them?"
 
 **One summary checkpoint after the queue is drained.** Do not narrate each expansion as a separate decision; collect the results and present a single recap before moving to Step 4:
 

@@ -3,6 +3,16 @@
 > **Audience:** contributors and maintainers deciding or reviewing tier
 > defaults. For day-to-day `--use-llm` setup, see [`docs/llm.md`](llm.md).
 
+GPT-6 Astra is available through `llm_provider: codex` using ChatGPT subscription
+login, or the explicitly enabled `openai` Responses provider. Use
+`llm_reasoning_effort: medium` initially; work-queue automation uses `high`.
+The current harness, including one using a locally served model, can own all
+model work with `llm_provider: harness`. See
+[execution in your harness](how-to/execute-in-your-harness.md).
+
+Claude tier defaults below remain specific to Claude agents and Anthropic
+providers. They do not select an Astra model or change a running session.
+
 This document explains *why* anvil's agents default to specific Claude tiers (Opus / Sonnet / Haiku) and how to override them. Companion to [`docs/llm.md`](llm.md), which covers *how* to configure each provider and has the canonical tier/model-id/cost table.
 
 ---

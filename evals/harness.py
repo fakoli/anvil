@@ -38,10 +38,12 @@ run per case). This is NOT part of the fast CI gate. Gate it behind
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,12 +51,6 @@ from typing import Any
 # Repo root is evals/'s parent; the anvil CLI runs via `uv run anvil` from bin/.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN_DIR = REPO_ROOT / "bin"
-
-# claude-agent-sdk drives the underlying CLI; if these are set the CLI prefers
-# the (quota-capped, in this environment) API key over the subscription session
-# and every run fails on a 400 usage-limit error. ALWAYS scrub them.
-_API_KEY_VARS = ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY")
-
 
 # ---------------------------------------------------------------------------
 # Isolation
@@ -98,11 +94,9 @@ class IsolatedEnv:
 
     def cli_env(self) -> dict[str, str]:
         """Environment for `anvil` invocations: ANVIL_ROOT-pinned, key-scrubbed."""
-        env = dict(os.environ)
-        env["ANVIL_ROOT"] = str(self.project_dir)
-        for var in _API_KEY_VARS:
-            env.pop(var, None)
-        return env
+        from anvil.planning.subscription import subscription_env
+
+        return subscription_env({"ANVIL_ROOT": str(self.project_dir)})
 
     def run_anvil(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         """Run ``anvil <args>`` against this scratch project via ``uv run``.
@@ -111,8 +105,8 @@ class IsolatedEnv:
         exact CLI the skill tells the agent to use, no import shortcuts.
         """
         proc = subprocess.run(
-            ["uv", "run", "anvil", *args],
-            cwd=str(BIN_DIR),
+            ["uv", "run", "--project", str(BIN_DIR), "anvil", *args],
+            cwd=str(self.project_dir),
             env=self.cli_env(),
             capture_output=True,
             text=True,
@@ -149,6 +143,41 @@ class ExecutionTrace:
     num_turns: int
     session_id: str | None = None
     raw: list[dict[str, Any]] = field(default_factory=list)
+    duration_seconds: float = 0.0
+    usage: dict[str, int] = field(default_factory=dict)
+
+
+def run_codex_agent(
+    prompt: str, *, cwd: Path, model: str = "gpt-6-astra", reasoning_effort: str = "high",
+    timeout: float = 600, extra_env: dict[str, str] | None = None,
+) -> ExecutionTrace:
+    """Drive an isolated workspace through the Codex subscription, with tools."""
+    from anvil.planning.subscription import SubscriptionError, run_codex
+
+    if os.environ.get("RUN_BEHAVIORAL_EVALS") != "1":
+        raise RuntimeError("Subscription behavioral evaluation requires RUN_BEHAVIORAL_EVALS=1.")
+    started = time.monotonic()
+    # Ensure shell commands use this checkout's installed Anvil, not a stale CLI.
+    executable_dir = BIN_DIR / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    env = {**(extra_env or {}), "ANVIL_ROOT": str(cwd),
+           "PATH": str(executable_dir) + os.pathsep + os.environ.get("PATH", "")}
+    try:
+        result = run_codex(
+            prompt, cwd=cwd, model=model, reasoning_effort=reasoning_effort,
+            timeout=timeout, allow_tools=True, extra_env=env,
+        )
+    except SubscriptionError as exc:
+        return ExecutionTrace(
+            is_error=True, result=str(exc), num_turns=0,
+            duration_seconds=time.monotonic() - started,
+        )
+    return ExecutionTrace(
+        is_error=False, result=result.text, num_turns=result.num_turns,
+        session_id=result.session_id, raw=result.events,
+        duration_seconds=time.monotonic() - started,
+        usage={"input_tokens": result.input_tokens, "cached_input_tokens": result.cached_input_tokens,
+               "output_tokens": result.output_tokens},
+    )
 
 
 def run_agent(
@@ -157,6 +186,7 @@ def run_agent(
     cwd: Path,
     allowed_tools: list[str],
     max_turns: int = 20,
+    timeout: float = 600,
     extra_env: dict[str, str] | None = None,
 ) -> ExecutionTrace:
     """Drive a real agent through ``claude-agent-sdk`` and return a trace.
@@ -169,6 +199,18 @@ def run_agent(
     Raises ``RuntimeError`` if claude-agent-sdk is not installed (it is an
     eval-only dependency; see ``evals/README.md``).
     """
+    if os.environ.get("RUN_BEHAVIORAL_EVALS") != "1":
+        raise RuntimeError("Subscription behavioral evaluation requires RUN_BEHAVIORAL_EVALS=1.")
+    from anvil.planning.subscription import (
+        require_subscription,
+        subscription_env,
+        claude_subscription_env,
+    )
+
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Evaluation timeout must be finite and positive.")
+    started = time.monotonic()
+    cli_path = require_subscription("claude", env=subscription_env(extra_env), cwd=cwd)
     try:
         import anyio
         from claude_agent_sdk import (
@@ -188,23 +230,23 @@ def run_agent(
             "then run with that interpreter. See evals/README.md."
         ) from exc
 
-    # CRITICAL: the SDK transport builds the subprocess env as
-    # ``{**os.environ, **options.env}`` (see subprocess_cli.py). options.env can
-    # only ADD/override keys, never REMOVE an inherited one. So to stop the CLI
-    # picking up the quota-capped ANTHROPIC_API_KEY (which fails every run with a
-    # 400 usage-limit), we must scrub it from THIS process's os.environ for the
-    # duration of the run, then restore. We do NOT pass options.env at all (the
-    # transport already inherits the now-scrubbed os.environ) except for the
-    # caller's extra_env (e.g. ANVIL_ROOT for the agent's Bash anvil calls).
+    # The SDK merges options.env over os.environ; mask credential overrides in
+    # the child only. Use this checkout's CLI for all agent shell invocations.
+    executable_dir = BIN_DIR / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    agent_env = {**(extra_env or {}), "ANVIL_ROOT": str(cwd),
+                 "PATH": str(executable_dir) + os.pathsep + os.environ.get("PATH", "")}
     options = ClaudeAgentOptions(
+        cli_path=cli_path,
         cwd=str(cwd),
         max_turns=max_turns,
         permission_mode="bypassPermissions",
         allowed_tools=allowed_tools,
+        tools=allowed_tools,
+        strict_mcp_config=True,
         # Stop ambient Claude Code hooks/settings leaking into the subprocess
         # (they flood the run with hook events and can break it).
         setting_sources=[],
-        env=dict(extra_env or {}),
+        env=claude_subscription_env(agent_env),
     )
 
     collected: list[dict[str, Any]] = []
@@ -241,22 +283,22 @@ def run_agent(
                 raise
             collected.append({"type": "sdk_terminal_noise", "text": str(exc)})
 
-    # Scrub the API-key vars from the real process env for the duration of the
-    # run so the inherited subprocess env does not carry the quota-capped key,
-    # then restore them so the eval process is left as we found it.
-    saved = {var: os.environ.pop(var, None) for var in _API_KEY_VARS}
+    async def _bounded_drive() -> None:
+        with anyio.fail_after(timeout):
+            await _drive()
+
     try:
-        anyio.run(_drive)
-    finally:
-        for var, val in saved.items():
-            if val is not None:
-                os.environ[var] = val
+        anyio.run(_bounded_drive)
+    except TimeoutError:
+        return ExecutionTrace(is_error=True, result="Claude subscription request timed out.",
+                              num_turns=0, duration_seconds=time.monotonic() - started)
     return ExecutionTrace(
         is_error=bool(trace["is_error"]),
         result=str(trace["result"]),
         num_turns=int(trace["num_turns"]),
         session_id=trace["session_id"],
         raw=collected,
+        duration_seconds=time.monotonic() - started,
     )
 
 
@@ -339,6 +381,38 @@ def check_events_contains_action(env: IsolatedEnv, action: str) -> AssertResult:
 # Dispatch table for YAML-defined assertions: {check: name, ...args}.
 def run_assertion(env: IsolatedEnv, spec: dict[str, Any]) -> AssertResult:
     check = spec["check"]
+    if check == "command_proof":
+        submitted = [e for e in _events(env.state_dir)
+                     if e.get("action") == "evidence.submitted" and e.get("target_id") == spec["task"]]
+        proofs = submitted[-1]["payload_json"].get("proofs", []) if submitted else []
+        from anvil.state.models import CommandProof
+        from pydantic import ValidationError
+
+        passed = False
+        for raw in proofs:
+            try:
+                proof = CommandProof.model_validate(raw)
+            except ValidationError:
+                continue
+            attribution = proof.attribution
+            payload = submitted[-1]["payload_json"]
+            passed |= (proof.command == spec["command"] and proof.exit_code == 0
+                       and attribution is not None and attribution.claim_id == payload["claim_id"]
+                       and attribution.task_id == spec["task"]
+                       and attribution.claimed_by == payload["submitted_by"])
+        return AssertResult("claim-bound successful command proof", bool(passed),
+                            f"{len(proofs)} proof(s)")
+    if check == "task_status":
+        data = json.loads(env.run_anvil("show", spec["task"], "--json").stdout)["data"]
+        actual = data["task"]["status"]
+        return AssertResult(f"{spec['task']} status == {spec['equals']}",
+                            actual == spec["equals"], f"got {actual!r}")
+    if check == "project_command":
+        result = subprocess.run(spec["argv"], cwd=env.project_dir, env=env.cli_env(),
+                                capture_output=True, text=True, timeout=30)
+        passed = result.returncode == 0 and result.stdout == spec["stdout"]
+        return AssertResult("project command output", passed,
+                            f"exit={result.returncode}, stdout={result.stdout!r}")
     if check == "status_field":
         return check_status_field(env, spec["field"], spec["equals"])
     if check == "file_exists":

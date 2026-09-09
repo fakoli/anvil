@@ -131,13 +131,11 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      # Install with the `custom` extra so the OpenAI-compatible provider's
-      # 4 test_llm_planner tests exercise the real `openai` SDK instead of
-      # hitting the lazy-import guard (which would make them fail). The extra
-      # pulls `openai>=1.0`; everything else is in the base + dev dep groups.
-      - name: Sync dependencies (with custom extra for openai)
+      # Qualify native Responses and custom Chat Completions against the real
+      # SDK using mock HTTP. These tests never require credentials or live calls.
+      - name: Sync dependencies (OpenAI and custom extras)
         working-directory: bin
-        run: uv sync --locked --extra custom
+        run: uv sync --locked --extra openai --extra custom
 
       - name: Enforce repository-wide Ruff baseline
         working-directory: bin

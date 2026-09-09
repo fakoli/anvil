@@ -17,20 +17,28 @@ a deterministic value. Every operation succeeds without an API key; the LLM is o
 
 ## Configuration
 
-The **default provider is the Claude Agent SDK** over your logged-in Claude
-subscription — no API key. If Claude Code is installed and logged in (`claude`
-on PATH), `--use-llm` just works. anvil scrubs `ANTHROPIC_API_KEY` /
-`CLAUDE_API_KEY` for the duration of the call so a quota-capped key cannot
-hijack the run.
+Anvil uses a subscription unless you explicitly enable API execution. The
+existing default remains `agent-sdk` (Claude subscription); select `codex` for
+GPT-6 Astra through your ChatGPT subscription. Both check the CLI's public login
+status and remove or mask API credentials and transport overrides in the child
+process. Anvil never reads an environment file or creates a key.
 
-To use a metered API key, AWS Bedrock, or a custom OpenAI-compatible endpoint
-instead, pin `llm_provider:` in `.anvil/config.yaml` (or set `llm_fallback:
-true` to restore env auto-detection). See [Providers](#providers) below for
-the full setup and precedence.
+Set `llm_provider: harness` when the current session performs the work, including
+sessions connected to a locally served model. This mode starts no nested model.
+See [Executing in your current harness](how-to/execute-in-your-harness.md).
+
+All direct providers (`openai`, `anthropic`, `bedrock`, `custom`) require
+`llm_allow_api: true` in the resolved project config. An existing API key,
+endpoint, or AWS configuration does not grant permission. Legacy environment
+auto-detection additionally requires `llm_fallback: true`. Existing API users
+must add the new permission flag explicitly when upgrading.
+
+Find the active config directory from `anvil status`; it may live in the HOME
+workspace shared across worktrees rather than inside the checkout.
 
 Model selection: leave `llm_tier` / `llm_model` blank to use the subscription's
-default model on `agent-sdk`, or the `sonnet` tier default on the API
-providers. Set `llm_tier` (`opus`/`sonnet`/`haiku`) or an explicit `llm_model`
+default model on `agent-sdk`, `gpt-6-astra` on `codex`/`openai`, or
+the `sonnet` tier default on Anthropic/Bedrock. Set `llm_tier` (`opus`/`sonnet`/`haiku`) or an explicit `llm_model`
 to pin one.
 
 **Prompt caching** is enabled on the direct-API and Bedrock paths: every
@@ -45,13 +53,17 @@ caching themselves).
 ## Providers
 
 anvil's planning features (`--use-llm`, the LLM-driven task-generation
-backstop, `expand --use-llm`, `score --use-llm`) can be backed by four
-different LLM provider families.
+backstop, `expand --use-llm`, `score --use-llm`) use the selected provider.
+Execution of claimed tasks belongs to the current harness, independently of
+Anvil's optional planning provider.
 
 ### Provider matrix
 
 | Provider | When to use | Extras | Config key |
 | --- | --- | --- | --- |
+| **Current harness** | Current Codex/Claude session or a harness connected to a local model owns all reasoning and implementation. No nested model calls. | None. | `llm_provider: harness` |
+| **Codex subscription** | GPT-6 Astra using an existing ChatGPT login. | Codex CLI with `exec`, `--ignore-user-config`, and ChatGPT login. | `llm_provider: codex` |
+| **OpenAI Responses API** | Explicitly authorized direct API calls, with Astra-compatible parameters and token accounting. | `anvil-state[openai]`; requires `llm_allow_api: true`. | `llm_provider: openai` |
 | **Claude Agent SDK** | **Default.** Rides your Claude *subscription* (no per-token key). anvil is capacity-bound, not per-token-cost bound, so this is the default. | None (`claude-agent-sdk` is a core dep); needs the `claude` CLI on PATH. | `llm_provider: agent-sdk` |
 | **Direct Anthropic API** | You want metered per-token billing against an `ANTHROPIC_API_KEY` (CI without a subscription session, etc.). | None (`anthropic` is a core dep). | `llm_provider: anthropic` |
 | **Amazon Bedrock** | Your org pins LLM calls to AWS for compliance, billing, or data-residency reasons. | `pip install 'anvil-state[bedrock]'` (adds `anthropic[bedrock]` + boto3). | `llm_provider: bedrock` |
@@ -61,15 +73,77 @@ different LLM provider families.
 
 `anvil plan` (and every other LLM-touching CLI / MCP tool) picks **exactly one** provider per process:
 
-1. **Explicit `llm_provider` in `.anvil/config.yaml`** — always wins (`agent-sdk` / `anthropic` / `bedrock` / `custom`).
+1. **Explicit `llm_provider` in `.anvil/config.yaml`** — always wins (`harness` / `codex` / `agent-sdk` / `openai` / `anthropic` / `bedrock` / `custom`).
 2. **Default → `agent-sdk`.** With no explicit provider, anvil uses the Claude Agent SDK over the subscription. It does **not** consult `ANTHROPIC_API_KEY` / `AWS_REGION` / `CUSTOM_LLM_BASE_URL` by default.
-3. **Opt-in env fallback.** Set `llm_fallback: true` to restore the legacy env auto-detect chain *before* falling through to `agent-sdk`:
+3. **Opt-in env fallback.** Set both `llm_allow_api: true` and `llm_fallback: true` to restore the legacy env auto-detect chain *before* falling through to `agent-sdk`:
    - `ANTHROPIC_API_KEY` set → **anthropic**.
    - `AWS_REGION` (or `AWS_DEFAULT_REGION`) set **and** `anthropic[bedrock]` extras installed → **bedrock**. The direct API still wins when both are present because direct is cheaper per token; pin Bedrock in config to override.
    - `CUSTOM_LLM_BASE_URL` set → **custom**.
    - nothing matched → **agent-sdk**.
 
 anvil never silently falls through to a *different* provider once one is chosen; silent fallback breaks billing predictability and can surprise operators during incidents. Because `agent-sdk` is the guaranteed final default, resolution never fails with "no provider configured".
+
+### GPT-6 Astra through the Codex subscription
+
+```yaml
+llm_provider: codex
+llm_model: gpt-6-astra
+llm_reasoning_effort: medium
+llm_allow_api: false
+llm_fallback: false
+```
+
+Sign in with `codex login` and verify `codex login status` reports ChatGPT.
+Anvil never signs you out or switches login methods itself. It checks login
+before starting an ephemeral `codex exec` with the OpenAI provider and ChatGPT
+login enforced, user configuration ignored, and text-generation tools disabled.
+Unsupported CLI flags, model access errors, and timeouts fail without changing
+provider. Update the CLI if it lacks these capabilities.
+
+Astra supports `low`, `medium`, `high`, `xhigh`, and `max` effort. Start at
+`medium` for planning augmentation; the shipped work-queue automation uses
+`high`. Preserve explicit model overrides. Claude tier names alone do not select
+an Astra model. Astra does not accept sampling parameters; Anvil omits its
+legacy `temperature=0` default and rejects non-default sampling requests.
+
+The subscription CLI does not expose a hard per-request output-token cap.
+`max_tokens` is an output target in its instructions, and the call has a
+300-second timeout. Token usage measures subscription capacity, not API cost.
+A completed turn with a nonempty final answer is required; partial, failed,
+refused, and malformed outputs must not become accepted task data.
+
+### Optional direct OpenAI Responses API
+
+```bash
+uv tool install 'anvil-state[openai]'
+```
+
+```yaml
+llm_provider: openai
+llm_allow_api: true
+llm_model: gpt-6-astra
+llm_reasoning_effort: medium
+openai_reasoning_budget: 0
+```
+
+This is a separate, explicitly enabled billing path. The SDK handles a credential
+supplied by the operator; Anvil does not obtain one. It targets the official
+Responses endpoint and does not reinterpret a custom endpoint as OpenAI.
+
+The API cap is `max_tokens + openai_reasoning_budget`, limited to 128,000.
+It covers visible output **and** reasoning. The default additional allowance is
+zero; increasing it is an explicit budget change. Incomplete output, refusal,
+empty output, unexpected tool calls, and malformed usage are rejected. There
+are no hidden API retries or alternate providers.
+
+`LLMResponse.input_tokens` excludes cached reads. Cache writes are a subset of
+that noncached input, and reasoning tokens are a subset of output. Do not add
+those subsets again when computing totals. Existing custom Chat Completions
+requests retain their own protocol and sampling behavior.
+
+Model and protocol references: [Astra migration guide](https://developers.openai.com/api/docs/guides/latest-model),
+[Astra model](https://developers.openai.com/api/docs/models/gpt-6-astra), and
+[Responses create](https://developers.openai.com/api/reference/cli/resources/responses/methods/create).
 
 ### Claude Agent SDK (default)
 
@@ -78,7 +152,7 @@ anvil never silently falls through to a *different* provider once one is chosen;
 anvil plan --use-llm
 ```
 
-The default install includes `claude-agent-sdk`. At call time anvil drives the bundled `claude` CLI via `claude_agent_sdk.query()` and authenticates with your logged-in Claude **subscription** — there is no `ANTHROPIC_API_KEY` to set. anvil scrubs `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` from the environment for the duration of the call so a quota-capped key cannot hijack the run.
+The default install includes `claude-agent-sdk`. At call time anvil drives the installed `claude` CLI via `claude_agent_sdk.query()` and authenticates with your logged-in Claude **subscription** — there is no `ANTHROPIC_API_KEY` to set. Anvil verifies subscription login and masks API credentials and transport overrides in the SDK child environment without changing the parent process.
 
 Requirements (surfaced as a clean error at call time if missing):
 
@@ -105,6 +179,7 @@ not consult `ANTHROPIC_API_KEY`.
 ```yaml
 # .anvil/config.yaml
 llm_provider: anthropic
+llm_allow_api: true
 llm_tier: sonnet      # opus | sonnet | haiku (blank = sonnet)
 ```
 
@@ -121,6 +196,7 @@ To pin an explicit model id (overrides tier):
 
 ```yaml
 llm_provider: anthropic
+llm_allow_api: true
 llm_model: claude-opus-4-7-20260124
 ```
 
@@ -147,6 +223,7 @@ Minimal config:
 ```yaml
 # .anvil/config.yaml
 llm_provider: bedrock
+llm_allow_api: true
 bedrock_region: us-east-1
 bedrock_profile: my-profile     # optional; reads ~/.aws/credentials
 llm_tier: sonnet
@@ -156,6 +233,7 @@ Bedrock uses **cross-region inference profile prefixes** on current-generation C
 
 ```yaml
 llm_provider: bedrock
+llm_allow_api: true
 llm_model: eu.anthropic.claude-sonnet-4-6
 bedrock_region: eu-west-1
 ```
@@ -181,6 +259,7 @@ export CUSTOM_LLM_API_KEY=...   # if your endpoint requires a key
 ```yaml
 # via config
 llm_provider: custom
+llm_allow_api: true
 custom_base_url: http://localhost:8000/v1
 custom_api_key_env: OPENROUTER_API_KEY   # name of env var to read the key from
 llm_model: anthropic/claude-sonnet-4-6   # REQUIRED for custom — no portable default
@@ -192,6 +271,7 @@ Local vLLM (no auth):
 
 ```yaml
 llm_provider: custom
+llm_allow_api: true
 custom_base_url: http://localhost:8000/v1
 llm_model: meta-llama/Llama-3.1-70B-Instruct
 ```
@@ -200,6 +280,7 @@ OpenRouter (routes to Anthropic):
 
 ```yaml
 llm_provider: custom
+llm_allow_api: true
 custom_base_url: https://openrouter.ai/api/v1
 custom_api_key_env: OPENROUTER_API_KEY
 llm_model: anthropic/claude-sonnet-4-6
@@ -209,6 +290,7 @@ LiteLLM proxy (unified gateway in front of multiple providers):
 
 ```yaml
 llm_provider: custom
+llm_allow_api: true
 custom_base_url: http://litellm-proxy.internal:4000/v1
 custom_api_key_env: LITELLM_API_KEY
 llm_model: claude-sonnet-4-6
@@ -489,7 +571,7 @@ so interruption or refusal leaves either the complete plan or no graph mutation.
 
 ## Cost notes
 
-- `temperature=0.0` by default — augmentation should be repeatable, not creative.
+- Legacy providers default to `temperature=0.0`; Astra omits sampling parameters. No model output is guaranteed deterministic.
 - Prompt caching (see [Configuration](#configuration) above) makes repeated runs cheap. A
   typical `score --use-llm` run against a 20-task batch hits the cache on tasks 2–20 and
   pays for one cold system block plus 20 small user blocks plus 20 small output blocks.

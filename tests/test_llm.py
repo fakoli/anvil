@@ -520,6 +520,11 @@ class TestClaudeAgentSDKProvider:
     """Default provider: maps the Agent SDK message stream to LLMResponse,
     scrubs the API key for the duration of the call, and wraps failures."""
 
+    @pytest.fixture(autouse=True)
+    def _subscription_login(self, monkeypatch):
+        # Subscription authentication has its own tests; these mock the SDK.
+        monkeypatch.setattr("anvil.planning.llm.require_subscription", lambda *a, **k: "claude")
+
     def _messages(
         self,
         *,
@@ -563,7 +568,9 @@ class TestClaudeAgentSDKProvider:
 
         async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
             if capture is not None:
-                capture["api_key_present"] = "ANTHROPIC_API_KEY" in os.environ
+                capture["api_key_present"] = bool(options.env.get("ANTHROPIC_API_KEY"))
+                capture["tools"] = options.tools
+                capture["strict_mcp_config"] = options.strict_mcp_config
                 capture["system_prompt"] = options.system_prompt
                 capture["model"] = options.model
                 capture["max_turns"] = options.max_turns
@@ -620,6 +627,8 @@ class TestClaudeAgentSDKProvider:
         assert cap["system_prompt"] == "SYS"
         assert cap["max_turns"] == 1
         assert cap["allowed_tools"] == []
+        assert cap["tools"] == []
+        assert cap["strict_mcp_config"] is True
 
     def test_error_result_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from anvil.planning.llm import ClaudeAgentSDKProvider

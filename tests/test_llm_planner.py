@@ -43,6 +43,7 @@ def _fallback_cfg(**kwargs: object):  # type: ignore[no-untyped-def]
         project_name="t",
         project_id="t",
         llm_fallback=True,
+        llm_allow_api=True,
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -144,6 +145,7 @@ class TestResolvePlannerProvider:
             project_name="t",
             project_id="t",
             llm_provider="anthropic",
+            llm_allow_api=True,
             llm_tier="haiku",
             llm_model="cfg-model-id",
         )
@@ -168,6 +170,7 @@ class TestResolvePlannerProvider:
             project_name="t",
             project_id="t",
             llm_provider="custom",
+            llm_allow_api=True,
             llm_model="gpt-4o-mini",  # explicit model for custom
         )
         provider, tier = resolve_planner_provider(cfg)
@@ -185,6 +188,7 @@ class TestResolvePlannerProvider:
             project_name="t",
             project_id="t",
             llm_provider="anthropic",
+            llm_allow_api=True,
             llm_tier="opus",
         )
         provider, tier = resolve_planner_provider(cfg)
@@ -204,6 +208,7 @@ class TestResolvePlannerProvider:
             project_name="t",
             project_id="t",
             llm_provider="anthropic",
+            llm_allow_api=True,
             llm_tier="haiku",
             llm_model="claude-opus-4-7-20260601",
         )
@@ -268,6 +273,7 @@ class TestResolvePlannerProviderGreptileFixes:
             project_name="t",
             project_id="t",
             llm_provider="custom",
+            llm_allow_api=True,
             llm_model="any-model",
             # custom_base_url=None (default)
         )
@@ -298,6 +304,7 @@ class TestResolvePlannerProviderGreptileFixes:
             project_name="t",
             project_id="t",
             llm_provider="custom",
+            llm_allow_api=True,
             custom_base_url="http://localhost:8000/v1",
             # llm_model=None, llm_tier=None — the exact misconfig we're
             # protecting against.
@@ -330,6 +337,7 @@ class TestResolvePlannerProviderGreptileFixes:
             project_name="t",
             project_id="t",
             llm_provider="custom",
+            llm_allow_api=True,
             custom_base_url="http://localhost:8000/v1",
             llm_tier="opus",
         )
@@ -413,6 +421,7 @@ class TestBedrockProvider:
             project_name="t",
             project_id="t",
             llm_provider="bedrock",
+            llm_allow_api=True,
             bedrock_region="us-east-1",
         )
 

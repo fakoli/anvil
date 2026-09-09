@@ -59,9 +59,11 @@ from anvil.planning.llm import (
     AnthropicProvider,
     BedrockProvider,
     ClaudeAgentSDKProvider,
+    CodexSubscriptionProvider,
     CustomEndpointProvider,
     LLMProvider,
     LLMProviderError,
+    OpenAIResponsesProvider,
 )
 
 if TYPE_CHECKING:
@@ -170,6 +172,19 @@ def resolve_planner_provider(
     # Stage 1 — pick which PROVIDER family to instantiate. Always non-None:
     # `agent-sdk` is the guaranteed final default.
     chosen = _choose_provider_family(config)
+    if chosen == "harness":
+        raise PlannerProviderUnavailable(
+            "This project uses its current harness for model work. Author Tasks in the "
+            "CLI-resolved PRD and run anvil plan --no-llm, then claim/packet/submit "
+            "through CLI or MCP. Anvil will not start a nested model or change providers."
+        )
+    if chosen in ("anthropic", "bedrock", "custom", "openai") and not (
+        config and config.llm_allow_api
+    ):
+        raise PlannerProviderUnavailable(
+            f"API provider {chosen!r} requires explicit llm_allow_api: true. "
+            "Use agent-sdk or codex for subscription execution."
+        )
 
     # Stage 2 — instantiate the chosen family with config-aware knobs.
     #
@@ -183,6 +198,20 @@ def resolve_planner_provider(
     # `_build_agent_sdk` never raises at construction (the SDK/CLI import is
     # deferred to generate()), so the default path cannot land in the wrap.
     try:
+        if chosen in ("codex", "openai"):
+            model, tier = _resolve_model_args(config, model_override)
+            if not model and tier:
+                raise PlannerProviderUnavailable(
+                    "Claude tiers do not select an Astra model; set llm_model explicitly "
+                    "or clear llm_tier to use gpt-6-astra."
+                )
+            effort = config.llm_reasoning_effort if config else "medium"
+            if chosen == "codex":
+                return CodexSubscriptionProvider(model=model, reasoning_effort=effort), "codex"
+            return OpenAIResponsesProvider(
+                model=model, reasoning_effort=effort,
+                reasoning_budget=config.openai_reasoning_budget if config else 0,
+            ), "openai"
         if chosen == "agent-sdk":
             return _build_agent_sdk(config, model_override), "agent-sdk"
         if chosen == "anthropic":
@@ -224,6 +253,12 @@ def _choose_provider_family(config: Config | None) -> str:
     # project explicitly opts back into it via `llm_fallback: true`.
     if config is None or not config.llm_fallback:
         return "agent-sdk"
+
+    if not config.llm_allow_api:
+        raise PlannerProviderUnavailable(
+            "llm_fallback auto-detection requires llm_allow_api: true; "
+            "ambient credentials cannot enable API execution."
+        )
 
     # --- opt-in env auto-detect (llm_fallback=True) --------------------
     # ANTHROPIC_API_KEY wins when set even if AWS_REGION is also set, because
