@@ -28,7 +28,8 @@ def test_live_entry_points_require_explicit_gate(monkeypatch, tmp_path):
             invoke()
 
 
-def test_harness_executes_cli_work_with_real_claim_bound_proof(monkeypatch):
+@pytest.mark.parametrize("bundle_mode", [False, True])
+def test_harness_executes_cli_work_with_real_claim_bound_proof(monkeypatch, bundle_mode):
     case = yaml.safe_load((EVALS / "cases" / "execute.yaml").read_text())
     # Ambient fake keys are not permission, even for a harness using a local model.
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-never-used")
@@ -42,9 +43,17 @@ def test_harness_executes_cli_work_with_real_claim_bound_proof(monkeypatch):
         (env.state_dir / "prd.md").write_text(case["prd_source"])
         for args in case["setup_commands"]:
             env.run_anvil(*args)
-        claim = json.loads(env.run_anvil(
-            "claim", "T001", "--actor", "eval-harness", "--json",
-        ).stdout)["data"]["claim"]
+        if bundle_mode:
+            env.run_anvil("bundle", "create", "B001", "T001", "--prd", "default",
+                          "--coordinator", "eval-harness")
+            bundle_claim = json.loads(env.run_anvil(
+                "bundle", "claim", "B001", "--actor", "eval-harness", "--shared-tree", "--json",
+            ).stdout)["data"]["claim"]
+            claim = {"id": bundle_claim["member_claim_ids"]["T001"]}
+        else:
+            claim = json.loads(env.run_anvil(
+                "claim", "T001", "--actor", "eval-harness", "--json",
+            ).stdout)["data"]["claim"]
         env.run_anvil("packet", "T001")
         (env.project_dir / "echo.py").write_text('print("ANVIL")\n')
         completed = subprocess.run(
@@ -70,6 +79,24 @@ def test_harness_executes_cli_work_with_real_claim_bound_proof(monkeypatch):
         for spec in case["assertions"]:
             result = run_assertion(env, spec)
             assert result.passed, result.detail
+        if bundle_mode:
+            env.run_anvil("bundle", "complete", "B001", "--actor", "eval-harness")
+            # Event replay must accept the same typed bundle evidence at its
+            # historical claim state, even after the bundle enters review.
+            from anvil.clock import SystemClock
+            from anvil.state.sqlite import SqliteBackend
+
+            replay = SqliteBackend(db_path=str(env.project_dir / "replay.db"),
+                                   events_path=str(env.project_dir / "replay.jsonl"),
+                                   clock=SystemClock())
+            replay.initialize()
+            try:
+                replay.replay_from_empty(str(env.state_dir / "events.jsonl"))
+                assert replay.get_task("T001").status.value == "needs_review"
+                assert replay.get_latest_evidence("T001").proofs
+                assert replay.get_bundle("B001").status.value == "implemented_unreviewed"
+            finally:
+                replay.close()
         # Augmentation fails closed in this mode without selecting a cloud provider.
         denied = env.run_anvil("score", "T001", "--use-llm", check=False)
         assert denied.returncode != 0

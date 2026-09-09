@@ -15,6 +15,11 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 - Opt-in Codex/Claude behavioral execution checks and Astra automation templates
   that stop at evidence submission and preserve human acceptance.
 
+### Fixed
+
+- Bundle-member hook proofs now validate active coordinator ownership and both
+  leases instead of rejecting all typed command evidence for bundles.
+
 ### Changed
 
 - Direct OpenAI, Anthropic, Bedrock, and custom API providers now require
