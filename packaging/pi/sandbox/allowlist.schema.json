@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "pi-sandbox allowlist",
+  "type": "object",
+  "required": ["version", "profiles"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "$comment": { "type": "string" },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/definitions/profile" }
+    }
+  },
+  "definitions": {
+    "profile": {
+      "type": "object",
+      "required": ["extensions", "tools", "skills", "network"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "extensions": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/extensionPin" }
+        },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1, "pattern": "^[a-zA-Z0-9_-]+$" }
+        },
+        "skills": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "network": { "enum": ["none", "inference"] },
+        "projectTrust": { "enum": ["never", "always"] }
+      }
+    },
+    "extensionPin": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^(path:|npm:|git:)",
+          "minLength": 5
+        },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "ref": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "pattern": "^path:" } } },
+          "then": { "required": ["source", "sha256"] }
+        },
+        {
+          "if": { "properties": { "source": { "pattern": "^npm:" } } },
+          "then": { "required": ["source", "sha256"] }
+        },
+        {
+          "if": { "properties": { "source": { "pattern": "^git:" } } },
+          "then": { "required": ["source", "ref", "commit"] }
+        }
+      ]
+    }
+  }
+}

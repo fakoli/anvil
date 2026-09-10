@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "$comment": "pi sandbox extension allowlist. Fail-closed: the launcher refuses to run a profile whose entries are missing pins, whose hashes mismatch, or that does not validate against allowlist.schema.json. See packaging/pi/sandbox/README.md.",
+  "profiles": {
+    "unattended-exec": {
+      "description": "Unattended execution child: may read, edit, and drive the anvil state loop. Extensions must be hash-pinned; anvil-pi (M2) lands here as a sha256-pinned entry once published.",
+      "extensions": [],
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [],
+      "network": "none",
+      "projectTrust": "never"
+    },
+    "read-only-review": {
+      "description": "Fresh-context review child: read-only tools, no network, no write surface.",
+      "extensions": [],
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "network": "none",
+      "projectTrust": "never"
+    }
+  }
+}
