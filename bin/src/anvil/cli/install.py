@@ -1070,7 +1070,9 @@ def install(
             pi_cwd = pi_entry.get("native_cwd") or str(_project_root())
             cli = _run_or_print(
                 _native_rollback_commands(
-                    h.native_installer, root=root, record=result.get("entry")
+                    h.native_installer,
+                    root=root,
+                    record=result.get("entry"),
                 ),
                 run=True,
                 cwd=pi_cwd if is_pi else None,
@@ -1106,10 +1108,11 @@ def install(
                                 "(record dropped)"
                             )
                     elif absent is False:
-                        verdict = "success" if all(c["ok"] for c in attempted) else "failure"
                         note = (
-                            f"pi reported {verdict} but {_pi_settings_path(pi_cwd)} "
-                            "still lists the package — install record preserved"
+                            "pi reported "
+                            f"{'success' if all(c['ok'] for c in attempted) else 'failure'} "
+                            f"but {_pi_settings_path(pi_cwd)} still lists the package — "
+                            "install record preserved"
                         )
                     else:
                         note = (

@@ -8,7 +8,7 @@
 lease-coordinated state for multi-agent software work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.5-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.6.6-blue.svg)](.claude-plugin/plugin.json)
 [![PyPI](https://img.shields.io/badge/pypi-anvil--state-purple.svg)](https://pypi.org/project/anvil-state/)
 [![Docs](https://img.shields.io/badge/docs-fakoli.github.io%2Fanvil-informational.svg)](https://fakoli.github.io/anvil/)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
@@ -32,10 +32,14 @@ Two ideas separate it from an issue tracker:
   typed proofs, reviews gate acceptance, and every accepted task mints a signed,
   replayable `AcceptanceProof` you can verify off-host.
 
-> **Beta — v0.6.5.** The core loop is stable and dogfooded; some command
+> **Beta — v0.6.6.** The core loop is stable and dogfooded; some command
 > surfaces may change before 1.0.
 
-## What changed in v0.6.5
+## What changed in v0.6.6
+
+- **Verified local projection repair** — `anvil repair projection --yes`
+  reconstructs a diverged local projection from immutable event history while
+  retaining an online backup.
 
 - **Revision-safe PRDs** — review, approval, planning, and new claims bind the
   exact source revision ([#180](https://github.com/fakoli/anvil/issues/180),
@@ -52,7 +56,7 @@ Two ideas separate it from an issue tracker:
   slice run without UAC or junction-dependent collection
   ([#118](https://github.com/fakoli/anvil/issues/118)).
 
-See the [v0.6.5 changelog](CHANGELOG.md#065---2026-08-24) for the complete
+See the [v0.6.6 changelog](CHANGELOG.md#066---2026-09-10) for the complete
 release-candidate-to-release history and related fixes.
 
 ## Install
@@ -176,7 +180,7 @@ Full documentation: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)*
 
 ## Status
 
-Beta (v0.6.5). The full PRD → plan → claim → execute → verify → finish loop
+Beta (v0.6.6). The full PRD → plan → claim → execute → verify → finish loop
 works today, alongside GitHub Issues sync and multi-provider LLM support.
 Near-term focus is provider expansion, usability, and remaining pre-1.0
 contract hardening; Linear/Monday providers and webhook sync are on the

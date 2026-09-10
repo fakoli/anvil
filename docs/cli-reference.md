@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 70 executable leaf commands,
+> Single-page reference for the `anvil` CLI: 71 executable leaf commands,
 > including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
@@ -147,7 +147,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.5 (schema 21)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.6 (schema 21)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1725,6 +1725,9 @@ flag list; full prose treatment may follow in a later pass.
   `--cron-recipes`, `--finish-gate`); dry-run by default. For pi, set
   `ANVIL_PI_PACKAGE` to a pinned `npm:`/`git:` spec when no anvil checkout is
   present.
+- `anvil repair projection` — Rebuild a diverged local projection from the
+  immutable event log after an explicit `--yes`, retaining an online backup;
+  it verifies the staged and published projections before reporting success.
 
 **PRD authoring extras**
 
