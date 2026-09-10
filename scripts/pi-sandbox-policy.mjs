@@ -170,14 +170,14 @@ async function walkTree(rootDir, prefix = "", depth = 0) {
   for (const e of entries) {
     const rel = prefix ? `${prefix}/${e.name}` : e.name;
     if (e.isSymbolicLink()) {
-      throw { code: "mismatch", message: `symlink in pinned tree: ${rel} (symlinks are not allowed in tree pins)` };
+      throw { code: "invalid", message: `symlink in pinned tree: ${rel} (symlinks are not allowed in tree pins)` };
     }
     if (!e.isDirectory() && !e.isFile()) {
-      throw { code: "mismatch", message: `special file in pinned tree: ${rel} (only regular files are allowed)` };
+      throw { code: "invalid", message: `special file in pinned tree: ${rel} (only regular files are allowed)` };
     }
     if (e.isDirectory()) {
       if (REJECTED_DIR_NAMES.has(e.name)) {
-        throw { code: "mismatch", message: `rejected directory in pinned tree: ${rel} (${e.name} must not enter a verified pin)` };
+        throw { code: "invalid", message: `rejected directory in pinned tree: ${rel} (${e.name} must not enter a verified pin)` };
       }
       out.push(...(await walkTree(join(rootDir, e.name), rel, depth + 1)));
     } else {

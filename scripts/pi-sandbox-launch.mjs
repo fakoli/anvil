@@ -99,9 +99,11 @@ async function validateSeedDir(seedDir) {
       if (e.isSymbolicLink()) throw { message: `seed contains a symlink: ${rel}` };
       if (e.isDirectory()) await walk(join(dir, e.name), rel, depth + 1);
       else if (e.isFile()) {
-        const data = await readFile(join(dir, e.name));
-        if (data.length > 1024 * 1024) throw { message: `seed file exceeds 1MiB: ${rel}` };
-        files.set(rel, data);
+        const st = await lstat(join(dir, e.name));
+        if (st.size > 1024 * 1024) throw { message: `seed file exceeds 1MiB: ${rel}` };
+        // sizes only — the caller copies from disk via copyFile, so buffering
+        // contents here just duplicated I/O and memory (Copilot round 3)
+        files.set(rel, st.size);
       } else throw { message: `seed contains a special file: ${rel}` };
     }
   };
@@ -188,6 +190,8 @@ async function main() {
         // `stageSnapshot(await readPinSnapshot(...))` rejects before the outer
         // catch exists (an M4 review find: mismatch surfaced as exit 2).
         const snapshot = await readPinSnapshot(entry, allowlistPath).catch((error) => {
+          // real digest drift = exit 3; invalid pin STRUCTURE (symlinks, special
+          // files, rejected dirs) = policy failure, exit 2 (Copilot round 3)
           throw { exitCode: error.code === "mismatch" ? 3 : EXIT_POLICY, message: `pin check failed (extensions[${index}] ${entry.source}): ${error.message}` };
         });
         const staged = await stageSnapshot(snapshot, stageDir, `ext-${index}`).catch((error) => {

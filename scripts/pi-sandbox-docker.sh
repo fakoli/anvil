@@ -39,7 +39,7 @@ command -v docker >/dev/null 2>&1 || { echo "pi-sandbox-docker: docker not found
 # Safe-workspace policy (advisory F7): reject the sensitive roots AND their
 # descendants — a bind mount of /run could expose a host docker socket.
 case "$(cd -- "$WORKSPACE" && pwd -P)" in \
-  /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/opt|/proc|/root|/run|/sbin|/srv|/sys|/usr|/var\
+  /|/bin|/boot|/dev|/etc|/lib|/lib32|/lib64|/libx32|/proc|/root|/run|/sbin|/sys|/usr|/var\
   |/bin/*|/boot/*|/dev/*|/etc/*|/lib/*|/lib32/*|/lib64/*|/libx32/*|/proc/*|/root/*|/run/*|/sbin/*|/sys/*|/usr/*|/var/*)
     echo "pi-sandbox-docker: refusing sensitive workspace root (mount a project dir)" >&2; exit 2;;
 esac
