@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "$comment": "pi sandbox extension allowlist. M1 contract: only hash-pinned path: extensions; the launcher stages the verified bytes and pi loads ONLY the staged copies. npm:/git: pins are rejected until M4 materializes verified artifacts at image build time. See packaging/pi/sandbox/README.md.",
+  "profiles": {
+    "unattended-exec": {
+      "description": "Unattended execution child: may read, edit, and drive the anvil state loop. Extension list is empty until M2 publishes the hash-pinned anvil-pi entry point.",
+      "extensions": [],
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [],
+      "network": "none"
+    },
+    "read-only-review": {
+      "description": "Fresh-context review child: read-only tools, no network, no write surface.",
+      "extensions": [],
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "network": "none"
+    }
+  }
+}
