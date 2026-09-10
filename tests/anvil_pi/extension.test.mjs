@@ -521,7 +521,11 @@ const requireContract = process.env.ANVIL_REQUIRE_CONTRACT === "1";
 if (hasRealAnvil) {
   await test("contract: every allowlisted/denied verb exists in the real CLI registry", async () => {
     const { spawnSync, execFileSync } = require("node:child_process");
-    const help = spawnSync("anvil", ["--help"], { encoding: "utf8", timeout: 15_000 }).stdout;
+    // GitHub Actions sets GITHUB_ACTIONS=true -> typer/rich FORCE_TERMINAL=True
+    // injects ANSI escapes (see the pytest env note in ci.yml): strip them or
+    // every token match fails (caught by CI, not by the local run).
+    const ansiRe = /\x1B\[[0-9;]*[A-Za-z]/g;
+    const help = spawnSync("anvil", ["--help"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, _TYPER_FORCE_DISABLE_TERMINAL: "1", NO_COLOR: "1" } }).stdout.replace(ansiRe, "");
     assert.ok(help.length > 0);
     const helpTokens = new Set(help.split(/\s+/));
     const anvilBin = "anvil";
@@ -539,7 +543,7 @@ if (hasRealAnvil) {
   };
   const flagProblems = [];
   for (const [verb, flags] of Object.entries(flagContract)) {
-    const verbHelp = execFileSync(anvilBin, [verb, "--help"], { encoding: "utf8", timeout: 15_000 });
+    const verbHelp = execFileSync(anvilBin, [verb, "--help"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, _TYPER_FORCE_DISABLE_TERMINAL: "1", NO_COLOR: "1" } }).replace(ansiRe, "");
     for (const flag of flags) {
       if (!verbHelp.includes(flag)) flagProblems.push(`anvil ${verb} does not offer ${flag}`);
     }

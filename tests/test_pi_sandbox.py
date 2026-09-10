@@ -443,9 +443,11 @@ def test_tree_pin_rejects_symlinks_and_rejected_dirs(tmp_path: Path) -> None:
 
 def test_tree_pin_drift_fails_launch(tmp_path: Path, fake_pi: Path) -> None:
     root = _make_tree(tmp_path)
-    allowlist = write_allowlist(tmp_path, lambda d, h=_tree_hash(root): d["profiles"]["unattended-exec"].__setitem__(
-        "extensions", [{"source": f"path:{root}/index.ts", "tree_sha256": h}]
-    ))
+    pin = {"source": f"path:{root}/index.ts", "tree_sha256": _tree_hash(root)}
+    allowlist = write_allowlist(
+        tmp_path,
+        lambda d, pin=pin: d["profiles"]["unattended-exec"].__setitem__("extensions", [pin]),
+    )
     ok = run_launcher(
         "--profile", "unattended-exec", "--workspace", str(tmp_path / "ws"),
         "--task", "x", "--allowlist", str(allowlist), "--pi", str(fake_pi), "--dry-run",
@@ -465,9 +467,11 @@ def test_tree_pin_stages_whole_tree(tmp_path: Path, fake_pi: Path) -> None:
     """The staged copy must include the SUBDIRECTORY imports, not just flat
     siblings — anvil-pi loads src/*.ts and flat staging cannot satisfy it."""
     root = _make_tree(tmp_path)
-    allowlist = write_allowlist(tmp_path, lambda d, h=_tree_hash(root): d["profiles"]["unattended-exec"].__setitem__(
-        "extensions", [{"source": f"path:{root}/index.ts", "tree_sha256": h}]
-    ))
+    pin = {"source": f"path:{root}/index.ts", "tree_sha256": _tree_hash(root)}
+    allowlist = write_allowlist(
+        tmp_path,
+        lambda d, pin=pin: d["profiles"]["unattended-exec"].__setitem__("extensions", [pin]),
+    )
     workspace = tmp_path / "ws"
     workspace.mkdir()
     env_extra = {"FAKE_PI_OUT": str(tmp_path / "fake-pi-out")}
