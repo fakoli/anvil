@@ -5620,6 +5620,289 @@ class TestPhase5EvidenceAndApplyHandlers:
         finally:
             b.close()
 
+    @pytest.mark.parametrize(
+        ("decision", "expected_status", "expected_review", "expected_category"),
+        [
+            ("accepted", "done", "approve", None),
+            ("rejected", "drafted", "needs_changes", "quality"),
+        ],
+    )
+    def test_replay_restores_exact_legacy_evidence_before_unbound_apply(
+        self,
+        tmp_path: Path,
+        decision: str,
+        expected_status: str,
+        expected_review: str,
+        expected_category: str | None,
+    ) -> None:
+        """Replay restores the old evidence transition before either verdict."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            _setup_claimable_task_and_claim(b)
+            legacy_evidence = Event(
+                id="E999900",
+                timestamp=_T0,
+                actor="legacy-submit",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=_make_evidence_payload(submitted_by="legacy-submit"),
+            )
+            legacy_apply = Event(
+                id="E999901",
+                timestamp=_T0,
+                actor="legacy-reviewer",
+                action="task.applied",
+                target_kind="task",
+                target_id="T001",
+                payload_json={
+                    "task_id": "T001",
+                    "reviewer": "legacy-reviewer",
+                    "decision": decision,
+                    "notes": None,
+                },
+            )
+            with events_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(legacy_evidence.model_dump(mode="json")) + "\n")
+                stream.write(json.dumps(legacy_apply.model_dump(mode="json")) + "\n")
+
+            b.replay_from_empty(str(events_path))
+
+            task = b.get_task("T001")
+            assert task is not None
+            assert task.status.value == expected_status
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            assert evidence.id == "EV001"
+            assert evidence.claim_id == "C001"
+            assert evidence.submitted_by == "legacy-submit"
+            assert evidence.submitted_at == _T0
+            claim = b.get_claim("C001")
+            assert claim is not None
+            assert claim.status is ClaimStatus.released
+            assert b.list_active_claims() == []
+            review = b.list_reviews()[0]
+            assert review.decision.value == expected_review
+            assert review.rejection is None
+            assert review.counts_toward_accept_rate is True
+            assert (
+                review.rejection_category.value
+                if review.rejection_category is not None
+                else None
+            ) == expected_category
+        finally:
+            b.close()
+
+    def test_replay_rejects_stale_legacy_evidence_after_reclaim(
+        self, tmp_path: Path
+    ) -> None:
+        """A stale C001 evidence event cannot complete active replacement C002."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            _setup_claimable_task_and_claim(b)
+            b.append(_make_event(
+                "claim.released",
+                {
+                    "claim_id": "C001",
+                    "released_by": "agent-alpha",
+                    "release_reason": "reclaimed",
+                },
+                target_kind="claim",
+                target_id="C001",
+            ))
+            b.append(_make_event(
+                "claim.created",
+                _make_claim_payload(
+                    claim_id="C002", task_id="T001", actor="agent-bravo", generation=2
+                ),
+                target_kind="claim",
+                target_id="C002",
+            ))
+            legacy_evidence = Event(
+                id="E999900",
+                timestamp=_T0,
+                actor="legacy-submit",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=_make_evidence_payload(submitted_by="legacy-submit"),
+            )
+            versioned_apply = Event(
+                id="E999901",
+                timestamp=_T0,
+                actor="reviewer",
+                action="task.applied",
+                target_kind="task",
+                target_id="T001",
+                payload_json={
+                    "task_id": "T001",
+                    "reviewer": "reviewer",
+                    "decision": "rejected",
+                    "notes": None,
+                },
+            )
+            with events_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(legacy_evidence.model_dump(mode="json")) + "\n")
+                stream.write(json.dumps(versioned_apply.model_dump(mode="json")) + "\n")
+
+            with pytest.raises(
+                TransactionAborted,
+                match="Expected 'needs_review', got 'claimed'",
+            ):
+                b.replay_from_empty(str(events_path))
+        finally:
+            b.close()
+
+    def test_replay_rejects_collided_legacy_claim_lineage(self, tmp_path: Path) -> None:
+        """Divergent creation lineage quarantines its legacy evidence descendant."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            _setup_claimable_task_and_claim(b)
+            collided_claim = Event(
+                id="E999899",
+                timestamp=_T0,
+                actor="agent-bravo",
+                action="claim.created",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=_make_claim_payload(actor="agent-bravo"),
+            )
+            legacy_evidence = Event(
+                id="E999900",
+                timestamp=_T0,
+                actor="legacy-submit",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=_make_evidence_payload(submitted_by="legacy-submit"),
+            )
+            legacy_apply = Event(
+                id="E999901",
+                timestamp=_T0,
+                actor="legacy-reviewer",
+                action="task.applied",
+                target_kind="task",
+                target_id="T001",
+                payload_json={
+                    "task_id": "T001",
+                    "reviewer": "legacy-reviewer",
+                    "decision": "accepted",
+                    "notes": None,
+                },
+            )
+            with events_path.open("a", encoding="utf-8") as stream:
+                for raw_event in (collided_claim, legacy_evidence, legacy_apply):
+                    stream.write(json.dumps(raw_event.model_dump(mode="json")) + "\n")
+
+            with pytest.raises(
+                TransactionAborted,
+                match="Expected 'needs_review', got 'claimed'",
+            ):
+                b.replay_from_empty(str(events_path))
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize("different_task", [False, True])
+    def test_replay_rejects_missing_or_other_task_legacy_evidence(
+        self, tmp_path: Path, different_task: bool
+    ) -> None:
+        """Only one prior raw evidence event for the exact task and claim qualifies."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            _setup_claimable_task_and_claim(b)
+            raw_events: list[Event] = []
+            if different_task:
+                raw_events.append(
+                    Event(
+                        id="E999900",
+                        timestamp=_T0,
+                        actor="legacy-submit",
+                        action="evidence.submitted",
+                        target_kind="task",
+                        target_id="T002",
+                        payload_json=_make_evidence_payload(
+                            task_id="T002", submitted_by="legacy-submit"
+                        ),
+                    )
+                )
+            raw_events.append(
+                Event(
+                    id="E999901",
+                    timestamp=_T0,
+                    actor="legacy-reviewer",
+                    action="task.applied",
+                    target_kind="task",
+                    target_id="T001",
+                    payload_json={
+                        "task_id": "T001",
+                        "reviewer": "legacy-reviewer",
+                        "decision": "accepted",
+                        "notes": None,
+                    },
+                )
+            )
+            with events_path.open("a", encoding="utf-8") as stream:
+                for raw_event in raw_events:
+                    stream.write(json.dumps(raw_event.model_dump(mode="json")) + "\n")
+
+            with pytest.raises(
+                TransactionAborted,
+                match="Expected 'needs_review', got 'claimed'",
+            ):
+                b.replay_from_empty(str(events_path))
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize("decision", ["accepted", "rejected"])
+    @pytest.mark.parametrize("explicit_null", [False, True])
+    def test_replay_rejects_versioned_or_explicit_null_claimed_apply(
+        self, tmp_path: Path, decision: str, explicit_null: bool
+    ) -> None:
+        """Modern and explicit-null applies cannot use the legacy replay bridge."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            _setup_claimable_task_and_claim(b)
+            legacy_evidence = Event(
+                id="E999900",
+                timestamp=_T0,
+                actor="legacy-submit",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=_make_evidence_payload(submitted_by="legacy-submit"),
+            )
+            apply_payload = _make_applied_payload(decision=decision)
+            if explicit_null:
+                apply_payload = {
+                    "task_id": "T001",
+                    "reviewer": "reviewer",
+                    "decision": decision,
+                    "notes": None,
+                    "schema_version": None,
+                }
+            apply = Event(
+                id="E999901",
+                timestamp=_T0,
+                actor="reviewer",
+                action="task.applied",
+                target_kind="task",
+                target_id="T001",
+                payload_json=apply_payload,
+            )
+            with events_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(legacy_evidence.model_dump(mode="json")) + "\n")
+                stream.write(json.dumps(apply.model_dump(mode="json")) + "\n")
+
+            with pytest.raises(TransactionAborted):
+                b.replay_from_empty(str(events_path))
+        finally:
+            b.close()
+
     def test_task_applied_invalid_decision_aborts(self, tmp_path: Path) -> None:
         """task.applied with decision='approved' (not 'accepted'/'rejected') → TransactionAborted."""
         b = _make_backend(tmp_path)
