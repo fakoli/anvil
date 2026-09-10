@@ -1725,6 +1725,9 @@ flag list; full prose treatment may follow in a later pass.
   `--cron-recipes`, `--finish-gate`); dry-run by default. For pi, set
   `ANVIL_PI_PACKAGE` to a pinned `npm:`/`git:` spec when no anvil checkout is
   present.
+- `anvil repair projection` — Rebuild a diverged local projection from the
+  immutable event log after an explicit `--yes`, retaining an online backup;
+  it verifies the staged and published projections before reporting success.
 
 **PRD authoring extras**
 

@@ -16,6 +16,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   with `llm_provider: harness` preventing nested model calls.
 - Opt-in Codex/Claude behavioral execution checks and Astra automation templates
   that stop at evidence submission and preserve human acceptance.
+- `anvil repair projection --yes` for verified local reconstruction of a
+  diverged projection from immutable event history, retaining an online backup.
 
 ### Fixed
 

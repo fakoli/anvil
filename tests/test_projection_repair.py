@@ -33,6 +33,22 @@ def _state(tmp_path: Path) -> tuple[Path, SqliteBackend]:
     return state_dir, backend
 
 
+def _git_state(tmp_path: Path) -> tuple[Path, SqliteBackend]:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    events_path = state_dir / "events.jsonl"
+    events_path.touch()
+    (state_dir / "config.yaml").write_text("events_storage: git\n", encoding="utf-8")
+    backend = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(events_path),
+        clock=FrozenClock(_T0),
+        events_storage="git",
+    )
+    backend.initialize()
+    return state_dir, backend
+
+
 def _seed_project(backend: SqliteBackend) -> None:
     backend.append(
         EventDraft(
@@ -82,6 +98,32 @@ def test_projection_repair_replays_locally_retains_backup_and_preserves_events(
     )
     repaired.initialize()
     repaired.close()
+
+
+def test_projection_repair_replays_git_backed_events(tmp_path: Path) -> None:
+    state_dir, backend = _git_state(tmp_path)
+    _seed_project(backend)
+    events_path = state_dir / "events.jsonl"
+    before_events = events_path.read_bytes()
+    backend.close()
+
+    result = runner.invoke(
+        app, ["repair", "projection", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert events_path.read_bytes() == before_events
+    repaired = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(events_path),
+        clock=FrozenClock(_T0),
+        events_storage="git",
+    )
+    repaired.initialize()
+    try:
+        assert repaired.get_project().id == "proj-1"
+    finally:
+        repaired.close()
 
 
 def test_projection_repair_refuses_symlinked_live_database(tmp_path: Path) -> None:
@@ -208,6 +250,34 @@ def test_projection_repair_publishes_into_peer_opened_before_repair(
         ).fetchone() == ("peer_repair_probe",)
     finally:
         fresh.close()
+
+
+def test_projection_repair_keeps_final_verification_under_operation_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    backend.close()
+    doctor_module = importlib.import_module("anvil.cli.doctor")
+    real_check_replay = doctor_module._check_replay
+    verified_under_lock = False
+
+    def observe_final_verification(
+        checked_backend: SqliteBackend, checked_state_dir: Path
+    ):
+        nonlocal verified_under_lock
+        if Path(checked_backend._db_path).name == "state.db":  # noqa: SLF001
+            verified_under_lock = True
+            assert checked_backend._append_lock_depth == 1  # noqa: SLF001
+        return real_check_replay(checked_backend, checked_state_dir)
+
+    monkeypatch.setattr(doctor_module, "_check_replay", observe_final_verification)
+
+    result = runner.invoke(
+        app, ["repair", "projection", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert verified_under_lock
 
 
 def test_projection_repair_removes_staging_sqlite_sidecars(

@@ -35,7 +35,11 @@ Two ideas separate it from an issue tracker:
 > **Beta — v0.6.6.** The core loop is stable and dogfooded; some command
 > surfaces may change before 1.0.
 
-## What changed in v0.6.5
+## What changed in v0.6.6
+
+- **Verified local projection repair** — `anvil repair projection --yes`
+  reconstructs a diverged local projection from immutable event history while
+  retaining an online backup.
 
 - **Revision-safe PRDs** — review, approval, planning, and new claims bind the
   exact source revision ([#180](https://github.com/fakoli/anvil/issues/180),
@@ -52,7 +56,7 @@ Two ideas separate it from an issue tracker:
   slice run without UAC or junction-dependent collection
   ([#118](https://github.com/fakoli/anvil/issues/118)).
 
-See the [v0.6.5 changelog](CHANGELOG.md#065---2026-08-24) for the complete
+See the [v0.6.6 changelog](CHANGELOG.md#066---2026-09-10) for the complete
 release-candidate-to-release history and related fixes.
 
 ## Install

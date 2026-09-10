@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import sqlite3
 import stat
 import tempfile
@@ -143,10 +144,17 @@ def _verify_staged_projection(staging_path: Path, state_dir: Path) -> None:
     from anvil.config import read_events_storage
     from anvil.state.sqlite import SqliteBackend
 
+    # Git-backed projections converge against their configured log at open.
+    # Copy the immutable source into an isolated log first: an empty temporary
+    # log would make Git-mode convergence rebuild the staged projection, while
+    # using the live log would contend with the operation lock held by repair.
     with tempfile.TemporaryDirectory(prefix="anvil-repair-verify-") as temp_dir:
+        verify_events = Path(temp_dir) / "verify-events.jsonl"
+        shutil.copyfile(state_dir / "events.jsonl", verify_events)
+        _fsync_file(verify_events)
         staged = SqliteBackend(
             db_path=str(staging_path),
-            events_path=str(Path(temp_dir) / "verify-events.jsonl"),
+            events_path=str(verify_events),
             clock=SystemClock(),
             events_storage=read_events_storage(state_dir / "config.yaml"),
         )
@@ -210,6 +218,11 @@ def repair_projection(
             _regular_path(staging_path, required=True)
             _publish_staged_projection(staging_path, backend._require_conn())  # noqa: SLF001
             _fsync_file(state_db)
+            from anvil.cli.doctor import _ERROR, _check_replay
+
+            finding = _check_replay(backend, state_dir)
+            if finding.severity == _ERROR:
+                raise RuntimeError("published projection did not pass replay verification")
     except Exception as exc:  # noqa: BLE001 - report one bounded operator failure.
         typer.echo(f"Error: projection repair failed: {exc}", err=True)
         raise typer.Exit(code=1) from None
@@ -217,20 +230,6 @@ def repair_projection(
         backend.close()
         if staging_path is not None:
             _remove_staging_artifacts(staging_path)
-
-    # Re-open after in-place publication and run the established oracle again.
-    repaired = _open_backend(state_dir)
-    try:
-        from anvil.cli.doctor import _ERROR, _check_replay
-
-        finding = _check_replay(repaired, state_dir)
-        if finding.severity == _ERROR:
-            raise RuntimeError("published projection did not pass replay verification")
-    except Exception as exc:  # noqa: BLE001
-        typer.echo(f"Error: projection repair verification failed: {exc}", err=True)
-        raise typer.Exit(code=1) from None
-    finally:
-        repaired.close()
 
     assert backup_path is not None
     typer.echo("Projection repaired from local event history.")
