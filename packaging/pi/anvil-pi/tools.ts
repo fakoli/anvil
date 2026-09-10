@@ -75,6 +75,12 @@ export const ALWAYS_DENY_VERBS = new Set([
  * multi-command groups). */
 export const UNCLASSIFIED_VERBS = new Set(["sync", "proof", "project", "notify-digest"]);
 
+/** Per-verb JSON output flags — packet exposes JSON via `--format json` and
+ * REJECTS `--json`; every other audited verb takes `--json`. (M4 dogfood.) */
+export function jsonOutputFlagsFor(verb: string): string[] {
+  return verb === "packet" ? ["--format", "json"] : ["--json"];
+}
+
 export function planningSurfaceEnabled(env: Record<string, string | undefined> = process.env): boolean {
   const raw = env.ANVIL_PI_PLANNING ?? "";
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
@@ -113,9 +119,8 @@ export interface AnvilRunOptions {
   maxTotalChars?: number;
   timeoutMs?: number;
   /**
-   * Append `--json` (default true). Verbs whose JSON output uses a different
-   * flag must pass false and carry the flag in args — e.g. `packet` exposes
-   * JSON via `--format json` and REJECTS `--json` (dogfood-caused, M4).
+   * Append the verb's JSON output flags (default true). Pass false to opt out
+   * entirely (args then carry the flags, e.g. `packet --format json`).
    */
   json?: boolean;
 }
@@ -163,13 +168,21 @@ export function runAnvil(
   if (cleanArgs.some((a) => a.length > maxArgChars) || cleanArgs.join(" ").length > maxTotalChars) {
     return Promise.resolve({ ok: false, stdout: "", stderr: `args exceed size caps (${maxArgChars} per arg, ${maxTotalChars} total)`, exitCode: -1 });
   }
-  if (cleanArgs.includes("--json") || cleanArgs.includes("--")) {
-    return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain "--json" or a bare "--" separator', exitCode: -1 });
+  if (cleanArgs.includes("--")) {
+    return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain a bare "--" separator', exitCode: -1 });
   }
-  const appendJson = options.json !== false;
+  // Centralized per-verb output-flag selection (advisory F8): verbs whose
+  // JSON output uses a different flag are declared ONCE here, so both the
+  // dedicated tools and the anvil_run escape hatch emit valid argv.
+  const outputFlags = options.json === false ? [] : jsonOutputFlagsFor(verb);
+  if (outputFlags.includes("--json") && cleanArgs.includes("--json")) {
+    // the --json guard only applies when runAnvil itself appends --json; a
+    // json:false caller is EXPECTED to carry output flags in args
+    return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain "--json"', exitCode: -1 });
+  }
 
   return new Promise((resolveResult) => {
-    const child = spawn(anvilBin(env), [verb, ...cleanArgs, ...(appendJson ? ["--json"] : [])], {
+    const child = spawn(anvilBin(env), [verb, ...cleanArgs, ...outputFlags], {
       cwd,
       env: env as NodeJS.ProcessEnv,
       stdio: ["ignore", "pipe", "pipe"],

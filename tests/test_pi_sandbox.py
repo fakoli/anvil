@@ -555,7 +555,6 @@ def test_launcher_seed_dir_and_model_flag(tmp_path: Path, fake_pi: Path) -> None
     assert r.returncode == 0, r.stderr
     argv = (tmp_path / "fake-pi-out" / "argv").read_text().splitlines()
     assert "--model" in argv and "sandbox-mock/steerer" in argv
-    seeded = tmp_path / "fake-pi-out" / "seeded"
     # seeded models.json must exist inside the (now-cleaned) agent dir — the
     # fake pi records the agent dir env; assert via env snapshot instead
     env = (tmp_path / "fake-pi-out" / "env").read_text()

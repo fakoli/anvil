@@ -25,7 +25,9 @@
       "args": {
         "task_id": "$NEXT_TASK_ID",
         "commands": "anvil status --json",
-        "files_changed": "report.md"
+        "files_changed": [
+          "report.md"
+        ]
       }
     },
     {

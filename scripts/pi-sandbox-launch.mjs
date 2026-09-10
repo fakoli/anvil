@@ -33,7 +33,8 @@ import {
   childEnv,
   composeReport,
   loadAllowlist,
-  stagePathExtension,
+  readPinSnapshot,
+  stageSnapshot,
   treeHash,
 } from "./pi-sandbox-policy.mjs";
 
@@ -89,25 +90,33 @@ function resolvePiBinary(piArg) {
 }
 
 /** Dry-run verification: hash the pinned bytes without staging anything. */
-async function verifyOnly(entry, allowlistPath) {
-  // Dry-run verification mirrors the real staging path's ACCEPTANCE rules
-  // (tree pins verify the whole canonical tree; flat pins verify the entry
-  // bytes) so a run can never pass dry-run and fail launch on different rules.
-  const base = dirname(resolve(allowlistPath));
-  const abs = resolve(base, entry.source.slice("path:".length));
-  const info = await lstat(abs);
-  if (info.isSymbolicLink()) throw { code: "mismatch", message: `${abs} is a symlink` };
-  if (!info.isFile()) throw { code: "missing", message: `${abs} is not a regular file` };
-  if (typeof entry.tree_sha256 === "string") {
-    const { digest } = await treeHash(dirname(abs));
-    if (digest !== entry.tree_sha256) {
-      throw { code: "mismatch", message: `${dirname(abs)}: expected tree_sha256 ${entry.tree_sha256}, got ${digest}` };
+async function validateSeedDir(seedDir) {
+  // Regular files only; symlinks/special files rejected; depth-capped. Same
+  // enforcement at dry-run (validation) and launch (copy).
+  const files = new Map();
+  const walk = async (dir, prefix = "", depth = 0) => {
+    if (depth > 8) throw { message: `seed exceeds depth cap at ${dir}` };
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isSymbolicLink()) throw { message: `seed contains a symlink: ${rel}` };
+      if (e.isDirectory()) await walk(join(dir, e.name), rel, depth + 1);
+      else if (e.isFile()) {
+        const data = await readFile(join(dir, e.name));
+        if (data.length > 1024 * 1024) throw { message: `seed file exceeds 1MiB: ${rel}` };
+        files.set(rel, data);
+      } else throw { message: `seed contains a special file: ${rel}` };
     }
-    return digest;
-  }
-  const sha256 = createHash("sha256").update(await readFile(abs)).digest("hex");
-  if (sha256 !== entry.sha256) throw { code: "mismatch", message: `${abs}: expected ${entry.sha256}, got ${sha256}` };
-  return sha256;
+  };
+  await walk(seedDir);
+  return files;
+}
+
+async function verifyOnly(entry, allowlistPath) {
+  // Dry-run verification uses the SAME readPinSnapshot rules and bytes as
+  // real staging (advisory F3): a run can never pass dry-run and fail launch
+  // on different rules.
+  const { digest } = await readPinSnapshot(entry, allowlistPath);
+  return digest;
 }
 
 async function main() {
@@ -149,6 +158,12 @@ async function main() {
     const seed = resolve(seedDir);
     const info = await lstat(seed).catch(() => null);
     if (!info || !info.isDirectory()) die(EXIT_POLICY, `--seed-dir must be an existing directory: ${seed}`);
+    // dry-run validates seed CONTENT with the same rules launch enforces (F3)
+    if (dryRun) {
+      await validateSeedDir(seed).catch((error) =>
+        die(EXIT_POLICY, `--seed-dir rejected: ${error.message}`)
+      );
+    }
   }
 
   // Verify (dry-run) or stage+verify (real run). Any pin problem aborts
@@ -171,8 +186,14 @@ async function main() {
       const stageDir = await mkdtemp(join(tmpdir(), "pi-sandbox-stage."));
       cleanupDirs.push(stageDir);
       for (const [index, entry] of profile.extensions.entries()) {
-        const staged = await stagePathExtension(entry, allowlistPath, stageDir, `ext-${index}`).catch((error) => {
-          throw { exitCode: error.code === "mismatch" ? 3 : EXIT_POLICY, message: `staging failed (extensions[${index}] ${entry.source}): ${error.message}` };
+        // Two steps: the .catch must attach to the SNAPSHOT promise itself —
+        // `stageSnapshot(await readPinSnapshot(...))` rejects before the outer
+        // catch exists (an M4 review find: mismatch surfaced as exit 2).
+        const snapshot = await readPinSnapshot(entry, allowlistPath).catch((error) => {
+          throw { exitCode: error.code === "mismatch" ? 3 : EXIT_POLICY, message: `pin check failed (extensions[${index}] ${entry.source}): ${error.message}` };
+        });
+        const staged = await stageSnapshot(snapshot, stageDir, `ext-${index}`).catch((error) => {
+          throw { exitCode: EXIT_POLICY, message: `staging failed (extensions[${index}] ${entry.source}): ${error.message}` };
         });
         stagedArgs.push("-e", staged.stagedPath);
         console.log(`STAGED: extensions[${index}] ${entry.source} -> ${staged.stagedPath} (${staged.files.length} file(s))`);
@@ -190,25 +211,15 @@ async function main() {
     cleanupDirs.push(agentDir);
     if (seedDir !== undefined) {
       // Pre-seed the fresh agent dir (e.g. models.json wiring a loopback
-      // provider). Regular files only, symlinks/special files rejected — the
-      // same rules staging enforces, so the seed cannot smuggle links.
+      // provider). Same acceptance rules as staging (no symlinks/special
+      // files, depth-capped) — validated by validateSeedDir.
       const seed = resolve(seedDir);
-      let seeded = 0;
-      const walk = async (dir, prefix = "", depth = 0) => {
-        if (depth > 8) die(EXIT_POLICY, `--seed-dir exceeds depth cap at ${dir}`);
-        for (const e of await readdir(dir, { withFileTypes: true })) {
-          const rel = prefix ? `${prefix}/${e.name}` : e.name;
-          if (e.isSymbolicLink()) die(EXIT_POLICY, `seed contains a symlink: ${rel}`);
-          if (e.isDirectory()) await walk(join(dir, e.name), rel, depth + 1);
-          else if (e.isFile()) {
-            await mkdir(join(agentDir, prefix), { recursive: true });
-            await copyFile(join(dir, e.name), join(agentDir, rel));
-            seeded += 1;
-          } else die(EXIT_POLICY, `seed contains a special file: ${rel}`);
-        }
-      };
-      await walk(seed);
-      console.log(`SEEDED: ${seeded} file(s) into fresh agent dir`);
+      const seedFiles = await validateSeedDir(seed);
+      for (const rel of seedFiles.keys()) {
+        await mkdir(join(agentDir, dirname(rel)), { recursive: true });
+        await copyFile(join(seed, rel), join(agentDir, rel));
+      }
+      console.log(`SEEDED: ${seedFiles.size} file(s) into fresh agent dir`);
     }
     const env = childEnv({ PI_CODING_AGENT_DIR: agentDir });
 

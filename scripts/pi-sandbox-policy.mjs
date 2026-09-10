@@ -156,7 +156,7 @@ export const STAGE_MAX_DEPTH = 16; // per-extension directory depth cap
 // mode changes that matter must change the digest. Rejected, never skipped:
 // symlinks or special files anywhere in the tree, and `.git` / `node_modules`
 // directories (build junk must not silently enter a verified pin).
-export const TREE_PIN_VERSION = 1;
+export const TREE_PIN_VERSION = 2;
 const REJECTED_DIR_NAMES = new Set([".git", "node_modules"]);
 
 async function walkTree(rootDir, prefix = "", depth = 0) {
@@ -187,6 +187,10 @@ async function walkTree(rootDir, prefix = "", depth = 0) {
 
 export function canonicalTreeDigest(files) {
   // files: [{ rel, bytes: Buffer }]. Bytewise sort on the relpath (no locale).
+  // Encoding v2: LENGTH-PREFIXED records — `<relByteLen>:<rel><sha256hex>\n`.
+  // v1 ("<rel>\n<hex>\n") had practical collisions: filenames containing
+  // newlines could forge record boundaries without any hash collision.
+  // The length prefix makes the parse unambiguous for ANY filename.
   const sorted = [...files].sort((a, b) => {
     const ka = Buffer.from(a.rel, "utf8");
     const kb = Buffer.from(b.rel, "utf8");
@@ -194,28 +198,29 @@ export function canonicalTreeDigest(files) {
   });
   const hash = createHash("sha256");
   for (const f of sorted) {
-    hash.update(Buffer.from(`${f.rel}\n`, "utf8"));
+    const relBytes = Buffer.from(f.rel, "utf8");
+    hash.update(Buffer.from(`${relBytes.length}:`, "utf8"));
+    hash.update(relBytes);
     hash.update(Buffer.from(`${createHash("sha256").update(f.bytes).digest("hex")}\n`, "utf8"));
   }
   return hash.digest("hex");
 }
 
 /**
- * Stage a `path:` extension: ONE read of the entry bytes, hash those exact
- * bytes, compare to the pin, and copy entry + same-directory siblings (no
- * symlinks) into `<stageDir>/<key>/`. The launcher loads ONLY staged paths —
- * what was verified is what pi loads. Relative pins resolve against the
- * allowlist's directory (one resolution base, no cwd dependence).
+ * Read+validate a pin snapshot: the SAME acceptance rules and the SAME bytes
+ * for dry-run verification and real staging (advisory F3 — the rules can
+ * never diverge). Returns { entryAbs, rootDir, kind, files: [{rel, name?,
+ * bytes}], entryBytes, digest-or-sha } or throws { code, message }.
  *
- * Returns { stagedPath, sha256, files, bytes } or throws { code, message }.
+ * Tree pins: the whole directory, recursively (symlinks/special/.git/
+ * node_modules rejected), digest = canonicalTreeDigest v2.
+ * Flat pins: entry + same-dir siblings (siblings staged unverified but
+ * byte/file-capped); digest = sha256(entry bytes).
  */
-export async function stagePathExtension(entry, allowlistPath, stageDir, key) {
+export async function readPinSnapshot(entry, allowlistPath) {
   const base = dirname(resolve(allowlistPath));
   const sourceRel = entry.source.slice("path:".length);
   const sourceAbs = resolve(base, sourceRel);
-  const destDir = join(stageDir, key);
-  const copied = [];
-  let bytes = 0;
 
   let info;
   try {
@@ -230,17 +235,14 @@ export async function stagePathExtension(entry, allowlistPath, stageDir, key) {
     throw { code: "missing", message: `${sourceAbs} is not a regular file` };
   }
 
-  await mkdir(destDir, { recursive: true });
-
   if (typeof entry.tree_sha256 === "string") {
-    // Tree pin: stage the entry's ENTIRE directory recursively (verified),
-    // then the entry lands at its natural relative position inside it.
     const rootDir = dirname(sourceAbs);
     const files = await walkTree(rootDir);
     if (files.length > STAGE_MAX_FILES) {
       throw { code: "missing", message: `extension tree exceeds file cap ${STAGE_MAX_FILES}` };
     }
     const withBytes = [];
+    let bytes = 0;
     for (const f of files) {
       const data = await readFile(f.abs);
       withBytes.push({ rel: f.rel, bytes: data });
@@ -253,42 +255,28 @@ export async function stagePathExtension(entry, allowlistPath, stageDir, key) {
     if (digest !== entry.tree_sha256) {
       throw { code: "mismatch", message: `${rootDir}: expected tree_sha256 ${entry.tree_sha256}, got ${digest}` };
     }
-    for (const f of withBytes) {
-      const dest = join(destDir, f.rel);
-      await mkdir(dirname(dest), { recursive: true });
-      await writeFile(dest, f.bytes);
-      copied.push(f.rel);
-    }
-    return {
-      stagedPath: join(destDir, basename(sourceAbs)),
-      sha256: createHash("sha256").update(withBytes.find((f) => f.rel === basename(sourceAbs)).bytes).digest("hex"),
-      tree_sha256: digest,
-      files: copied,
-      bytes,
-    };
+    return { entryAbs: sourceAbs, rootDir, kind: "tree", files: withBytes, digest, bytes };
   }
 
-  // Flat pin (M1): entry hash verified; same-dir siblings staged UNVERIFIED so
-  // entry imports resolve, with real byte counts against the cap (an earlier
-  // draft added Dirent.size — which does not exist — making the cap NaN).
+  // Flat pin: entry verified by hash; siblings read under the same caps.
   const entryDir = dirname(sourceAbs);
   const entries = await readdir(entryDir, { withFileTypes: true });
   const siblingFiles = entries.filter(
     (e) => e.name !== basename(sourceAbs) && !e.isSymbolicLink() && e.isFile()
   );
-  const siblingBytes = [];
+  const withBytes = [];
+  let bytes = 0;
   for (const sibling of siblingFiles) {
     const data = await readFile(join(entryDir, sibling.name));
-    siblingBytes.push({ name: sibling.name, data });
+    withBytes.push({ rel: sibling.name, bytes: data });
     bytes += data.length;
     if (bytes > STAGE_MAX_BYTES) {
       throw { code: "missing", message: `extension directory exceeds staging cap ${STAGE_MAX_BYTES} bytes` };
     }
   }
-  if (siblingFiles.length > STAGE_MAX_FILES) {
+  if (siblingFiles.length + 1 > STAGE_MAX_FILES) {
     throw { code: "missing", message: `extension directory exceeds file cap ${STAGE_MAX_FILES}` };
   }
-
   const entryBytes = await readFile(sourceAbs);
   const sha256 = createHash("sha256").update(entryBytes).digest("hex");
   if (sha256 !== entry.sha256) {
@@ -298,14 +286,51 @@ export async function stagePathExtension(entry, allowlistPath, stageDir, key) {
   if (bytes > STAGE_MAX_BYTES) {
     throw { code: "missing", message: `extension exceeds staging cap ${STAGE_MAX_BYTES} bytes` };
   }
-  await writeFile(join(destDir, basename(sourceAbs)), entryBytes);
-  copied.push(basename(sourceAbs));
-  for (const s of siblingBytes) {
-    await writeFile(join(destDir, s.name), s.data);
-    copied.push(s.name);
-  }
+  return { entryAbs: sourceAbs, rootDir: entryDir, kind: "flat", files: withBytes, entryBytes, digest: sha256, bytes };
+}
 
-  return { stagedPath: join(destDir, basename(sourceAbs)), sha256, files: copied, bytes };
+/**
+ * Stage a snapshot (from readPinSnapshot) into `<stageDir>/<key>/`. The
+ * launcher loads ONLY staged paths — what was verified is what pi loads.
+ */
+export async function stageSnapshot(snapshot, stageDir, key) {
+  const destDir = join(stageDir, key);
+  await mkdir(destDir, { recursive: true });
+  const copied = [];
+  const entryRel = snapshot.kind === "tree"
+    ? snapshot.entryAbs.slice(snapshot.rootDir.length + 1)
+    : basename(snapshot.entryAbs);
+  if (snapshot.kind === "tree") {
+    for (const f of snapshot.files) {
+      const dest = join(destDir, f.rel);
+      await mkdir(dirname(dest), { recursive: true });
+      await writeFile(dest, f.bytes);
+      copied.push(f.rel);
+    }
+    return {
+      stagedPath: join(destDir, entryRel),
+      sha256: createHash("sha256").update(snapshot.files.find((f) => f.rel === entryRel).bytes).digest("hex"),
+      tree_sha256: snapshot.digest,
+      files: copied,
+      bytes: snapshot.bytes,
+    };
+  }
+  await writeFile(join(destDir, entryRel), snapshot.entryBytes);
+  copied.push(entryRel);
+  for (const f of snapshot.files) {
+    await writeFile(join(destDir, f.rel), f.bytes);
+    copied.push(f.rel);
+  }
+  return { stagedPath: join(destDir, entryRel), sha256: snapshot.digest, files: copied, bytes: snapshot.bytes };
+}
+
+/**
+ * Stage a `path:` extension (snapshot + write). Kept for callers that want
+ * one call; the launcher uses read+stage so dry-run and launch share rules.
+ */
+export async function stagePathExtension(entry, allowlistPath, stageDir, key) {
+  const snapshot = await readPinSnapshot(entry, allowlistPath);
+  return stageSnapshot(snapshot, stageDir, key);
 }
 
 export async function treeHash(dir) {

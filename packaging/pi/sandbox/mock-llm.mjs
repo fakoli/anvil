@@ -55,26 +55,47 @@ function toolContentText(m) {
   return null;
 }
 
+let lastEmittedCallId = null; // correlation anchor (advisory F6)
+let nextCallId = null; // the anvil_next call id — $NEXT_TASK_ID anchors here
+let healthy = true;
+
+function resultForCall(messages, callId) {
+  // The steering sequence reads only the tool result for the exact call the
+  // mock itself emitted (matched by tool_call_id) — never any result whose
+  // text happens to look relevant (advisory F6).
+  if (callId === null) return null;
+  return messages.find((m) => m && m.role === "tool" && m.tool_call_id === callId) ?? null;
+}
+
 function substituteArgs(args, messages) {
-  // "$NEXT_TASK_ID" placeholders resolve from the most recent anvil_next
-  // tool result, so the steering sequence works on any seeded root.
+  // "$NEXT_TASK_ID" resolves ONLY from the anvil_next result the mock itself
+  // elicited; it must be ok:true with a well-formed task id. No fallback: a
+  // missing/failed next yields a steering error (visible in the final text
+  // and in CI's per-step assertions), never a silently wrong task.
   const out = {};
   for (const [key, value] of Object.entries(args)) {
     if (typeof value === "string" && value.includes("$NEXT_TASK_ID")) {
-      const nextText = [...messages]
-        .reverse()
-        .map(toolContentText)
-        .find((t) => t && t.includes('"command"') && t.includes("next"));
-      let taskId = "T001";
-      if (nextText) {
+      const result = resultForCall(messages, nextCallId);
+      let taskId = null;
+      if (result) {
+        const text = toolContentText(result) ?? "";
         try {
-          const parsed = JSON.parse(nextText);
-          taskId = parsed?.data?.task?.id ?? taskId;
+          const parsed = JSON.parse(text);
+          const id = parsed?.data?.task?.id;
+          if (parsed?.ok === true && typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+            taskId = id;
+          }
         } catch {
-          // fall back to the deterministic default
+          // fall through to the steering error below
         }
       }
-      out[key] = value.replaceAll("$NEXT_TASK_ID", taskId);
+      if (taskId === null) {
+        healthy = false;
+        console.error(`mock-llm: STEERING ERROR: no valid anvil_next result for call ${nextCallId}`);
+        out[key] = "<steering-error: no valid anvil_next result>";
+      } else {
+        out[key] = value.replaceAll("$NEXT_TASK_ID", taskId);
+      }
     } else {
       out[key] = value;
     }
@@ -151,14 +172,39 @@ function sseChunks(requestId, message) {
   return frames.join("");
 }
 
-const server = createServer(async (req, res) => {
+const MAX_BODY_BYTES = 1024 * 1024; // request cap (advisory F5)
+
+const server = createServer((req, res) => {
+  void handle(req, res).catch((error) => {
+    // the WHOLE handler is guarded: a malformed request can never crash the
+    // steering server mid-loop
+    console.error(`mock-llm: handler error: ${error?.message ?? error}`);
+    if (!res.headersSent) {
+      res.writeHead(500, { "content-type": "application/json" });
+    }
+    res.end(JSON.stringify({ error: { message: "internal" } }));
+  });
+});
+
+async function handle(req, res) {
   if (req.method !== "POST" || !req.url.startsWith("/v1/chat/completions")) {
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: { message: "not found" } }));
     return;
   }
-  let bodyText = "";
-  for await (const chunk of req) bodyText += chunk;
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      res.writeHead(413, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "body too large" } }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  }
+  const bodyText = Buffer.concat(chunks).toString("utf8"); // split-UTF-8 safe
   if (process.env.MOCK_DUMP_DIR) {
     try {
       const { writeFile: wf, mkdir: mkd } = await import("node:fs/promises");
@@ -174,7 +220,14 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify({ error: { message: "bad json" } }));
     return;
   }
-  const messages = Array.isArray(request.messages) ? request.messages : [];
+  if (request === null || typeof request !== "object" || Array.isArray(request)
+    || !Array.isArray(request.messages)
+    || request.messages.some((m) => m === null || typeof m !== "object")) {
+    res.writeHead(400, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "malformed request: messages must be an array of objects" } }));
+    return;
+  }
+  const messages = request.messages;
   const done = toolResultsOf(messages).length;
   let message;
   if (done < sequence.length) {
@@ -184,12 +237,14 @@ const server = createServer(async (req, res) => {
       delete args.embed_last_tool_result;
       args.content = `${args.content ?? ""}\n\n<last-tool-result>\n${lastToolResultText(messages).slice(0, 4000)}\n</last-tool-result>`;
     }
+    lastEmittedCallId = `call-mock-${done}`;
+    if (step.name === "anvil_next") nextCallId = lastEmittedCallId;
     message = {
       role: "assistant",
       content: null,
       tool_calls: [
         {
-          id: `call-mock-${done}`,
+          id: lastEmittedCallId,
           type: "function",
           function: { name: step.name, arguments: JSON.stringify(args) },
         },
@@ -210,7 +265,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(body(done, message));
   }
-});
+}
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`mock-llm: steering on 127.0.0.1:${port} (${sequence.length} steered step(s))`);

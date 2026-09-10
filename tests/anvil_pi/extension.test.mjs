@@ -516,6 +516,8 @@ const hasRealAnvil = (() => {
   }
 })();
 
+const requireContract = process.env.ANVIL_REQUIRE_CONTRACT === "1";
+
 if (hasRealAnvil) {
   await test("contract: every allowlisted/denied verb exists in the real CLI registry", async () => {
     const { spawnSync, execFileSync } = require("node:child_process");
@@ -537,13 +539,15 @@ if (hasRealAnvil) {
   };
   const flagProblems = [];
   for (const [verb, flags] of Object.entries(flagContract)) {
-    const help = execFileSync(anvilBin, [verb, "--help"]).toString();
+    const verbHelp = execFileSync(anvilBin, [verb, "--help"], { encoding: "utf8", timeout: 15_000 });
     for (const flag of flags) {
-      if (!help.includes(flag)) flagProblems.push(`anvil ${verb} does not offer ${flag}`);
+      if (!verbHelp.includes(flag)) flagProblems.push(`anvil ${verb} does not offer ${flag}`);
     }
   }
   assert.deepEqual(flagProblems, [], flagProblems.join("; "));
   });
+} else if (requireContract) {
+  assert.fail("ANVIL_REQUIRE_CONTRACT=1 but the real anvil CLI is not on PATH — CI must expose it");
 } else {
   console.log("  skip contract: real anvil CLI not on PATH");
 }

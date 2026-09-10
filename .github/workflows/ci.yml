@@ -213,18 +213,34 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Sync anvil CLI
+      - name: 'Sync anvil CLI (dev deps included: pytest)'
         working-directory: bin
-        run: uv sync --frozen --no-dev
+        run: uv sync --frozen
+
+      # The extension tests need the pi harness (jiti + SDK aliases) on the
+      # HOST — the docker image cannot satisfy an earlier host-side step
+      # (advisory F2). Pin the same version the image bakes.
+      - name: Install pi harness (host)
+        run: |
+          npm install --global --no-audit --no-fund @earendil-works/pi-coding-agent@0.85.1
+          echo "PI_INSTALL_DIR=$(npm root -g)/@earendil-works/pi-coding-agent" >> "$GITHUB_ENV"
+
+      # Expose the synced anvil CLI so the real-CLI contract runs (never skips).
+      - name: Expose anvil on PATH
+        run: echo "$GITHUB_WORKSPACE/bin/.venv/bin" >> "$GITHUB_PATH"
 
       # Hermetic: policy/launcher contract (tree pins, staging, seed dir).
       - name: Sandbox launcher tests
         run: pytest tests/test_pi_sandbox.py -q
 
-      # anvil-pi extension contract incl. per-verb flag contract against the
-      # real CLI (dogfood-caused: packet rejects --json).
-      - name: anvil-pi extension tests
-        run: node tests/anvil_pi/extension.test.mjs
+      # anvil-pi extension + mock-llm contracts incl. the per-verb flag
+      # contract against the real CLI (dogfood-caused: packet rejects --json).
+      # ANVIL_REQUIRE_CONTRACT: the contract must RUN, not silently skip.
+      - name: anvil-pi + mock provider tests
+        run: |
+          node tests/anvil_pi/extension.test.mjs
+          ANVIL_REQUIRE_CONTRACT=1 node tests/anvil_pi/extension.test.mjs > /dev/null
+          node tests/anvil_pi/mock-llm.test.mjs
 
       # Build-time pin verification runs inside the Dockerfile; the build
       # FAILS if baked bytes drift from the allowlist pins.
@@ -248,7 +264,28 @@ jobs:
           printf 'You are driving the anvil work loop for this project unattended.\nUse the anvil tools: check status, pick the next claimable task, claim it, render its packet, and submit completion evidence.\nWhen the loop finishes, write a short markdown report to /work/report.md summarizing what each verb returned.\n' > /tmp/anvil-dogfood/task.txt
           scripts/pi-sandbox-docker.sh unattended-exec /tmp/anvil-dogfood/task.txt /tmp/anvil-dogfood/ws > /tmp/anvil-dogfood/run.log 2>&1 || {
             echo "::error::sandbox dogfood loop failed"; tail -40 /tmp/anvil-dogfood/run.log; exit 1; }
-          grep -c '"type":"tool_execution_end"' /tmp/anvil-dogfood/run.log
+          # every steered step must have executed AND succeeded (advisory F6:
+          # a failed status/next must fail CI, not silently pass)
+          python3 - << 'PY'
+          import json
+          steps = []
+          for line in open("/tmp/anvil-dogfood/run.log"):
+              line = line.strip()
+              if not line.startswith("{"):
+                  continue
+              try:
+                  ev = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if ev.get("type") == "tool_execution_end":
+                  steps.append((ev["toolName"], ev["result"].get("isError")))
+          expected = ["anvil_status", "anvil_next", "anvil_claim", "anvil_packet", "anvil_submit", "write"]
+          got = [name for name, _ in steps]
+          assert got == expected, f"unexpected execution sequence: {got}"
+          for name, err in steps:
+              assert not err, f"step {name} failed"
+          print("steered sequence OK:", got)
+          PY
 
       - name: Assert final state outside the agent
         run: |
@@ -262,6 +299,11 @@ jobs:
           tasks = json.load(open("/tmp/anvil-dogfood/status.json"))["data"]["tasks"]
           assert tasks["needs_review"] == 1, f"expected T001 in needs_review, got {tasks}"
           assert tasks["done"] == 0, "apply is the human gate — the agent must not self-approve"
+          report = open("/tmp/anvil-dogfood/ws/report.md").read()
+          import re
+          assert re.search(r"EV[0-9A-F]{6,}", report), "report must embed the real submit evidence id"
+          packet = json.load(open("/tmp/anvil-dogfood/ws/.anvil/packets/T001.json"))
+          assert packet.get("task_id") == "T001", f"packet task mismatch: {packet.get('task_id')}"
           print("dogfood state OK:", tasks)
           PY
 
