@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "pi-sandbox allowlist",
+  "title": "pi-sandbox allowlist (M1: path: pins only)",
   "type": "object",
   "required": ["version", "profiles"],
   "additionalProperties": false,
@@ -29,39 +29,18 @@
           "minItems": 1,
           "items": { "type": "string", "minLength": 1, "pattern": "^[a-zA-Z0-9_-]+$" }
         },
-        "skills": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "network": { "enum": ["none", "inference"] },
-        "projectTrust": { "enum": ["never", "always"] }
+        "skills": { "type": "array", "maxItems": 0 },
+        "network": { "enum": ["none", "inference"] }
       }
     },
     "extensionPin": {
       "type": "object",
-      "required": ["source"],
+      "required": ["source", "sha256"],
       "additionalProperties": false,
       "properties": {
-        "source": {
-          "type": "string",
-          "pattern": "^(path:|npm:|git:)",
-          "minLength": 5
-        },
-        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "ref": { "type": "string", "minLength": 1 },
-        "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "source": { "pattern": "^path:" } } },
-          "then": { "required": ["source", "sha256"] }
-        },
-        {
-          "if": { "properties": { "source": { "pattern": "^npm:" } } },
-          "then": { "required": ["source", "sha256"] }
-        },
-        {
-          "if": { "properties": { "source": { "pattern": "^git:" } } },
-          "then": { "required": ["source", "ref", "commit"] }
-        }
-      ]
+        "source": { "type": "string", "pattern": "^path:.+", "minLength": 6 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
     }
   }
 }
