@@ -6,7 +6,7 @@ import hashlib
 import importlib
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,6 +117,113 @@ def _write_recovery_config(state_dir: Path, *, git_backed: bool = False) -> None
     (state_dir / "config.yaml").write_text(
         f"project_name: repair-test\nproject_id: unrelated-config-id\n{storage}",
         encoding="utf-8",
+    )
+
+
+def _seed_claim_and_evidence_history(backend: SqliteBackend) -> None:
+    """Add replayable rows that project repair must leave untouched."""
+    backend.append(
+        EventDraft(
+            timestamp=_T0,
+            actor="test",
+            action="feature.created",
+            target_kind="feature",
+            target_id="F001",
+            payload_json={
+                "id": "F001",
+                "title": "Repair feature",
+                "description": "Preserve historical claim rows.",
+                "status": "proposed",
+                "requirements": [],
+                "tasks": [],
+            },
+        )
+    )
+    for task_id in ("T-active", "T-evidence"):
+        backend.append(
+            EventDraft(
+                timestamp=_T0,
+                actor="test",
+                action="task.created",
+                target_kind="task",
+                target_id=task_id,
+                payload_json={
+                    "id": task_id,
+                    "feature_id": "F001",
+                    "title": task_id,
+                    "description": "Preserve through repair.",
+                    "status": "proposed",
+                    "priority": "medium",
+                    "dependencies": [],
+                    "conflict_groups": [],
+                    "scores": {},
+                    "acceptance_criteria": ["Evidence survives."],
+                    "implementation_notes": [],
+                    "verification": {"commands": [], "manual_steps": [], "required_evidence": []},
+                    "likely_files": [],
+                    "parent_task_id": None,
+                    "created_at": _T0.isoformat(),
+                    "updated_at": _T0.isoformat(),
+                },
+            )
+        )
+        for before, after in (("proposed", "drafted"), ("drafted", "reviewed"), ("reviewed", "ready")):
+            backend.append(
+                EventDraft(
+                    timestamp=_T0,
+                    actor="test",
+                    action="task.status_changed",
+                    target_kind="task",
+                    target_id=task_id,
+                    payload_json={"task_id": task_id, "from": before, "to": after},
+                )
+            )
+    for claim_id, task_id in (("C-active", "T-active"), ("C-evidence", "T-evidence")):
+        backend.append(
+            EventDraft(
+                timestamp=_T0,
+                actor="agent-alpha",
+                action="claim.created",
+                target_kind="claim",
+                target_id=claim_id,
+                payload_json={
+                    "id": claim_id,
+                    "task_id": task_id,
+                    "claimed_by": "agent-alpha",
+                    "claim_type": "task",
+                    "status": "active",
+                    "branch": None,
+                    "worktree_path": None,
+                    "expected_files": [],
+                    "created_at": _T0.isoformat(),
+                    "lease_expires_at": (_T0 + timedelta(hours=1)).isoformat(),
+                    "last_heartbeat_at": _T0.isoformat(),
+                    "released_at": None,
+                    "release_reason": None,
+                },
+            )
+        )
+    backend.append(
+        EventDraft(
+            timestamp=_T0,
+            actor="agent-alpha",
+            action="evidence.submitted",
+            target_kind="task",
+            target_id="T-evidence",
+            payload_json={
+                "task_id": "T-evidence",
+                "claim_id": "C-evidence",
+                "evidence_id": "EV-preserved",
+                "submitted_by": "agent-alpha",
+                "commands_run": ["pytest tests/test_projection_repair.py -q"],
+                "files_changed": [],
+                "output_excerpt": "passed",
+                "pr_url": None,
+                "commit_sha": None,
+                "screenshots": [],
+                "known_limitations": None,
+            },
+        )
     )
 
 
@@ -480,6 +587,35 @@ def test_project_repair_registers_consensus_owner_and_replays(
         app, ["project", "snapshot", "--json", "--cwd", str(tmp_path)]
     )
     assert snapshot.exit_code == 0, snapshot.output
+
+
+def test_project_repair_preserves_claims_evidence_and_backup_snapshot(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _seed_owner_only_prd(backend, owner="historical-owner")
+    _seed_claim_and_evidence_history(backend)
+    _write_recovery_config(state_dir)
+    backend.close()
+
+    result = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    backup_path = next(state_dir.glob(".state.db.repair-*.backup"))
+    for db_path in (state_dir / "state.db", backup_path):
+        with sqlite3.connect(db_path) as connection:
+            assert connection.execute(
+                "SELECT status FROM claims WHERE id = 'C-active'"
+            ).fetchone() == ("active",)
+            assert connection.execute(
+                "SELECT status FROM claims WHERE id = 'C-evidence'"
+            ).fetchone() == ("released",)
+            assert connection.execute(
+                "SELECT claim_id, submitted_by FROM evidence "
+                "WHERE id = 'EV-preserved'"
+            ).fetchone() == ("C-evidence", "agent-alpha")
 
 
 def test_project_repair_registers_consensus_owner_for_git_events(
