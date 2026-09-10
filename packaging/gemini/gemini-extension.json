@@ -1,6 +1,6 @@
 {
   "name": "anvil",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "Local-first project-state engine.",
   "contextFileName": "AGENTS.md",
   "mcpServers": {

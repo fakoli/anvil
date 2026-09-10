@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ from typer.testing import CliRunner
 
 from anvil.cli import app
 from anvil.clock import FrozenClock
+from anvil.planning.prd_persistence import material_content_sha256, source_binding
 from anvil.state.models import EventDraft
 from anvil.state.sqlite import SqliteBackend
 
@@ -63,6 +66,162 @@ def _seed_project(backend: SqliteBackend) -> None:
                 "description": "",
                 "created_at": _T0.isoformat(),
                 "updated_at": _T0.isoformat(),
+            },
+        )
+    )
+
+
+def _seed_owner_only_prd(
+    backend: SqliteBackend, *, owner: str, prd_id: str = "default"
+) -> None:
+    """Create modern PRD evidence without the historical project seed event."""
+    source_bytes = b"# Project: Repair\n\n## Summary\nS.\n\n## Goals\n- G.\n\n## Requirements\n"
+    source = SimpleNamespace(
+        source_bytes=source_bytes,
+        markdown=source_bytes.decode("utf-8"),
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        source_size_bytes=len(source_bytes),
+        source_encoding="utf-8",
+    )
+    backend.append(
+        EventDraft(
+            timestamp=_T0,
+            actor="test",
+            action="prd.parsed",
+            target_kind="prd",
+            target_id=owner,
+            payload_json={
+                "project_id": owner,
+                "prd_id": prd_id,
+                "expected_absent": True,
+                "is_default": prd_id == "default",
+                "title": "Repair",
+                "status": "draft",
+                "summary": "S.",
+                "goals": ["G."],
+                "non_goals": [],
+                "requirements": [],
+                "acceptance_criteria": [],
+                "risks": [],
+                "open_questions": [],
+                "assumptions": [],
+                "material_sha256": material_content_sha256(source, "Repair"),
+                **source_binding(source, 1),
+            },
+        )
+    )
+
+
+def _write_recovery_config(state_dir: Path, *, git_backed: bool = False) -> None:
+    storage = "events_storage: git\n" if git_backed else ""
+    (state_dir / "config.yaml").write_text(
+        f"project_name: repair-test\nproject_id: unrelated-config-id\n{storage}",
+        encoding="utf-8",
+    )
+
+
+def _seed_claim_and_evidence_history(backend: SqliteBackend) -> None:
+    """Add replayable rows that project repair must leave untouched."""
+    backend.append(
+        EventDraft(
+            timestamp=_T0,
+            actor="test",
+            action="feature.created",
+            target_kind="feature",
+            target_id="F001",
+            payload_json={
+                "id": "F001",
+                "title": "Repair feature",
+                "description": "Preserve historical claim rows.",
+                "status": "proposed",
+                "requirements": [],
+                "tasks": [],
+            },
+        )
+    )
+    for task_id in ("T-active", "T-evidence"):
+        backend.append(
+            EventDraft(
+                timestamp=_T0,
+                actor="test",
+                action="task.created",
+                target_kind="task",
+                target_id=task_id,
+                payload_json={
+                    "id": task_id,
+                    "feature_id": "F001",
+                    "title": task_id,
+                    "description": "Preserve through repair.",
+                    "status": "proposed",
+                    "priority": "medium",
+                    "dependencies": [],
+                    "conflict_groups": [],
+                    "scores": {},
+                    "acceptance_criteria": ["Evidence survives."],
+                    "implementation_notes": [],
+                    "verification": {"commands": [], "manual_steps": [], "required_evidence": []},
+                    "likely_files": [],
+                    "parent_task_id": None,
+                    "created_at": _T0.isoformat(),
+                    "updated_at": _T0.isoformat(),
+                },
+            )
+        )
+        for before, after in (("proposed", "drafted"), ("drafted", "reviewed"), ("reviewed", "ready")):
+            backend.append(
+                EventDraft(
+                    timestamp=_T0,
+                    actor="test",
+                    action="task.status_changed",
+                    target_kind="task",
+                    target_id=task_id,
+                    payload_json={"task_id": task_id, "from": before, "to": after},
+                )
+            )
+    for claim_id, task_id in (("C-active", "T-active"), ("C-evidence", "T-evidence")):
+        backend.append(
+            EventDraft(
+                timestamp=_T0,
+                actor="agent-alpha",
+                action="claim.created",
+                target_kind="claim",
+                target_id=claim_id,
+                payload_json={
+                    "id": claim_id,
+                    "task_id": task_id,
+                    "claimed_by": "agent-alpha",
+                    "claim_type": "task",
+                    "status": "active",
+                    "branch": None,
+                    "worktree_path": None,
+                    "expected_files": [],
+                    "created_at": _T0.isoformat(),
+                    "lease_expires_at": (_T0 + timedelta(hours=1)).isoformat(),
+                    "last_heartbeat_at": _T0.isoformat(),
+                    "released_at": None,
+                    "release_reason": None,
+                },
+            )
+        )
+    backend.append(
+        EventDraft(
+            timestamp=_T0,
+            actor="agent-alpha",
+            action="evidence.submitted",
+            target_kind="task",
+            target_id="T-evidence",
+            payload_json={
+                "task_id": "T-evidence",
+                "claim_id": "C-evidence",
+                "evidence_id": "EV-preserved",
+                "submitted_by": "agent-alpha",
+                "commands_run": ["pytest tests/test_projection_repair.py -q"],
+                "files_changed": [],
+                "output_excerpt": "passed",
+                "pr_url": None,
+                "commit_sha": None,
+                "screenshots": [],
+                "known_limitations": None,
             },
         )
     )
@@ -370,3 +529,254 @@ def test_projection_repair_checkpoints_and_fsyncs_live_database_and_wal(
 
     assert state_db in fsynced
     assert Path(f"{state_db}-wal") in fsynced
+
+
+def test_project_repair_reports_consensus_without_mutating_by_default(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _seed_owner_only_prd(backend, owner="historical-owner")
+    _write_recovery_config(state_dir)
+    events_path = state_dir / "events.jsonl"
+    before = events_path.read_bytes()
+    backend.close()
+
+    result = runner.invoke(app, ["repair", "project", "--cwd", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Project recovery is ready" in result.output
+    assert events_path.read_bytes() == before
+    assert not list(state_dir.glob(".state.db.repair-*.backup"))
+
+
+def test_project_repair_registers_consensus_owner_and_replays(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _seed_owner_only_prd(backend, owner="historical-owner")
+    _write_recovery_config(state_dir)
+    events_path = state_dir / "events.jsonl"
+    backend.close()
+
+    result = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Project registration repaired" in result.output
+    assert len(list(state_dir.glob(".state.db.repair-*.backup"))) == 1
+    actions = [
+        json.loads(line)["action"]
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert actions == ["prd.parsed", "project.created"]
+    repaired = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(events_path),
+        clock=FrozenClock(_T0),
+    )
+    repaired.initialize()
+    try:
+        assert repaired.get_project().id == "historical-owner"
+        from anvil.cli._helpers import _get_project_id
+
+        assert _get_project_id(repaired) == "historical-owner"
+    finally:
+        repaired.close()
+    snapshot = runner.invoke(
+        app, ["project", "snapshot", "--json", "--cwd", str(tmp_path)]
+    )
+    assert snapshot.exit_code == 0, snapshot.output
+
+
+def test_project_repair_preserves_claims_evidence_and_backup_snapshot(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _seed_owner_only_prd(backend, owner="historical-owner")
+    _seed_claim_and_evidence_history(backend)
+    _write_recovery_config(state_dir)
+    backend.close()
+
+    result = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    backup_path = next(state_dir.glob(".state.db.repair-*.backup"))
+    for db_path in (state_dir / "state.db", backup_path):
+        with sqlite3.connect(db_path) as connection:
+            assert connection.execute(
+                "SELECT status FROM claims WHERE id = 'C-active'"
+            ).fetchone() == ("active",)
+            assert connection.execute(
+                "SELECT status FROM claims WHERE id = 'C-evidence'"
+            ).fetchone() == ("released",)
+            assert connection.execute(
+                "SELECT claim_id, submitted_by FROM evidence "
+                "WHERE id = 'EV-preserved'"
+            ).fetchone() == ("C-evidence", "agent-alpha")
+
+
+def test_project_repair_registers_consensus_owner_for_git_events(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _git_state(tmp_path)
+    _seed_owner_only_prd(backend, owner="historical-owner")
+    _write_recovery_config(state_dir, git_backed=True)
+    backend.close()
+
+    result = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    repaired = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(state_dir / "events.jsonl"),
+        clock=FrozenClock(_T0),
+        events_storage="git",
+    )
+    repaired.initialize()
+    try:
+        assert repaired.get_project().id == "historical-owner"
+    finally:
+        repaired.close()
+
+
+def test_project_repair_refuses_zero_or_multiple_owners_without_mutating(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _write_recovery_config(state_dir)
+    events_path = state_dir / "events.jsonl"
+    backend.close()
+    before_empty = events_path.read_bytes()
+
+    empty = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert empty.exit_code == 1
+    assert "no PRD content owner" in empty.output
+    assert events_path.read_bytes() == before_empty
+
+    backend = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(events_path),
+        clock=FrozenClock(_T0),
+    )
+    backend.initialize()
+    _seed_owner_only_prd(backend, owner="owner-a")
+    _seed_owner_only_prd(backend, owner="owner-b", prd_id="other")
+    backend.close()
+    before_multiple = events_path.read_bytes()
+
+    multiple = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert multiple.exit_code == 1
+    assert "do not agree on one project owner" in multiple.output
+    assert events_path.read_bytes() == before_multiple
+
+
+def test_project_repair_refuses_existing_project_event_without_mutating(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _seed_project(backend)
+    _write_recovery_config(state_dir)
+    events_path = state_dir / "events.jsonl"
+    before = events_path.read_bytes()
+    backend.close()
+
+    result = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "a project is already projected" in result.output
+    assert events_path.read_bytes() == before
+
+
+def test_project_repair_refuses_project_history_when_project_row_is_missing(
+    tmp_path: Path,
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _seed_project(backend)
+    _write_recovery_config(state_dir)
+    events_path = state_dir / "events.jsonl"
+    backend._require_conn().execute("DELETE FROM projects")  # noqa: SLF001
+    backend._require_conn().commit()  # noqa: SLF001
+    before = events_path.read_bytes()
+    backend.close()
+
+    result = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "already contains project.created" in result.output
+    assert events_path.read_bytes() == before
+
+
+def test_project_repair_preflights_replay_before_backup_or_append(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    _seed_owner_only_prd(backend, owner="historical-owner")
+    _write_recovery_config(state_dir)
+    events_path = state_dir / "events.jsonl"
+    before = events_path.read_bytes()
+    backend.close()
+    doctor_module = importlib.import_module("anvil.cli.doctor")
+
+    monkeypatch.setattr(
+        doctor_module,
+        "_check_replay",
+        lambda *_: SimpleNamespace(severity=doctor_module._ERROR),
+    )
+
+    result = runner.invoke(
+        app, ["repair", "project", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "existing projection did not pass replay verification" in result.output
+    assert events_path.read_bytes() == before
+    assert not list(state_dir.glob(".state.db.repair-*.backup"))
+
+
+def test_project_recovery_decision_refuses_malformed_owner_or_target(
+    tmp_path: Path,
+) -> None:
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text(
+        '{"id":"E000001","timestamp":"2026-05-24T18:00:00+00:00",'
+        '"actor":"test","action":"prd.parsed","target_kind":"prd",'
+        '"target_id":" owner ","payload_json":{"project_id":" owner "}}\n',
+        encoding="utf-8",
+    )
+    repair_module = importlib.import_module("anvil.cli.repair")
+
+    try:
+        repair_module._project_recovery_decision(events_path)
+    except RuntimeError as exc:
+        assert "missing or malformed project owner" in str(exc)
+    else:
+        raise AssertionError("malformed owner was accepted")
+
+    events_path.write_text(
+        '{"id":"E000001","timestamp":"2026-05-24T18:00:00+00:00",'
+        '"actor":"test","action":"prd.parsed","target_kind":"prd",'
+        '"target_id":"different-owner",'
+        '"payload_json":{"project_id":"owner"}}\n',
+        encoding="utf-8",
+    )
+    try:
+        repair_module._project_recovery_decision(events_path)
+    except RuntimeError as exc:
+        assert "does not target its project owner" in str(exc)
+    else:
+        raise AssertionError("mismatched parse target was accepted")
