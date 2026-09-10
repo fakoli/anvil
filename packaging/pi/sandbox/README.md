@@ -78,7 +78,7 @@ Exit codes: `0` ok · pi's exit code forwarded · `2` policy/usage/staging ·
   needs_review, and `done == 0` (apply is the HUMAN gate — the agent must
   not self-approve).
 
-## Usage## Usage
+## Usage
 
 ```sh
 # inspect without launching

@@ -144,8 +144,10 @@ const CAPTURE_MAX_BYTES = 1_000_000;
  * Run `anvil <verb> [args...] --json` asynchronously. The task does NOT block
  * the host event loop; `signal` (a tool-call cancellation) terminates the
  * child. Options-style args must be passed as their own elements
- * ("--actor", "alice"). `--json` is appended; args containing "--json" or a
- * bare "--" separator are rejected so the appended flag cannot be displaced.
+ * ("--actor", "alice"). The verb's JSON output flags are appended
+ * (status: --json; packet: --format json); args containing the appended flags
+ * or a bare "--" separator are rejected so the appended flags cannot be
+ * displaced, and verbs that do not accept --json reject it outright.
  */
 export function runAnvil(
   verb: string,
@@ -175,10 +177,22 @@ export function runAnvil(
   // JSON output uses a different flag are declared ONCE here, so both the
   // dedicated tools and the anvil_run escape hatch emit valid argv.
   const outputFlags = options.json === false ? [] : jsonOutputFlagsFor(verb);
-  if (outputFlags.includes("--json") && cleanArgs.includes("--json")) {
-    // the --json guard only applies when runAnvil itself appends --json; a
-    // json:false caller is EXPECTED to carry output flags in args
-    return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain "--json"', exitCode: -1 });
+  if (cleanArgs.includes("--json")) {
+    if (!jsonOutputFlagsFor(verb).includes("--json")) {
+      // verbs like packet render JSON via a different flag; --json reaches the
+      // real CLI and is rejected there — fail here with the right flag instead
+      // (applies to BOTH json:true and json:false callers; Copilot round 2)
+      return Promise.resolve({
+        ok: false,
+        stdout: "",
+        stderr: `verb "${verb}" does not accept --json (use ${jsonOutputFlagsFor(verb).join(" ") || "no flag"} for JSON output)`,
+        exitCode: -1,
+      });
+    }
+    if (outputFlags.includes("--json")) {
+      // the appended --json cannot be displaced by one in args
+      return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain "--json"', exitCode: -1 });
+    }
   }
 
   return new Promise((resolveResult) => {
