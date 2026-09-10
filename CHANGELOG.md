@@ -6,6 +6,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-09-10
+
+### Added
+
+- `anvil repair project` for historical workspaces whose immutable PRD events
+  agree on one owner but predate a `project.created` event. It dry-runs by
+  default, retains an online backup, and verifies replay before and after an
+  explicit repair.
+
 ## [0.6.6] - 2026-09-10
 
 ### Added

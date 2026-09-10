@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 71 executable leaf commands,
+> Single-page reference for the `anvil` CLI: 72 executable leaf commands,
 > including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
@@ -147,7 +147,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.6 (schema 21)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.7 (schema 21)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1728,6 +1728,11 @@ flag list; full prose treatment may follow in a later pass.
 - `anvil repair projection` — Rebuild a diverged local projection from the
   immutable event log after an explicit `--yes`, retaining an online backup;
   it verifies the staged and published projections before reporting success.
+- `anvil repair project` — Dry-run a missing project registration from unanimous
+  immutable PRD-content ownership; with `--yes`, retain an online backup and
+  append one current `project.created` event after replay verification. It
+  refuses existing project history, malformed or divergent owners, and unsafe
+  state artifacts.
 
 **PRD authoring extras**
 
