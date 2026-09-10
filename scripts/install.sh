@@ -16,7 +16,7 @@ print_usage() {
     echo "Usage: install.sh <harness>"
     echo "  harness: codex | cursor | windsurf | cline | vscode | zed | copilot |"
     echo "           gemini | opencode | roo | amp | continue | goose | openhands |"
-    echo "           openclaw | claude-code"
+    echo "           openclaw | pi | claude-code"
 }
 
 # A usage *error* (bad/missing args): help to stderr, non-zero exit. An explicit

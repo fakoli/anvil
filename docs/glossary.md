@@ -37,7 +37,8 @@ rule. A task with an unmet item reports `Evidence gate: INCOMPLETE` and
 
 Any coding-agent runtime or IDE integration that drives anvil through the
 CLI or the MCP server — Claude Code, Codex, Cursor, OpenClaw, and others.
-`anvil install <harness>` wires up the natively-supported ones end-to-end;
+`anvil install <harness>` wires up the natively-supported ones end-to-end
+(codex, openclaw, and pi — the last via its package system);
 every other harness gets MCP-only best-effort configuration via
 `anvil mcp-config <harness>`. See
 [Using Anvil on any coding harness](how-to/using-anvil-on-any-harness.md).
