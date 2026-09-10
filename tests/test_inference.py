@@ -1572,6 +1572,7 @@ class TestInferDependencies:
     def test_full_collision_bucket_still_accepts_verified_equivalent_spelling(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
@@ -1585,7 +1586,7 @@ class TestInferDependencies:
             "_host_paths_equal",
             lambda left, right: left.casefold() == right.casefold(),
         )
-        registry = inference_module._PathIdentityRegistry()
+        registry = inference_module._PathIdentityRegistry(tmp_path)
         identities = [
             registry.intern(f"src/collision-{index}.py")
             for index in range(inference_module._WINDOWS_COLLISION_BUCKET_LIMIT)
