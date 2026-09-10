@@ -17,15 +17,16 @@
 // Usage:
 //   scripts/pi-sandbox-launch.mjs --profile <name> --workspace <dir> \
 //     (--task-file <file> | --task <text>) [--allowlist <path>] [--pi <bin>] \
-//     [--dry-run]
+//     [--seed-dir <dir>] [--model provider/id] [--dry-run]
 //
 // Exit codes: 0 ok · pi's exit code forwarded · 2 policy/usage · 3 pin mismatch.
 
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir, readFile, lstat, mkdir, copyFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   EXIT_POLICY,
   SCRUBBED_ENV_KEYS,
@@ -33,6 +34,7 @@ import {
   composeReport,
   loadAllowlist,
   stagePathExtension,
+  treeHash,
 } from "./pi-sandbox-policy.mjs";
 
 function die(code, message) {
@@ -88,14 +90,21 @@ function resolvePiBinary(piArg) {
 
 /** Dry-run verification: hash the pinned bytes without staging anything. */
 async function verifyOnly(entry, allowlistPath) {
-  const { readFile, lstat } = await import("node:fs/promises");
-  const { createHash } = await import("node:crypto");
-  const { dirname, resolve } = await import("node:path");
+  // Dry-run verification mirrors the real staging path's ACCEPTANCE rules
+  // (tree pins verify the whole canonical tree; flat pins verify the entry
+  // bytes) so a run can never pass dry-run and fail launch on different rules.
   const base = dirname(resolve(allowlistPath));
   const abs = resolve(base, entry.source.slice("path:".length));
   const info = await lstat(abs);
   if (info.isSymbolicLink()) throw { code: "mismatch", message: `${abs} is a symlink` };
   if (!info.isFile()) throw { code: "missing", message: `${abs} is not a regular file` };
+  if (typeof entry.tree_sha256 === "string") {
+    const { digest } = await treeHash(dirname(abs));
+    if (digest !== entry.tree_sha256) {
+      throw { code: "mismatch", message: `${dirname(abs)}: expected tree_sha256 ${entry.tree_sha256}, got ${digest}` };
+    }
+    return digest;
+  }
   const sha256 = createHash("sha256").update(await readFile(abs)).digest("hex");
   if (sha256 !== entry.sha256) throw { code: "mismatch", message: `${abs}: expected ${entry.sha256}, got ${sha256}` };
   return sha256;
@@ -107,6 +116,8 @@ async function main() {
   const workspace = args.workspace;
   const allowlistPath = resolve(args.allowlist ?? join(resolve(import.meta.dirname), "..", "packaging", "pi", "sandbox", "allowlist.json"));
   const dryRun = args["dry-run"] === true;
+  const seedDir = args["seed-dir"];
+  const model = args.model;
   if (!profileName) die(EXIT_POLICY, "missing --profile");
   if (!workspace) die(EXIT_POLICY, "missing --workspace");
 
@@ -130,6 +141,15 @@ async function main() {
   if (task.length > 100_000) die(EXIT_POLICY, "task exceeds 100k chars");
 
   const piBin = resolvePiBinary(args.pi);
+
+  if (model !== undefined && !/^[a-zA-Z0-9_.:-]+\/[a-zA-Z0-9_.:-]+$/.test(model)) {
+    die(EXIT_POLICY, `--model must be "provider/model-id" ([a-zA-Z0-9_.:-]), got: ${model}`);
+  }
+  if (seedDir !== undefined) {
+    const seed = resolve(seedDir);
+    const info = await lstat(seed).catch(() => null);
+    if (!info || !info.isDirectory()) die(EXIT_POLICY, `--seed-dir must be an existing directory: ${seed}`);
+  }
 
   // Verify (dry-run) or stage+verify (real run). Any pin problem aborts
   // BEFORE the child could exist — nothing launches on a bad pin.
@@ -160,7 +180,7 @@ async function main() {
     }
 
     if (dryRun) {
-      console.log(JSON.stringify(composeReport(profile, profileName, task), null, 2));
+      console.log(JSON.stringify({ ...composeReport(profile, profileName, task), seedDir: seedDir ?? null, model: model ?? null }, null, 2));
       console.log(`pi binary: ${piBin}`);
       console.log("dry-run: not launching, no runtime dirs created");
       process.exit(0);
@@ -168,9 +188,32 @@ async function main() {
 
     const agentDir = await mkdtemp(join(tmpdir(), "pi-sandbox-agent."));
     cleanupDirs.push(agentDir);
+    if (seedDir !== undefined) {
+      // Pre-seed the fresh agent dir (e.g. models.json wiring a loopback
+      // provider). Regular files only, symlinks/special files rejected — the
+      // same rules staging enforces, so the seed cannot smuggle links.
+      const seed = resolve(seedDir);
+      let seeded = 0;
+      const walk = async (dir, prefix = "", depth = 0) => {
+        if (depth > 8) die(EXIT_POLICY, `--seed-dir exceeds depth cap at ${dir}`);
+        for (const e of await readdir(dir, { withFileTypes: true })) {
+          const rel = prefix ? `${prefix}/${e.name}` : e.name;
+          if (e.isSymbolicLink()) die(EXIT_POLICY, `seed contains a symlink: ${rel}`);
+          if (e.isDirectory()) await walk(join(dir, e.name), rel, depth + 1);
+          else if (e.isFile()) {
+            await mkdir(join(agentDir, prefix), { recursive: true });
+            await copyFile(join(dir, e.name), join(agentDir, rel));
+            seeded += 1;
+          } else die(EXIT_POLICY, `seed contains a special file: ${rel}`);
+        }
+      };
+      await walk(seed);
+      console.log(`SEEDED: ${seeded} file(s) into fresh agent dir`);
+    }
     const env = childEnv({ PI_CODING_AGENT_DIR: agentDir });
 
-    const argv = ["pi", ...stagedArgs, ...composeReport(profile, profileName, task).argv];
+    const report = composeReport(profile, profileName, task);
+    const argv = ["pi", ...stagedArgs, ...(model ? ["--model", model] : []), ...report.argv];
     const child = spawn(piBin, argv.slice(1), {
       cwd: resolve(workspace),
       env,

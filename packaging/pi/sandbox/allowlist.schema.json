@@ -30,16 +30,20 @@
           "items": { "type": "string", "minLength": 1, "pattern": "^[a-zA-Z0-9_-]+$" }
         },
         "skills": { "type": "array", "maxItems": 0 },
-        "network": { "enum": ["none", "inference"] }
+        "network": { "enum": ["none"] }
       }
     },
     "extensionPin": {
       "type": "object",
-      "required": ["source", "sha256"],
+      "oneOf": [
+        { "required": ["source", "sha256"], "not": { "required": ["tree_sha256"] } },
+        { "required": ["source", "tree_sha256"], "not": { "required": ["sha256"] } }
+      ],
       "additionalProperties": false,
       "properties": {
         "source": { "type": "string", "pattern": "^path:.+", "minLength": 6 },
-        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "tree_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
       }
     }
   }

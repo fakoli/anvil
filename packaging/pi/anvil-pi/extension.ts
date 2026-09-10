@@ -87,11 +87,11 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "anvil_packet",
     label: "Anvil packet",
-    description: "Fetch the full work packet for a claimed anvil task. Runs `anvil packet <id> --json`.",
+    description: "Fetch the full work packet for a claimed anvil task. Runs `anvil packet <id> --format json` (packet's JSON output is --format json; it has no --json flag).",
     parameters: Type.Object({ task_id: taskIdParam }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!isValidTaskId(params.task_id)) return invalidTaskId(params.task_id);
-      return toolResult(await runAnvil("packet", [params.task_id], undefined, ctx.cwd, signal, WRAPPER_OPTS));
+      return toolResult(await runAnvil("packet", [params.task_id, "--format", "json"], undefined, ctx.cwd, signal, { ...WRAPPER_OPTS, json: false }));
     },
   });
 
@@ -102,8 +102,11 @@ export default function (pi: ExtensionAPI): void {
       "Submit execution evidence for a claimed anvil task. Runs `anvil submit <id> --commands <cmds> --files-changed <files> --json`.",
     parameters: Type.Object({
       task_id: taskIdParam,
-      commands: Type.Optional(Type.String({ description: "Validation commands to record, e.g. `pytest -q`", maxLength: 2000 })),
-      files_changed: Type.Optional(Type.String({ description: "Space-separated files changed, e.g. `src/x.py docs/y.md`", maxLength: 2000 })),
+      // REQUIRED by the CLI (`anvil submit --help` marks both *): making them
+      // optional here would surface a raw CLI usage error instead of a schema
+      // validation error (dogfood-caused, M4).
+      commands: Type.String({ description: "Verification command(s) that were run, e.g. `pytest -q`", minLength: 1, maxLength: 2000 }),
+      files_changed: Type.String({ description: "File path(s) modified, space-separated, e.g. `src/x.py docs/y.md`", minLength: 1, maxLength: 2000 }),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!isValidTaskId(params.task_id)) return invalidTaskId(params.task_id);
@@ -117,16 +120,11 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "anvil_apply",
     label: "Anvil apply",
-    description: "Apply/accept an evidence-gated anvil task. Runs `anvil apply <id> --json`.",
-    parameters: Type.Object({
-      task_id: taskIdParam,
-      force: Type.Optional(Type.Boolean({ description: "Override gate warnings where the CLI allows" })),
-    }),
+    description: "Evaluate the evidence gate for an anvil task (apply WITHOUT --approve — approval itself is the HUMAN review gate). Runs `anvil apply <id> --json` and returns the gate verdict.",
+    parameters: Type.Object({ task_id: taskIdParam }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!isValidTaskId(params.task_id)) return invalidTaskId(params.task_id);
-      const args = [params.task_id];
-      if (params.force) args.push("--force");
-      return toolResult(await runAnvil("apply", args, undefined, ctx.cwd, signal, WRAPPER_OPTS));
+      return toolResult(await runAnvil("apply", [params.task_id], undefined, ctx.cwd, signal, WRAPPER_OPTS));
     },
   });
 

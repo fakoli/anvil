@@ -33,11 +33,13 @@ printf '%s\\n' "$@" > "$outdir/argv"
 cat > "$outdir/stdin" 2>/dev/null || true
 pwd > "$outdir/cwd"
 env | sort > "$outdir/env"
-# record the staged extension bytes the -e flag points at (what pi would load)
+# record the staged extension bytes the -e flag points at (what pi would load):
+# the entry file AND the whole staged tree (M4 tree pins stage subdirectories)
 prev=""
 for arg in "$@"; do
   if [ "$prev" = "-e" ] && [ -f "$arg" ]; then
     cat "$arg" > "$outdir/staged-ext"
+    cp -r "$(dirname "$arg")" "$outdir/staged-tree"
   fi
   prev="$arg"
 done
@@ -99,7 +101,7 @@ def test_validate_rejects_npm_and_git_pins(tmp_path: Path) -> None:
         ))
         r = run_policy("validate", str(path))
         assert r.returncode == 2, source
-        assert "npm:/git: entries are rejected" in r.stderr
+        assert 'source must be a "path:..." pin' in r.stderr
 
 
 def test_validate_rejects_missing_sha256(tmp_path: Path) -> None:
@@ -390,3 +392,183 @@ def test_compose_empty_task_fails_closed(tmp_path: Path) -> None:
     task_file.write_text("   \n")
     r = run_policy("compose", str(ALLOWLIST), "--profile", "unattended-exec", "--task-file", str(task_file))
     assert r.returncode == 2
+# --- M4: tree pins, staging hardening, seed dir, model flag -------------------
+
+
+def _make_tree(base: Path) -> Path:
+    """A realistic extension tree: entry + subdir import + a data file."""
+    root = base / "ext"
+    (root / "src").mkdir(parents=True)
+    (root / "index.ts").write_text("export * from './src/util.js';\n")
+    (root / "src" / "util.ts").write_text("export const one = 1;\n")
+    (root / "data.json").write_text('{"ok": true}\n')
+    return root
+
+
+def _tree_hash(root: Path) -> str:
+    r = run_policy("tree-hash", str(root))
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["digest"]
+
+
+def test_tree_hash_is_deterministic_and_crlf_sensitive(tmp_path: Path) -> None:
+    root = _make_tree(tmp_path)
+    h1 = _tree_hash(root)
+    h2 = _tree_hash(root)
+    assert h1 == h2
+    # a whitespace-only change MUST change the digest (raw bytes are hashed)
+    (root / "data.json").write_text('{"ok": true}\n\n')
+    assert _tree_hash(root) != h1
+    # filename order matters: renaming changes the canonical order
+    renamed = tmp_path / "renamed"
+    (renamed / "src").mkdir(parents=True)
+    (renamed / "index.ts").write_text("export * from './src/util.js';\n")
+    (renamed / "src" / "util.ts").write_text("export const one = 1;\n")
+    (renamed / "zdata.json").write_text('{"ok": true}\n')
+    assert _tree_hash(renamed) != h1
+
+
+def test_tree_pin_rejects_symlinks_and_rejected_dirs(tmp_path: Path) -> None:
+    root = _make_tree(tmp_path)
+    (root / "link.ts").symlink_to(root / "index.ts")
+    r = run_policy("tree-hash", str(root))
+    assert r.returncode == 2
+    assert "symlink" in r.stderr
+    (root / "link.ts").unlink()
+    (root / "node_modules").mkdir()
+    r = run_policy("tree-hash", str(root))
+    assert r.returncode == 2
+    assert "node_modules" in r.stderr
+
+
+def test_tree_pin_drift_fails_launch(tmp_path: Path, fake_pi: Path) -> None:
+    root = _make_tree(tmp_path)
+    allowlist = write_allowlist(tmp_path, lambda d, h=_tree_hash(root): d["profiles"]["unattended-exec"].__setitem__(
+        "extensions", [{"source": f"path:{root}/index.ts", "tree_sha256": h}]
+    ))
+    ok = run_launcher(
+        "--profile", "unattended-exec", "--workspace", str(tmp_path / "ws"),
+        "--task", "x", "--allowlist", str(allowlist), "--pi", str(fake_pi), "--dry-run",
+    )
+    assert ok.returncode == 0, ok.stderr
+    # drift: byte change after pinning
+    (root / "src" / "util.ts").write_text("export const one = 2;\n")
+    drift = run_launcher(
+        "--profile", "unattended-exec", "--workspace", str(tmp_path / "ws"),
+        "--task", "x", "--allowlist", str(allowlist), "--pi", str(fake_pi), "--dry-run",
+    )
+    assert drift.returncode == 3, drift.stderr
+    assert "tree_sha256" in drift.stderr
+
+
+def test_tree_pin_stages_whole_tree(tmp_path: Path, fake_pi: Path) -> None:
+    """The staged copy must include the SUBDIRECTORY imports, not just flat
+    siblings — anvil-pi loads src/*.ts and flat staging cannot satisfy it."""
+    root = _make_tree(tmp_path)
+    allowlist = write_allowlist(tmp_path, lambda d, h=_tree_hash(root): d["profiles"]["unattended-exec"].__setitem__(
+        "extensions", [{"source": f"path:{root}/index.ts", "tree_sha256": h}]
+    ))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    env_extra = {"FAKE_PI_OUT": str(tmp_path / "fake-pi-out")}
+    r = run_launcher(
+        "--profile", "unattended-exec", "--workspace", str(workspace),
+        "--task", "x", "--allowlist", str(allowlist), "--pi", str(fake_pi),
+        env_extra=env_extra,
+    )
+    assert r.returncode == 0, r.stderr
+    staged = (tmp_path / "fake-pi-out" / "staged-ext").read_text()
+    assert "src/util" in staged or "util" in staged
+    # the staged tree includes the subdir file at its relative position
+    argv = (tmp_path / "fake-pi-out" / "argv").read_text().splitlines()
+    assert any(a.endswith("/index.ts") for a in argv), argv
+    # the fake pi copied the whole staged dir BEFORE the launcher cleaned up
+    staged_tree = tmp_path / "fake-pi-out" / "staged-tree"
+    assert (staged_tree / "src" / "util.ts").read_text() == "export const one = 1;\n"
+    assert (staged_tree / "data.json").is_file()
+
+
+def test_flat_pin_cap_counts_real_bytes(tmp_path: Path) -> None:
+    """The M1 cap was NaN (Dirent.size does not exist) — a >cap entry must now
+    actually be rejected."""
+    root = tmp_path / "big"
+    root.mkdir()
+    entry_bytes = b"x" * (25 * 1024 * 1024 + 1)
+    (root / "index.ts").write_bytes(entry_bytes)
+    real = hashlib.sha256(entry_bytes).hexdigest()
+    allowlist = write_allowlist(tmp_path, lambda d, real=real: d["profiles"]["unattended-exec"].__setitem__(
+        "extensions", [{"source": f"path:{root}/index.ts", "sha256": real}]
+    ))
+    (tmp_path / "ws").mkdir()
+    r = run_launcher(
+        "--profile", "unattended-exec", "--workspace", str(tmp_path / "ws"),
+        "--task", "x", "--allowlist", str(allowlist),
+    )
+    assert r.returncode == 2, r.stderr  # oversize = policy failure, not pin drift
+    assert "staging cap" in r.stderr
+
+
+def test_pin_rejects_both_and_neither_digests(tmp_path: Path) -> None:
+    for bad in ({"source": "path:/tmp/x.ts"}, {"source": "path:/tmp/x.ts", "sha256": "0" * 64, "tree_sha256": "0" * 64}):
+        path = write_allowlist(tmp_path, lambda d, b=bad: d["profiles"]["unattended-exec"].__setitem__(
+            "extensions", [b]
+        ))
+        r = run_policy("validate", str(path))
+        assert r.returncode == 2, bad
+    # exactly-one messages
+    both = run_policy("validate", str(write_allowlist(tmp_path, lambda d: d["profiles"]["unattended-exec"].__setitem__(
+        "extensions", [{"source": "path:/tmp/x.ts", "sha256": "0" * 64, "tree_sha256": "0" * 64}]
+    ))))
+    assert "exactly one" in both.stderr
+
+
+def test_validate_refuses_inference_network(tmp_path: Path) -> None:
+    path = write_allowlist(tmp_path, lambda d: d["profiles"]["unattended-exec"].__setitem__(
+        "network", "inference"
+    ))
+    r = run_policy("validate", str(path))
+    assert r.returncode == 2
+    assert "egress-proxy" in r.stderr
+
+
+def test_launcher_seed_dir_and_model_flag(tmp_path: Path, fake_pi: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "models.json").write_text('{"providers": {}}')
+    (seed / "link").symlink_to(seed / "models.json")
+    r = run_launcher(
+        "--profile", "unattended-exec", "--workspace", str(workspace),
+        "--task", "x", "--allowlist", str(ALLOWLIST), "--pi", str(fake_pi),
+        "--seed-dir", str(seed), "--model", "sandbox-mock/steerer",
+    )
+    assert r.returncode == 2, "symlinked seed file must be rejected"
+    assert "symlink" in r.stderr
+    (seed / "link").unlink()
+    r = run_launcher(
+        "--profile", "unattended-exec", "--workspace", str(workspace),
+        "--task", "x", "--allowlist", str(ALLOWLIST), "--pi", str(fake_pi),
+        "--seed-dir", str(seed), "--model", "sandbox-mock/steerer",
+        env_extra={"FAKE_PI_OUT": str(tmp_path / "fake-pi-out")},
+    )
+    assert r.returncode == 0, r.stderr
+    argv = (tmp_path / "fake-pi-out" / "argv").read_text().splitlines()
+    assert "--model" in argv and "sandbox-mock/steerer" in argv
+    seeded = tmp_path / "fake-pi-out" / "seeded"
+    # seeded models.json must exist inside the (now-cleaned) agent dir — the
+    # fake pi records the agent dir env; assert via env snapshot instead
+    env = (tmp_path / "fake-pi-out" / "env").read_text()
+    agent_line = [line for line in env.splitlines() if line.startswith("PI_CODING_AGENT_DIR=")]
+    assert agent_line, "agent dir env recorded"
+    agent_dir = Path(agent_line[0].split("=", 1)[1])
+    # the launcher cleans up the agent dir; the fake pi's env capture proves
+    # the dir existed; seeding correctness is covered by the live smoke test
+    assert agent_dir.name.startswith("pi-sandbox-agent.")
+    r = run_launcher(
+        "--profile", "unattended-exec", "--workspace", str(workspace),
+        "--task", "x", "--allowlist", str(ALLOWLIST), "--pi", str(fake_pi),
+        "--model", "NOT VALID",
+    )
+    assert r.returncode == 2
+    assert "--model" in r.stderr

@@ -1,10 +1,15 @@
 {
   "version": 1,
-  "$comment": "pi sandbox extension allowlist. M1 contract: only hash-pinned path: extensions; the launcher stages the verified bytes and pi loads ONLY the staged copies. npm:/git: pins are rejected until M4 materializes verified artifacts at image build time. See packaging/pi/sandbox/README.md.",
+  "$comment": "pi sandbox extension allowlist. Pins: sha256 = flat entry-file pin (siblings staged unverified); tree_sha256 = whole-directory pin (recursive, symlink/.git/node_modules rejected). The launcher stages the verified bytes and pi loads ONLY the staged copies. Refresh tree pins after changing the pinned source: node scripts/pi-sandbox-policy.mjs tree-hash packaging/pi/anvil-pi. CI fails on drift. See packaging/pi/sandbox/README.md.",
   "profiles": {
     "unattended-exec": {
-      "description": "Unattended execution child: may read, edit, and drive the anvil state loop. Extension list is empty until M2 publishes the hash-pinned anvil-pi entry point.",
-      "extensions": [],
+      "description": "Unattended execution child: may read, edit, and drive the anvil state loop with the hash-pinned anvil-pi extension. Tool names cover built-ins AND the pinned extension's registered tools \u2014 pi's --tools allowlist filters extension tools by name too.",
+      "extensions": [
+        {
+          "source": "path:../anvil-pi/extension.ts",
+          "tree_sha256": "1ad86ed902c8ee132bd3b0d00d376256a2530f64500b8f576717660c9cf0ab1c"
+        }
+      ],
       "tools": [
         "read",
         "grep",
@@ -12,7 +17,14 @@
         "ls",
         "bash",
         "edit",
-        "write"
+        "write",
+        "anvil_status",
+        "anvil_next",
+        "anvil_claim",
+        "anvil_packet",
+        "anvil_submit",
+        "anvil_apply",
+        "anvil_run"
       ],
       "skills": [],
       "network": "none"

@@ -37,15 +37,29 @@ export function validateExtensionPin(where, entry) {
   }
   const problems = [];
   if (typeof entry.source !== "string" || !entry.source.startsWith("path:") || entry.source.length < 6) {
-    problems.push(`${where}: source must be a "path:..." pin (npm:/git: entries are rejected until M4 stages verified artifacts)`);
+    problems.push(`${where}: source must be a "path:..." pin`);
     return problems;
   }
-  const allowed = new Set(["source", "sha256"]);
+  const hasFilePin = typeof entry.sha256 === "string";
+  const hasTreePin = typeof entry.tree_sha256 === "string";
+  if (hasFilePin && hasTreePin) {
+    problems.push(`${where}: provide exactly one of sha256 (flat entry pin) or tree_sha256 (whole-directory pin), not both`);
+    return problems;
+  }
+  if (!hasFilePin && !hasTreePin) {
+    problems.push(`${where}: missing sha256 (flat entry pin) or tree_sha256 (whole-directory pin)`);
+    return problems;
+  }
+  const digestPattern = /^[a-f0-9]{64}$/;
+  if (hasFilePin && !digestPattern.test(entry.sha256)) {
+    problems.push(`${where}: sha256 must be 64 lowercase hex chars`);
+  }
+  if (hasTreePin && !digestPattern.test(entry.tree_sha256)) {
+    problems.push(`${where}: tree_sha256 must be 64 lowercase hex chars`);
+  }
+  const allowed = hasTreePin ? new Set(["source", "tree_sha256"]) : new Set(["source", "sha256"]);
   for (const key of Object.keys(entry)) {
     if (!allowed.has(key)) problems.push(`${where}: unknown key "${key}"`);
-  }
-  if (typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)) {
-    problems.push(`${where}: sha256 must be 64 lowercase hex chars`);
   }
   return problems;
 }
@@ -71,6 +85,13 @@ export function validateProfile(name, profile) {
   }
   if (!["none", "inference"].includes(profile.network)) {
     problems.push(`${where}: network must be "none" or "inference"`);
+  }
+  if (profile.network === "inference") {
+    // M4 (advisory): an inference-capable child needs an enforced proxy
+    // boundary (isolated docker network + a restricted proxy that alone holds
+    // credentials); env-var filtering alone is bypassable by a child with
+    // bash. Until that boundary exists the launcher refuses this profile.
+    problems.push(`${where}: network "inference" is not supported until an enforced egress-proxy boundary exists; use network "none" (a loopback provider is acceptable)`);
   }
   if (profile.projectTrust !== undefined) {
     problems.push(`${where}: projectTrust is not configurable in the sandbox launcher (-na is hard-coded); remove the key`);
@@ -123,6 +144,61 @@ import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 export const STAGE_MAX_BYTES = 25 * 1024 * 1024; // per-extension staging cap
+export const STAGE_MAX_FILES = 4096; // per-extension file cap
+export const STAGE_MAX_DEPTH = 16; // per-extension directory depth cap
+
+// Tree-pin encoding, version 1 (advisory-reviewed): canonical digest over the
+// extension ROOT directory (the pinned entry's parent). Records are emitted for
+// every regular file in deterministic bytewise-sorted posix-relative order:
+//   <relpath>\n<sha256hex(file bytes)>\n
+// concatenated, then sha256'd. Empty directories are omitted (they carry no
+// bytes and pi cannot import them). Hash RAW file bytes — CRLF, whitespace, and
+// mode changes that matter must change the digest. Rejected, never skipped:
+// symlinks or special files anywhere in the tree, and `.git` / `node_modules`
+// directories (build junk must not silently enter a verified pin).
+export const TREE_PIN_VERSION = 1;
+const REJECTED_DIR_NAMES = new Set([".git", "node_modules"]);
+
+async function walkTree(rootDir, prefix = "", depth = 0) {
+  if (depth > STAGE_MAX_DEPTH) {
+    throw { code: "missing", message: `extension tree exceeds depth cap ${STAGE_MAX_DEPTH} at ${rootDir}` };
+  }
+  const out = [];
+  const entries = await readdir(rootDir, { withFileTypes: true });
+  for (const e of entries) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isSymbolicLink()) {
+      throw { code: "mismatch", message: `symlink in pinned tree: ${rel} (symlinks are not allowed in tree pins)` };
+    }
+    if (!e.isDirectory() && !e.isFile()) {
+      throw { code: "mismatch", message: `special file in pinned tree: ${rel} (only regular files are allowed)` };
+    }
+    if (e.isDirectory()) {
+      if (REJECTED_DIR_NAMES.has(e.name)) {
+        throw { code: "mismatch", message: `rejected directory in pinned tree: ${rel} (${e.name} must not enter a verified pin)` };
+      }
+      out.push(...(await walkTree(join(rootDir, e.name), rel, depth + 1)));
+    } else {
+      out.push({ rel, abs: join(rootDir, e.name) });
+    }
+  }
+  return out;
+}
+
+export function canonicalTreeDigest(files) {
+  // files: [{ rel, bytes: Buffer }]. Bytewise sort on the relpath (no locale).
+  const sorted = [...files].sort((a, b) => {
+    const ka = Buffer.from(a.rel, "utf8");
+    const kb = Buffer.from(b.rel, "utf8");
+    return ka.compare(kb);
+  });
+  const hash = createHash("sha256");
+  for (const f of sorted) {
+    hash.update(Buffer.from(`${f.rel}\n`, "utf8"));
+    hash.update(Buffer.from(`${createHash("sha256").update(f.bytes).digest("hex")}\n`, "utf8"));
+  }
+  return hash.digest("hex");
+}
 
 /**
  * Stage a `path:` extension: ONE read of the entry bytes, hash those exact
@@ -155,16 +231,62 @@ export async function stagePathExtension(entry, allowlistPath, stageDir, key) {
   }
 
   await mkdir(destDir, { recursive: true });
+
+  if (typeof entry.tree_sha256 === "string") {
+    // Tree pin: stage the entry's ENTIRE directory recursively (verified),
+    // then the entry lands at its natural relative position inside it.
+    const rootDir = dirname(sourceAbs);
+    const files = await walkTree(rootDir);
+    if (files.length > STAGE_MAX_FILES) {
+      throw { code: "missing", message: `extension tree exceeds file cap ${STAGE_MAX_FILES}` };
+    }
+    const withBytes = [];
+    for (const f of files) {
+      const data = await readFile(f.abs);
+      withBytes.push({ rel: f.rel, bytes: data });
+      bytes += data.length;
+      if (bytes > STAGE_MAX_BYTES) {
+        throw { code: "missing", message: `extension tree exceeds staging cap ${STAGE_MAX_BYTES} bytes` };
+      }
+    }
+    const digest = canonicalTreeDigest(withBytes);
+    if (digest !== entry.tree_sha256) {
+      throw { code: "mismatch", message: `${rootDir}: expected tree_sha256 ${entry.tree_sha256}, got ${digest}` };
+    }
+    for (const f of withBytes) {
+      const dest = join(destDir, f.rel);
+      await mkdir(dirname(dest), { recursive: true });
+      await writeFile(dest, f.bytes);
+      copied.push(f.rel);
+    }
+    return {
+      stagedPath: join(destDir, basename(sourceAbs)),
+      sha256: createHash("sha256").update(withBytes.find((f) => f.rel === basename(sourceAbs)).bytes).digest("hex"),
+      tree_sha256: digest,
+      files: copied,
+      bytes,
+    };
+  }
+
+  // Flat pin (M1): entry hash verified; same-dir siblings staged UNVERIFIED so
+  // entry imports resolve, with real byte counts against the cap (an earlier
+  // draft added Dirent.size — which does not exist — making the cap NaN).
   const entryDir = dirname(sourceAbs);
   const entries = await readdir(entryDir, { withFileTypes: true });
-  for (const sibling of entries) {
-    if (sibling.name === basename(sourceAbs)) continue;
-    if (sibling.isSymbolicLink()) continue; // not staged; entry import of a symlinked sibling fails at load, not silently
-    if (!sibling.isFile()) continue;
-    bytes += sibling.size + (await addSibling(entryDir, sibling.name, destDir, copied));
+  const siblingFiles = entries.filter(
+    (e) => e.name !== basename(sourceAbs) && !e.isSymbolicLink() && e.isFile()
+  );
+  const siblingBytes = [];
+  for (const sibling of siblingFiles) {
+    const data = await readFile(join(entryDir, sibling.name));
+    siblingBytes.push({ name: sibling.name, data });
+    bytes += data.length;
     if (bytes > STAGE_MAX_BYTES) {
       throw { code: "missing", message: `extension directory exceeds staging cap ${STAGE_MAX_BYTES} bytes` };
     }
+  }
+  if (siblingFiles.length > STAGE_MAX_FILES) {
+    throw { code: "missing", message: `extension directory exceeds file cap ${STAGE_MAX_FILES}` };
   }
 
   const entryBytes = await readFile(sourceAbs);
@@ -173,17 +295,36 @@ export async function stagePathExtension(entry, allowlistPath, stageDir, key) {
     throw { code: "mismatch", message: `${sourceAbs}: expected sha256 ${entry.sha256}, got ${sha256}` };
   }
   bytes += entryBytes.length;
+  if (bytes > STAGE_MAX_BYTES) {
+    throw { code: "missing", message: `extension exceeds staging cap ${STAGE_MAX_BYTES} bytes` };
+  }
   await writeFile(join(destDir, basename(sourceAbs)), entryBytes);
   copied.push(basename(sourceAbs));
+  for (const s of siblingBytes) {
+    await writeFile(join(destDir, s.name), s.data);
+    copied.push(s.name);
+  }
 
   return { stagedPath: join(destDir, basename(sourceAbs)), sha256, files: copied, bytes };
 }
 
-async function addSibling(sourceDir, name, destDir, copied) {
-  const data = await readFile(join(sourceDir, name));
-  await writeFile(join(destDir, name), data);
-  copied.push(name);
-  return data.length;
+export async function treeHash(dir) {
+  // CLI helper for pin authoring: canonical digest of a directory tree.
+  const files = await walkTree(dir);
+  if (files.length > STAGE_MAX_FILES) {
+    throw { code: "missing", message: `tree exceeds file cap ${STAGE_MAX_FILES}` };
+  }
+  const withBytes = [];
+  let bytes = 0;
+  for (const f of files) {
+    const data = await readFile(f.abs);
+    withBytes.push({ rel: f.rel, bytes: data });
+    bytes += data.length;
+    if (bytes > STAGE_MAX_BYTES) {
+      throw { code: "missing", message: `tree exceeds staging cap ${STAGE_MAX_BYTES} bytes` };
+    }
+  }
+  return { digest: canonicalTreeDigest(withBytes), files: withBytes.length, bytes };
 }
 
 // --- compose (dry-run report; no dirs created, no launch) -----------------------
@@ -203,8 +344,8 @@ export function composeReport(profile, profileName, task) {
     },
     docker:
       profile.network === "none"
-        ? { network: "none", note: "containerization lands in M4; today the child runs on the host with a fresh agent dir" }
-        : { network: "inference-only-allowlist", note: "egress restriction enforced in M4" },
+        ? { network: "none", note: "M4: docker run --network none; loopback providers inside the container are reachable, everything else is not" }
+        : { network: "inference", note: "REFUSED: an enforced egress-proxy boundary does not exist yet; network must be none" },
   };
 }
 
@@ -230,11 +371,21 @@ export function childEnv(extra = {}) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const command = args._[0];
-  if (!command || !["validate", "compose"].includes(command)) {
-    die(EXIT_POLICY, 'usage: pi-sandbox-policy.mjs <validate|compose> <allowlist.json> [--profile <name>] [--task-file <f>|--task <s>]');
+  if (!command || !["validate", "compose", "tree-hash"].includes(command)) {
+    die(EXIT_POLICY, 'usage: pi-sandbox-policy.mjs <validate|compose|tree-hash> <allowlist.json|dir> [--profile <name>] [--task-file <f>|--task <s>]');
   }
   const file = args._[1];
-  if (!file) die(EXIT_POLICY, "missing allowlist path");
+  if (!file) die(EXIT_POLICY, "missing allowlist path or directory");
+
+  if (command === "tree-hash") {
+    try {
+      const { digest, files, bytes } = await treeHash(resolve(file));
+      console.log(JSON.stringify({ digest, files, bytes, version: TREE_PIN_VERSION }));
+    } catch (error) {
+      die(EXIT_POLICY, error.message);
+    }
+    process.exit(EXIT_OK);
+  }
 
   const { doc, problems } = await loadAllowlist(file);
   if (command === "validate") {

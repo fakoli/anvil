@@ -211,6 +211,22 @@ test("presentResult caps oversized stdout AND oversized stderr", () => {
   assert.ok(err.text.endsWith("…"));
 });
 
+// --- per-verb flag contract (dogfood-caused: packet rejects --json) -------
+
+await test("runAnvil json:false omits --json (packet uses --format json)", async () => {
+  const result = await tools.runAnvil("packet", ["T001", "--format", "json"], envWithFake(), undefined, undefined, { json: false });
+  assert.equal(result.ok, true, result.stderr);
+  const args = readLastArgs().split("\n").filter(Boolean);
+  assert.deepEqual(args, ["packet", "T001", "--format", "json"], args.join(" "));
+  assert.ok(!args.includes("--json"), "--json must not be appended for json:false");
+});
+
+await test("runAnvil default still appends --json", async () => {
+  await tools.runAnvil("status", [], envWithFake());
+  const args = readLastArgs().split("\n").filter(Boolean);
+  assert.ok(args.includes("--json"), args.join(" "));
+});
+
 // --- task ids + tokenizer ---------------------------------------------------------------
 
 test("isValidTaskId rejects option-like and spaced ids", () => {
@@ -502,14 +518,31 @@ const hasRealAnvil = (() => {
 
 if (hasRealAnvil) {
   await test("contract: every allowlisted/denied verb exists in the real CLI registry", async () => {
-    const { spawnSync } = require("node:child_process");
+    const { spawnSync, execFileSync } = require("node:child_process");
     const help = spawnSync("anvil", ["--help"], { encoding: "utf8", timeout: 15_000 }).stdout;
     assert.ok(help.length > 0);
     const helpTokens = new Set(help.split(/\s+/));
-    const { createRequire: cr } = await import("node:module");
+    const anvilBin = "anvil";
     const allVerbs = [...tools.EXECUTION_VERBS, ...tools.PLANNING_EXTRA_VERBS, ...tools.ALWAYS_DENY_VERBS, ...tools.UNCLASSIFIED_VERBS];
     const missing = allVerbs.filter((verb) => !helpTokens.has(verb));
     assert.deepEqual(missing, [], `verbs not registered in real CLI: ${missing.join(", ")}`);
+
+  // per-verb FLAG contract: the extension sends exact flags — each must exist
+  // on the real CLI (M4 dogfood caught packet rejecting --json).
+  const flagContract = {
+    packet: ["--format"],
+    submit: ["--commands", "--files-changed"],
+    claim: ["--actor", "--lease", "--force"],
+    apply: ["--approve", "--reject", "--reason"],
+  };
+  const flagProblems = [];
+  for (const [verb, flags] of Object.entries(flagContract)) {
+    const help = execFileSync(anvilBin, [verb, "--help"]).toString();
+    for (const flag of flags) {
+      if (!help.includes(flag)) flagProblems.push(`anvil ${verb} does not offer ${flag}`);
+    }
+  }
+  assert.deepEqual(flagProblems, [], flagProblems.join("; "));
   });
 } else {
   console.log("  skip contract: real anvil CLI not on PATH");

@@ -112,6 +112,12 @@ export interface AnvilRunOptions {
   maxArgChars?: number;
   maxTotalChars?: number;
   timeoutMs?: number;
+  /**
+   * Append `--json` (default true). Verbs whose JSON output uses a different
+   * flag must pass false and carry the flag in args — e.g. `packet` exposes
+   * JSON via `--format json` and REJECTS `--json` (dogfood-caused, M4).
+   */
+  json?: boolean;
 }
 
 export interface AnvilCliResult {
@@ -160,9 +166,10 @@ export function runAnvil(
   if (cleanArgs.includes("--json") || cleanArgs.includes("--")) {
     return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain "--json" or a bare "--" separator', exitCode: -1 });
   }
+  const appendJson = options.json !== false;
 
   return new Promise((resolveResult) => {
-    const child = spawn(anvilBin(env), [verb, ...cleanArgs, "--json"], {
+    const child = spawn(anvilBin(env), [verb, ...cleanArgs, ...(appendJson ? ["--json"] : [])], {
       cwd,
       env: env as NodeJS.ProcessEnv,
       stdio: ["ignore", "pipe", "pipe"],
