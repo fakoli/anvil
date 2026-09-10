@@ -884,3 +884,114 @@ def test_pi_rollback_uses_remove_and_ignores_refcount(
     payload = json.loads(rb.stdout)
     cmds = [entry["cmd"] for entry in payload["data"]["native"]]
     assert any(c.startswith("pi remove -l git:github.com/fakoli/anvil-pi@v1.2.3") for c in cmds), cmds
+
+
+# --- pi rollback: record-driven target (astra round-2 major) -----------------------
+
+
+def test_pi_rollback_targets_recorded_package_when_env_changes(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Install A via override, change the override to B: rollback removes A."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "git:github.com/fakoli/anvil-pi@v1.0.0")
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "git:github.com/fakoli/anvil-pi@v2.0.0")
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
+    assert any("pi remove -l git:github.com/fakoli/anvil-pi@v1.0.0" in c for c in cmds), cmds
+    assert not any("v2.0.0" in c for c in cmds)
+    # record dropped after successful removal
+    assert "pi" not in install_mod._load_manifest()["installs"] or not any(
+        k.endswith("::pi") for k in install_mod._load_manifest()["installs"]
+    )
+
+
+def test_pi_rollback_survives_unset_override(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Install via override, unset it: rollback still removes the recorded spec."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    monkeypatch.delenv("ANVIL_PI_PACKAGE")
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
+    assert any("pi remove -l npm:@fakoli/anvil-pi@0.1.0" in c for c in cmds), cmds
+
+
+def test_pi_rollback_survives_relocated_checkout(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Install from checkout A, relocate the checkout: rollback removes A."""
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    original_spec = write_cmd = next(
+        c for c in sandbox["native_cmds"] if c[:2] == ["pi", "install"]
+    )[3]
+    monkeypatch.setattr(install_mod, "_pi_local_package_dir", lambda: Path("/relocated/anvil-pi"))
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
+    assert any(f"pi remove -l {original_spec}" in c for c in cmds), cmds
+    assert not any("/relocated/anvil-pi" in c for c in cmds)
+
+
+def test_pi_rollback_preserves_record_on_failed_removal(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removal that doesn't complete keeps the install record for a retry."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    key = install_mod._install_key("pi")
+    assert "native_package" in install_mod._load_manifest()["installs"][key]
+
+    def _failing_run(cmds: list, *, run: bool) -> list:
+        return [
+            {"cmd": " ".join(c), "ran": run, "ok": False, "detail": "pi not on PATH"}
+            for c in cmds
+        ]
+
+    successful_fake = install_mod._run_or_print
+    monkeypatch.setattr(install_mod, "_run_or_print", _failing_run)
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    payload = json.loads(rb.stdout)
+    assert "install record" in payload["data"]["note"]
+    # record still there, rollback retryable
+    record = install_mod._load_manifest()["installs"].get(key)
+    assert record is not None and record["native_package"] == "npm:@fakoli/anvil-pi@0.1.0"
+    # successful retry drops it
+    monkeypatch.setattr(install_mod, "_run_or_print", successful_fake)
+    rb2 = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb2.exit_code == 0, rb2.stdout + rb2.stderr
+    assert install_mod._load_manifest()["installs"].get(key) is None
+
+
+def test_pi_two_projects_remove_their_own_specs(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two project installs with different specs: each rollback removes only
+    its own recorded package."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    write1 = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write1.exit_code == 0, write1.stdout + write.stderr
+    # simulate a second project's install with a different spec
+    manifest = install_mod._load_manifest()
+    other_key = "/some/other/project::pi"
+    manifest["installs"][other_key] = {
+        "ts": "2026-01-01T00:00:00+00:00",
+        "paths": [],
+        "native_package": "npm:@fakoli/anvil-pi@0.2.0",
+    }
+    install_mod._save_manifest(manifest)
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
+    assert any("remove -l npm:@fakoli/anvil-pi@0.1.0" in c for c in cmds), cmds
+    assert not any("0.2.0" in c for c in cmds)
+    # the other project's record survives untouched
+    assert install_mod._load_manifest()["installs"].get(other_key) is not None
