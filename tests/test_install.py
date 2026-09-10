@@ -86,16 +86,46 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     # Never shell out to a real `codex` CLI in tests — record the commands a native
     # install WOULD run instead, so assertions stay hermetic and side-effect-free.
     ran: list[list[str]] = []
+    cwds: list[str | None] = []
 
-    def _fake_run(cmds: list, *, run: bool) -> list:
+    def _fake_run(cmds: list, *, run: bool, cwd: str | None = None) -> list:
         ran.extend(cmds)
+        cwds.append(cwd)
+        # Simulate pi's REAL persisted behavior so anvil's rollback verification
+        # runs against faithful state: install/remove -l mutate
+        # <cwd>/.pi/settings.json (packages list); removing an absent package
+        # exits non-zero ("No matching package found"), and a successful remove
+        # persists the change. codex/openclaw stay inert (global, configless).
+        if run and cmds and cmds[0] and cmds[0][0] == "pi":
+            base = Path(cwd) if cwd else install_mod._project_root()
+            settings = base / ".pi" / "settings.json"
+            packages: list[str] = []
+            if settings.is_file():
+                try:
+                    packages = list(json.loads(settings.read_text()).get("packages") or [])
+                except (json.JSONDecodeError, OSError):
+                    packages = []
+            verb = cmds[0][1] if len(cmds[0]) > 1 else ""
+            spec = cmds[0][3] if len(cmds[0]) > 3 else ""
+            if verb == "install" and spec:
+                if spec not in packages:
+                    packages.append(spec)
+            elif verb == "remove" and spec:
+                if spec not in packages:
+                    return [
+                        {"cmd": " ".join(cmds[0]), "ran": True, "ok": False,
+                         "detail": "No matching package found"}
+                    ]
+                packages = [p for p in packages if p != spec]
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(json.dumps({"packages": packages}))
         return [
             {"cmd": " ".join(c), "ran": run, "ok": True if run else None, "detail": ""}
             for c in cmds
         ]
 
     monkeypatch.setattr(install_mod, "_run_or_print", _fake_run)
-    return {"home": home, "project": project, "native_cmds": ran}
+    return {"home": home, "project": project, "native_cmds": ran, "native_cwds": cwds}
 
 
 def test_known_harnesses_present() -> None:
@@ -320,7 +350,7 @@ def test_native_command_failure_is_surfaced(
 ) -> None:
     """A native command that RAN and failed must show a `⚠` with detail, not pass
     silently (review Finding 3 — exit-0-with-error misclassification)."""
-    def _failing(cmds: list, *, run: bool) -> list:
+    def _failing(cmds: list, *, run: bool, cwd: str | None = None) -> list:
         return [{"cmd": " ".join(c), "ran": True, "ok": False, "detail": "boom"}
                 for c in cmds]
 
@@ -452,7 +482,7 @@ def test_codex_write_without_cli_says_run_yourself(
 ) -> None:
     """`--write` on a host without the `codex` CLI must NOT claim 'Ran:' — the
     commands were only printed (Greptile P1)."""
-    def _print_only(cmds: list, *, run: bool) -> list:
+    def _print_only(cmds: list, *, run: bool, cwd: str | None = None) -> list:
         return [{"cmd": " ".join(c), "ran": False, "ok": None, "detail": ""}
                 for c in cmds]
 
@@ -902,33 +932,38 @@ def test_pi_rollback_targets_recorded_package_when_env_changes(
     cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
     assert any("pi remove -l git:github.com/fakoli/anvil-pi@v1.0.0" in c for c in cmds), cmds
     assert not any("v2.0.0" in c for c in cmds)
-    # record dropped after successful removal
-    assert "pi" not in install_mod._load_manifest()["installs"] or not any(
-        k.endswith("::pi") for k in install_mod._load_manifest()["installs"]
-    )
+    # record dropped after VERIFIED removal (exact project-qualified key)
+    assert install_mod._load_manifest()["installs"].get(install_mod._install_key("pi")) is None
 
 
-def test_pi_rollback_survives_unset_override(
+def test_pi_rollback_fail_closed_without_recorded_identity(
     sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Install via override, unset it: rollback still removes the recorded spec."""
+    """Legacy record with no native_package: re-deriving the spec from the current
+    environment is UNSAFE (env/checkouts drift) — fail closed, keep the record."""
     monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
-    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
-    assert write.exit_code == 0, write.stdout + write.stderr
-    monkeypatch.delenv("ANVIL_PI_PACKAGE")
+    manifest = install_mod._load_manifest()
+    manifest["installs"][install_mod._install_key("pi")] = {
+        "ts": "2026-01-01T00:00:00+00:00", "paths": []
+    }  # legacy shape: no native_package
+    install_mod._save_manifest(manifest)
     rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
     assert rb.exit_code == 0, rb.stdout + rb.stderr
-    cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
-    assert any("pi remove -l npm:@fakoli/anvil-pi@0.1.0" in c for c in cmds), cmds
+    payload = json.loads(rb.stdout)
+    assert payload["data"]["native"] == [], "must not re-derive a removal target"
+    assert "no recorded pi package identity" in payload["data"]["note"]
+    record = install_mod._load_manifest()["installs"].get(install_mod._install_key("pi"))
+    assert record is not None, "record preserved for manual resolution"
 
 
-def test_pi_rollback_survives_relocated_checkout(
+def test_pi_rollback_ignores_relocated_checkout(
     sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Install from checkout A, relocate the checkout: rollback removes A."""
+    """Install from checkout A, relocate the checkout: rollback removes ONLY the
+    recorded A spec (the relocated path must never be derived or removed)."""
     write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
     assert write.exit_code == 0, write.stdout + write.stderr
-    original_spec = write_cmd = next(
+    original_spec = next(
         c for c in sandbox["native_cmds"] if c[:2] == ["pi", "install"]
     )[3]
     monkeypatch.setattr(install_mod, "_pi_local_package_dir", lambda: Path("/relocated/anvil-pi"))
@@ -937,6 +972,7 @@ def test_pi_rollback_survives_relocated_checkout(
     cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
     assert any(f"pi remove -l {original_spec}" in c for c in cmds), cmds
     assert not any("/relocated/anvil-pi" in c for c in cmds)
+    assert install_mod._load_manifest()["installs"].get(install_mod._install_key("pi")) is None
 
 
 def test_pi_rollback_preserves_record_on_failed_removal(
@@ -949,9 +985,9 @@ def test_pi_rollback_preserves_record_on_failed_removal(
     key = install_mod._install_key("pi")
     assert "native_package" in install_mod._load_manifest()["installs"][key]
 
-    def _failing_run(cmds: list, *, run: bool) -> list:
+    def _failing_run(cmds: list, *, run: bool, cwd: str | None = None) -> list:
         return [
-            {"cmd": " ".join(c), "ran": run, "ok": False, "detail": "pi not on PATH"}
+            {"cmd": " ".join(c), "ran": run, "ok": False, "detail": "pi: project is not trusted"}
             for c in cmds
         ]
 
@@ -961,6 +997,9 @@ def test_pi_rollback_preserves_record_on_failed_removal(
     assert rb.exit_code == 0, rb.stdout + rb.stderr
     payload = json.loads(rb.stdout)
     assert "install record" in payload["data"]["note"]
+    # persisted settings still list the package — that's WHY the record is kept
+    settings = install_mod._pi_settings_path(install_mod._project_root())
+    assert json.loads(settings.read_text())["packages"] == ["npm:@fakoli/anvil-pi@0.1.0"]
     # record still there, rollback retryable
     record = install_mod._load_manifest()["installs"].get(key)
     assert record is not None and record["native_package"] == "npm:@fakoli/anvil-pi@0.1.0"
@@ -969,6 +1008,145 @@ def test_pi_rollback_preserves_record_on_failed_removal(
     rb2 = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
     assert rb2.exit_code == 0, rb2.stdout + rb2.stderr
     assert install_mod._load_manifest()["installs"].get(key) is None
+    # and the persisted settings no longer list the package either
+    assert json.loads(settings.read_text())["packages"] == []
+
+
+def test_pi_missing_binary_preserves_record(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run=False (binary absent) must never drop the record — nothing was tried."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    key = install_mod._install_key("pi")
+
+    def _no_binary_run(cmds: list, *, run: bool, cwd: str | None = None) -> list:
+        return [{"cmd": " ".join(c), "ran": False, "ok": None, "detail": ""} for c in cmds]
+
+    monkeypatch.setattr(install_mod, "_run_or_print", _no_binary_run)
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    payload = json.loads(rb.stdout)
+    assert "pi CLI not on PATH" in payload["data"]["note"]
+    assert install_mod._load_manifest()["installs"].get(key) is not None
+
+
+def test_pi_unverifiable_persistence_preserves_record(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pi reporting success is not proof: if persisted settings can't be read,
+    keep the record (pi can exit 0 on an in-memory change with a failed write)."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    settings = install_mod._pi_settings_path(install_mod._project_root())
+    settings.write_text("{not json")  # simulate a failed/corrupt persistence
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    payload = json.loads(rb.stdout)
+    assert "could not verify" in payload["data"]["note"]
+    assert install_mod._load_manifest()["installs"].get(install_mod._install_key("pi")) is not None
+
+
+def test_pi_absent_removal_despite_exit_1_completes(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed remove command whose persisted settings no longer list the
+    package (e.g. pi's 'No matching package found' exit 1) is a COMPLETED
+    rollback — the record drops, with an explanatory note."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    # package vanished from settings out-of-band (e.g. removed by hand)
+    settings = install_mod._pi_settings_path(install_mod._project_root())
+    settings.write_text(json.dumps({"packages": []}))
+
+    def _exit1_run(cmds: list, *, run: bool, cwd: str | None = None) -> list:
+        return [
+            {"cmd": " ".join(c), "ran": run, "ok": False,
+             "detail": "No matching package found"}
+            for c in cmds
+        ]
+
+    monkeypatch.setattr(install_mod, "_run_or_print", _exit1_run)
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    payload = json.loads(rb.stdout)
+    assert "treating as removed" in payload["data"]["note"]
+    assert install_mod._load_manifest()["installs"].get(install_mod._install_key("pi")) is None
+
+
+def test_pi_guidance_write_does_not_record(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No checkout and no override → guidance-only --write must NOT create (or
+    overwrite) an install record: there is nothing to roll back."""
+    monkeypatch.setattr(install_mod, "_pi_local_package_dir", lambda: Path("/nonexistent/anvil-pi"))
+    # a pre-existing record with a real identity must survive untouched
+    manifest = install_mod._load_manifest()
+    manifest["installs"][install_mod._install_key("pi")] = {
+        "ts": "2026-01-01T00:00:00+00:00", "paths": [],
+        "native_package": "npm:@fakoli/anvil-pi@0.0.9",
+    }
+    install_mod._save_manifest(manifest)
+    result = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    record = install_mod._load_manifest()["installs"].get(install_mod._install_key("pi"))
+    assert record is not None and record["native_package"] == "npm:@fakoli/anvil-pi@0.0.9"
+
+
+def test_pi_refuses_overwrite_of_recorded_target(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installing a DIFFERENT spec while one is recorded would overwrite the only
+    rollback identity before the new install succeeds — refuse with guidance."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    first = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert first.exit_code == 0, first.stdout + first.stderr
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.2.0")
+    second = runner.invoke(app, ["install", "pi", "--write", "--json"], catch_exceptions=False)
+    assert second.exit_code == 2, second.stdout + second.stderr
+    payload = json.loads(second.stdout)
+    assert "rollback" in payload["error"]["message"]
+    # the original record is intact
+    record = install_mod._load_manifest()["installs"].get(install_mod._install_key("pi"))
+    assert record["native_package"] == "npm:@fakoli/anvil-pi@0.1.0"
+    # re-installing the SAME spec is allowed (idempotent refresh)
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    same = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert same.exit_code == 0, same.stdout + same.stderr
+
+
+def test_pi_two_actual_projects_pin_their_own_cwd(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pi resolves -l scope from process.cwd(), NOT from anvil's manifest key —
+    the recorded native_cwd must pin every pi subprocess to the project the
+    manifest records. Two real ANVIL_ROOT/checkout combinations."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
+    w1 = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert w1.exit_code == 0, w1.stdout + w1.stderr
+    assert sandbox["native_cwds"][-1] == str(sandbox["project"]), "install pinned to the manifest project"
+    # second project, different spec: distinct key, own cwd
+    project2 = sandbox["project"].parent / "project2"
+    project2.mkdir()
+    monkeypatch.setenv("ANVIL_ROOT", str(project2))
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.2.0")
+    w2 = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert w2.exit_code == 0, w2.stdout + w2.stderr
+    assert sandbox["native_cwds"][-1] == str(project2), "second install pinned to project2"
+    assert (project2 / ".pi" / "settings.json").is_file()
+    assert json.loads((project2 / ".pi" / "settings.json").read_text())["packages"] == ["npm:@fakoli/anvil-pi@0.2.0"]
+    # rollback project2: cwd pinned to project2, only its spec removed
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    assert sandbox["native_cwds"][-1] == str(project2), "rollback pinned to the recorded native_cwd"
+    cmds = [entry["cmd"] for entry in json.loads(rb.stdout)["data"]["native"]]
+    assert any("remove -l npm:@fakoli/anvil-pi@0.2.0" in c for c in cmds)
+    assert json.loads((project2 / ".pi" / "settings.json").read_text())["packages"] == []
+    # project1 untouched
+    assert json.loads((sandbox["project"] / ".pi" / "settings.json").read_text())["packages"] == ["npm:@fakoli/anvil-pi@0.1.0"]
 
 
 def test_pi_two_projects_remove_their_own_specs(
@@ -978,7 +1156,7 @@ def test_pi_two_projects_remove_their_own_specs(
     its own recorded package."""
     monkeypatch.setenv("ANVIL_PI_PACKAGE", "npm:@fakoli/anvil-pi@0.1.0")
     write1 = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
-    assert write1.exit_code == 0, write1.stdout + write.stderr
+    assert write1.exit_code == 0, write1.stdout + write1.stderr
     # simulate a second project's install with a different spec
     manifest = install_mod._load_manifest()
     other_key = "/some/other/project::pi"

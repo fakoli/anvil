@@ -568,11 +568,13 @@ def _pi_install_commands(root: str | None) -> list[list[str]]:
 
 
 def _pi_rollback_commands(root: str | None, record: dict[str, Any] | None = None) -> list[list[str]]:
-    # Rollback targets the RECORDED package first; re-resolution is only the
-    # fallback for records written before this field existed.
+    # Rollback targets the RECORDED package ONLY. Re-deriving the spec from the
+    # current environment is not a safe fallback: env overrides and checkouts
+    # change between install and rollback, so a stale record could remove a
+    # different package than the one actually installed. No recorded identity
+    # → no command (fail closed); the rollback flow keeps the record and tells
+    # the user how to resolve manually.
     spec = (record or {}).get("native_package")
-    if not spec:
-        spec, _source = _pi_package_spec(root)
     if not spec:
         return []
     return [["pi", "remove", "-l", spec]]
@@ -602,16 +604,22 @@ def _native_rollback_commands(
     return []
 
 
-def _run_or_print(cmds: list[list[str]], *, run: bool) -> list[dict[str, Any]]:
+def _run_or_print(
+    cmds: list[list[str]], *, run: bool, cwd: str | None = None
+) -> list[dict[str, Any]]:
     """Run each native command (when its CLI is present) or just report it. Never
     raises — a missing/failing CLI degrades to printed instructions. The binary is
-    each command's own argv[0] (codex / openclaw), not a hardcoded name."""
+    each command's own argv[0] (codex / openclaw), not a hardcoded name.
+
+    ``cwd`` pins project-scoped CLIs (pi's -l resolves scope from process.cwd(),
+    NOT from anvil's manifest key) to the project dir the manifest records —
+    without it a different caller cwd silently targets another project."""
     results = []
     for cmd in cmds:
         printed = " ".join(cmd)
         if run and shutil.which(cmd[0]) is not None:
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=cwd)
                 ok = proc.returncode == 0
                 results.append(
                     {"cmd": printed, "ran": True, "ok": ok,
@@ -701,6 +709,41 @@ def _install_key(harness: str) -> str:
     return f"{_project_root()}::{harness}"
 
 
+def _pi_settings_path(project_dir: str | Path) -> Path:
+    return Path(project_dir) / ".pi" / "settings.json"
+
+
+def _pi_package_absent(project_dir: str | Path, spec: str) -> bool | None:
+    """Persisted-removal check for the pi rollback decision.
+
+    True  → ``<project>/.pi/settings.json`` does NOT list ``spec``: removal is
+            complete on disk, regardless of the CLI's exit code (pi exits 1 for
+            an already-absent package, and reports success from an in-memory
+            change even when the settings write failed — neither is proof).
+    False → the package is still listed: do NOT drop the record.
+    None  → settings exist but can't be parsed: uncertainty, keep the record.
+
+    pi stores the source string verbatim in the ``packages`` list, so an exact
+    string match against the recorded spec is the right comparison."""
+    p = _pi_settings_path(project_dir)
+    if not p.is_file():
+        return True
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    packages = data.get("packages") if isinstance(data, dict) else None
+    if packages is None:
+        return True
+    if isinstance(packages, list):
+        return spec not in [str(x) for x in packages]
+    if isinstance(packages, dict):
+        keys = {str(k) for k in packages}
+        values = {str(v) for v in packages.values() if isinstance(v, str)}
+        return spec not in keys and spec not in values
+    return None
+
+
 def _load_manifest() -> dict[str, Any]:
     p = _manifest_path()
     if not p.is_file():
@@ -767,11 +810,18 @@ def _restore(path: Path, backup: Path) -> None:
 
 
 def _record_writes(
-    harness: str, touched: list[dict[str, Any]], native_package: str | None = None
+    harness: str,
+    touched: list[dict[str, Any]],
+    native_package: str | None = None,
+    native_cwd: str | None = None,
 ) -> None:
     """Persist (path state + refcount) for everything an install touched. Called
     BEFORE the writes so a crash mid-write still leaves a complete, reversible
-    record (each path's pre-anvil state and backup are known)."""
+    record (each path's pre-anvil state and backup are known).
+
+    ``native_package``/``native_cwd`` capture pi's resolved delivery target and
+    its project scope — rollback must target the recorded package in the
+    recorded project, never a re-derived one."""
     manifest = _load_manifest()
     key = _install_key(harness)
     for t in touched:
@@ -786,6 +836,7 @@ def _record_writes(
         "ts": datetime.now(UTC).isoformat(),
         "paths": [t["path"] for t in touched],
         **({"native_package": native_package} if native_package else {}),
+        **({"native_cwd": native_cwd} if native_cwd else {}),
     }
     _save_manifest(manifest)
 
@@ -1012,21 +1063,55 @@ def install(
         # pi installs are PROJECT-scoped (-l): removal never affects other
         # projects, so the global refcount does not gate it.
         if h.native_installer and had_install and (not others or is_pi):
+            pi_entry = result.get("entry") or {}
+            pi_spec = pi_entry.get("native_package")
+            pi_cwd = pi_entry.get("native_cwd") or str(_project_root())
             cli = _run_or_print(
                 _native_rollback_commands(h.native_installer, root=root, record=result.get("entry")),
                 run=True,
+                cwd=pi_cwd if is_pi else None,
             )
             if is_pi:
-                # The record is the rollback target — only drop it when the
-                # removal actually completed; otherwise leave it for a retry.
+                # The record is the rollback target — it is dropped only when
+                # removal is verified against PERSISTED state. pi exits 1 for an
+                # already-absent package and reports success from an in-memory
+                # change even when its settings write failed, so neither the
+                # exit code alone nor success alone is proof.
                 attempted = [c for c in cli if c["ran"]]
-                if attempted and all(c["ok"] for c in attempted):
-                    _drop_install_record(harness)
-                else:
+                if not pi_spec:
+                    # Legacy record (pre-native_package) — fail closed: never
+                    # re-derive the target from the current environment.
                     note = (
-                        "pi package removal did not complete — install record "
-                        "preserved; fix the environment and re-run rollback"
+                        "no recorded pi package identity — resolve manually "
+                        f"(check {_pi_settings_path(pi_cwd)}) and remove with "
+                        "'pi remove -l <spec>'; install record preserved"
                     )
+                elif not attempted:
+                    note = (
+                        "pi CLI not on PATH — install record preserved; fix the "
+                        "environment and re-run rollback"
+                    )
+                else:
+                    absent = _pi_package_absent(pi_cwd, pi_spec)
+                    if absent is True:
+                        _drop_install_record(harness)
+                        if not all(c["ok"] for c in attempted):
+                            note = (
+                                "pi remove exited non-zero, but persisted settings "
+                                "no longer list the package — treating as removed "
+                                "(record dropped)"
+                            )
+                    elif absent is False:
+                        note = (
+                            f"pi reported {'success' if all(c['ok'] for c in attempted) else 'failure'} "
+                            f"but {_pi_settings_path(pi_cwd)} still lists the package — "
+                            "install record preserved"
+                        )
+                    else:
+                        note = (
+                            f"could not verify persisted removal ({_pi_settings_path(pi_cwd)} "
+                            "unreadable) — install record preserved"
+                        )
         elif h.native_installer and others:
             note = f"kept global {label} registration — another project still uses it"
 
@@ -1079,6 +1164,22 @@ def install(
     native_package: str | None = None
     if h.native_installer == "pi":
         native_cmds, native_package = _pi_package_delivery(root)
+        # Fail closed on a differing recorded target: overwriting the ONLY
+        # rollback identity before the new install succeeds would leave the
+        # previously-installed package unrecoverable.
+        if write and native_cmds and native_package:
+            existing = _load_manifest()["installs"].get(_install_key(harness))
+            existing_pkg = (existing or {}).get("native_package")
+            if existing_pkg and existing_pkg != native_package:
+                msg = (
+                    f"project already has pi package {existing_pkg} recorded; "
+                    "refusing to overwrite the rollback target — run "
+                    "'anvil install pi --rollback' first"
+                )
+                if json_output:
+                    fail(_COMMAND, msg, code="conflict", exit_code=2)
+                typer.echo(f"Error: {msg}", err=True)
+                raise typer.Exit(code=2)
     else:
         native_cmds = (
             _native_install_commands(h.native_installer, use_uv_run=use_uv_run, root=root)
@@ -1133,7 +1234,18 @@ def install(
             touched.append(_track(a["dir"], "automation"))
             if not exists:
                 auto_writes.append(a)
-        _record_writes(harness, touched, native_package=native_package)  # crash-safe
+        # pi: record ONLY when there is a real native delivery. Guidance-only
+        # runs (no commands) must not create — or worse, overwrite — the
+        # recorded rollback target with an empty/partial entry.
+        native_cwd: str | None = None
+        if h.native_installer == "pi" and native_package:
+            native_cwd = str(_project_root())
+        if touched or native_cmds or native_package:
+            _record_writes(
+                harness, touched, native_package=native_package, native_cwd=native_cwd
+            )  # crash-safe — includes command-only native installs (openclaw: no
+            # config paths touched, but the plugin/mcp commands are still
+            # rollback-able). pi guidance (no commands, no spec) records nothing.
 
         if mcp["action"] in ("wrote", "merged"):
             dest = Path(mcp["path"])
@@ -1147,7 +1259,7 @@ def install(
             a["dir"].mkdir(parents=True, exist_ok=True)
             (a["dir"] / "automation.toml").write_text(a["toml"], encoding="utf-8")
             (a["dir"] / "memory.md").write_text("", encoding="utf-8")
-        native_results = _run_or_print(native_cmds, run=True)
+        native_results = _run_or_print(native_cmds, run=True, cwd=native_cwd)
     else:
         native_results = _run_or_print(native_cmds, run=False)
 
