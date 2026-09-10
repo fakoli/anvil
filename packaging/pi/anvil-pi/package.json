@@ -1,0 +1,32 @@
+{
+  "name": "anvil-pi",
+  "version": "0.1.0",
+  "description": "Anvil state-layer integration for the pi coding agent: coarse anvil_* tools over the `anvil --json` CLI, /anvil:* commands, and a bounded idle-state snapshot.",
+  "author": "Fakoli",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "anvil",
+    "agent-coordination"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extension.ts",
+    "tools.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extension.ts"
+    ],
+    "skills": []
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
