@@ -492,9 +492,10 @@ def test_tree_pin_stages_whole_tree(tmp_path: Path, fake_pi: Path) -> None:
     assert (staged_tree / "data.json").is_file()
 
 
-def test_flat_pin_cap_counts_real_bytes(tmp_path: Path) -> None:
+def test_flat_pin_cap_counts_real_bytes(tmp_path: Path, fake_pi: Path) -> None:
     """The M1 cap was NaN (Dirent.size does not exist) — a >cap entry must now
-    actually be rejected."""
+    actually be rejected. Needs a real run (staging, not dry-run); --pi keeps
+    the run hermetic on hosts/CI without a global pi on PATH."""
     root = tmp_path / "big"
     root.mkdir()
     entry_bytes = b"x" * (25 * 1024 * 1024 + 1)
@@ -506,7 +507,7 @@ def test_flat_pin_cap_counts_real_bytes(tmp_path: Path) -> None:
     (tmp_path / "ws").mkdir()
     r = run_launcher(
         "--profile", "unattended-exec", "--workspace", str(tmp_path / "ws"),
-        "--task", "x", "--allowlist", str(allowlist),
+        "--task", "x", "--allowlist", str(allowlist), "--pi", str(fake_pi),
     )
     assert r.returncode == 2, r.stderr  # oversize = policy failure, not pin drift
     assert "staging cap" in r.stderr
