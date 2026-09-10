@@ -6,6 +6,7 @@ import importlib
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -102,6 +103,33 @@ def test_projection_repair_refuses_symlinked_live_database(tmp_path: Path) -> No
     assert events_path.read_bytes() == before_events
 
 
+def test_projection_repair_refuses_reparse_point_live_database(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    backend.close()
+    state_db = state_dir / "state.db"
+    real_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):  # type: ignore[no-untyped-def]
+        result = real_lstat(path)
+        if path == state_db:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_file_attributes=0x400,
+            )
+        return result
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    result = runner.invoke(
+        app, ["repair", "projection", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "unsafe state artifact: state.db" in result.output
+
+
 def test_projection_repair_refuses_event_source_change_before_replace(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -180,3 +208,29 @@ def test_projection_repair_publishes_into_peer_opened_before_repair(
         ).fetchone() == ("peer_repair_probe",)
     finally:
         fresh.close()
+
+
+def test_projection_repair_removes_staging_sqlite_sidecars(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_dir, backend = _state(tmp_path)
+    backend.close()
+    repair_module = importlib.import_module("anvil.cli.repair")
+    real_publish = repair_module._publish_staged_projection
+
+    def publish_then_leave_sidecars(
+        staging_path: Path, destination: sqlite3.Connection
+    ) -> None:
+        real_publish(staging_path, destination)
+        Path(f"{staging_path}-wal").write_bytes(b"temporary")
+        Path(f"{staging_path}-shm").write_bytes(b"temporary")
+        Path(f"{staging_path}-journal").write_bytes(b"temporary")
+
+    monkeypatch.setattr(repair_module, "_publish_staged_projection", publish_then_leave_sidecars)
+
+    result = runner.invoke(
+        app, ["repair", "projection", "--yes", "--cwd", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not list(state_dir.glob(".state.db.repair-*.staging*"))

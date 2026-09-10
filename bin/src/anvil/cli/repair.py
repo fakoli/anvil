@@ -17,6 +17,13 @@ from anvil.cli._helpers import _open_backend, _require_state_dir, _resolve_state
 repair_app = typer.Typer(help="Repair durable local projections from event history.")
 
 
+def _is_link_or_reparse(metadata: os.stat_result) -> bool:
+    """Return whether metadata names a link-like filesystem object."""
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
 def _regular_path(path: Path, *, required: bool) -> None:
     """Refuse links and special files at a repair boundary."""
     try:
@@ -25,8 +32,18 @@ def _regular_path(path: Path, *, required: bool) -> None:
         if required:
             raise RuntimeError(f"missing required state artifact: {path.name}") from None
         return
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+    if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
         raise RuntimeError(f"unsafe state artifact: {path.name}")
+
+
+def _safe_state_directory(path: Path) -> None:
+    """Require the state root itself is a real directory, never a reparse point."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        raise RuntimeError("missing required state directory") from None
+    if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("unsafe state directory")
 
 
 def _event_source_identity(path: Path) -> tuple[int, str]:
@@ -59,6 +76,23 @@ def _new_sibling(state_dir: Path, *, suffix: str) -> Path:
     path = Path(raw_path)
     _regular_path(path, required=True)
     return path
+
+
+def _remove_staging_artifacts(staging_path: Path) -> None:
+    """Remove only the exact temporary database and SQLite sidecars we created."""
+    for path in (
+        staging_path,
+        Path(f"{staging_path}-journal"),
+        Path(f"{staging_path}-wal"),
+        Path(f"{staging_path}-shm"),
+    ):
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(metadata.st_mode) and not _is_link_or_reparse(metadata):
+            raise RuntimeError(f"unsafe staging artifact: {path.name}")
+        path.unlink()
 
 
 def _backup_sqlite(connection: sqlite3.Connection, backup_path: Path) -> None:
@@ -139,7 +173,8 @@ def repair_projection(
     """
     if not yes:
         typer.confirm(
-            "This replaces state.db with a verified local replay and retains a backup. Continue?",
+            "This rebuilds state.db in place from a verified local replay and "
+            "retains a backup. Continue?",
             abort=True,
         )
     state_dir = _resolve_state_dir(cwd)
@@ -147,6 +182,7 @@ def repair_projection(
     state_db = state_dir / "state.db"
     events_path = state_dir / "events.jsonl"
     try:
+        _safe_state_directory(state_dir)
         _regular_path(state_db, required=True)
         _regular_path(events_path, required=True)
     except RuntimeError as exc:
@@ -180,7 +216,7 @@ def repair_projection(
     finally:
         backend.close()
         if staging_path is not None:
-            staging_path.unlink(missing_ok=True)
+            _remove_staging_artifacts(staging_path)
 
     # Re-open after in-place publication and run the established oracle again.
     repaired = _open_backend(state_dir)
