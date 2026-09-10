@@ -1719,9 +1719,12 @@ flag list; full prose treatment may follow in a later pass.
   tooling uses the node-level `cli.contracts` inventory to validate shipped
   skill invocations against an independently installed wheel.
 - `anvil install <harness>` — Deliver anvil's MCP config and instructions to
-  a target harness (codex/openclaw drive their own CLI; others get a merged
-  MCP block) (`--write`, `--rollback`, `--root`, `--automations`,
-  `--cron-recipes`, `--finish-gate`); dry-run by default.
+  a target harness (codex/openclaw drive their own CLI; pi installs the
+  anvil-pi package via `pi install -l`; others get a merged MCP block)
+  (`--write`, `--rollback`, `--root`, `--automations`,
+  `--cron-recipes`, `--finish-gate`); dry-run by default. For pi, set
+  `ANVIL_PI_PACKAGE` to a pinned `npm:`/`git:` spec when no anvil checkout is
+  present.
 
 **PRD authoring extras**
 

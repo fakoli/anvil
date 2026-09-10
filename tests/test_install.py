@@ -100,9 +100,9 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
 
 def test_known_harnesses_present() -> None:
     """The verified harnesses from the spec are all in the registry."""
-    for name in ("codex", "copilot", "gemini", "openclaw", "cursor", "windsurf",
-                 "cline", "zed", "openhands", "opencode", "roo", "amp",
-                 "continue", "goose"):
+    for name in ("codex", "copilot", "gemini", "openclaw", "pi", "cursor",
+                 "windsurf", "cline", "zed", "openhands", "opencode", "roo",
+                 "amp", "continue", "goose"):
         assert name in HARNESSES
 
 
@@ -819,3 +819,68 @@ def test_unknown_harness_fails(sandbox: dict[str, Path]) -> None:
     env = json.loads(j.stdout.strip())
     assert env["ok"] is False
     assert env["error"]["code"] == "bad_request"
+
+
+# --- pi: native package delivery --------------------------------------------------
+
+
+def test_pi_native_commands_generated(sandbox: dict[str, Path]) -> None:
+    """`install pi --write` drives the pi CLI: `pi install -l <abs package dir>`."""
+    result = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    cmds = [" ".join(c) for c in sandbox["native_cmds"]]
+    assert cmds, "local checkout packaging/pi/anvil-pi must resolve from a repo checkout"
+    install_cmd = next(c for c in sandbox["native_cmds"] if c[:2] == ["pi", "install"])
+    assert install_cmd[2] == "-l", install_cmd  # project scope (matches anvil's manifest)
+    spec = install_cmd[3]
+    assert spec.startswith("/"), f"spec must be an absolute path: {spec}"
+    assert spec.endswith("packaging/pi/anvil-pi"), spec
+    # No MCP config, no instruction splice — pi reads AGENTS.md natively and has
+    # no MCP client.
+    assert not (sandbox["project"] / "AGENTS.md").exists()
+    assert not (sandbox["home"] / ".codex").exists()
+
+
+def test_pi_env_override_uses_verbatim_spec(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ANVIL_PI_PACKAGE is passed through verbatim (teams / wheel installs)."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "git:github.com/fakoli/anvil-pi@v1.2.3")
+    result = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    install_cmd = next(c for c in sandbox["native_cmds"] if c[:2] == ["pi", "install"])
+    assert install_cmd[3] == "git:github.com/fakoli/anvil-pi@v1.2.3"
+
+
+def test_pi_no_checkout_prints_guidance(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a checkout and without ANVIL_PI_PACKAGE: guidance, no fabricated command."""
+    monkeypatch.setattr(install_mod, "_pi_local_package_dir", lambda: Path("/nonexistent/anvil-pi"))
+    result = runner.invoke(app, ["install", "pi"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert sandbox["native_cmds"] == [], "must not fabricate a remote spec"
+    assert "ANVIL_PI_PACKAGE" in result.stderr
+    # JSON envelope carries the same note
+    rj = runner.invoke(app, ["install", "pi", "--json"], catch_exceptions=False)
+    payload = json.loads(rj.stdout)
+    assert "ANVIL_PI_PACKAGE" in payload["data"]["note"]
+
+
+def test_pi_rollback_uses_remove_and_ignores_refcount(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pi installs are project-scoped: rollback removes even if other projects
+    still have installs recorded (unlike the global codex/openclaw routes)."""
+    monkeypatch.setenv("ANVIL_PI_PACKAGE", "git:github.com/fakoli/anvil-pi@v1.2.3")
+    write = runner.invoke(app, ["install", "pi", "--write"], catch_exceptions=False)
+    assert write.exit_code == 0, write.stdout + write.stderr
+    # Simulate another project having an install recorded (global refcount > 0).
+    manifest = install_mod._load_manifest()
+    manifest["installs"]["/some/other/project::pi"] = {"paths": {}}
+    install_mod._save_manifest(manifest)
+    rb = runner.invoke(app, ["install", "pi", "--rollback", "--json"], catch_exceptions=False)
+    assert rb.exit_code == 0, rb.stdout + rb.stderr
+    payload = json.loads(rb.stdout)
+    cmds = [entry["cmd"] for entry in payload["data"]["native"]]
+    assert any(c.startswith("pi remove -l git:github.com/fakoli/anvil-pi@v1.2.3") for c in cmds), cmds

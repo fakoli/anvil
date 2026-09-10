@@ -141,6 +141,22 @@ HARNESSES: dict[str, Harness] = {
         native_installer="openclaw",
         writes_instructions=False,
     ),
+    # pi (pi-coding-agent): native install via the pi CLI. pi has NO MCP client —
+    # anvil reaches it as a pi PACKAGE (extensions), and pi loads AGENTS.md
+    # natively, so there is no splice. Project scope (-l) matches anvil's
+    # per-project manifest + rollback semantics; user scope is the harness's own
+    # default for manual installs.
+    "pi": Harness(
+        "pi", None, None,
+        "home", "none", "AGENTS.md", "project",
+        note=(
+            "native install via the pi CLI (`pi install -l <package>` writes a "
+            "project-scoped package entry in .pi/settings.json); pi loads "
+            "AGENTS.md natively — no splice; pi has no MCP client — anvil "
+            "arrives as the anvil-pi package (packaging/pi/anvil-pi)."
+        ),
+        native_installer="pi",
+    ),
     # --- already-working print-only clients keep working via mcp-config; ---
     # --- rows added here only as their instruction-file dest is verified.  ---
     "cursor": Harness(
@@ -314,7 +330,7 @@ def _merge_json(path: Path, client: str, *, use_uv_run: bool, root: str | None) 
 _ANVIL_MARKETPLACE = "fakoli/anvil"
 
 # Human-facing label per native installer (for output lines).
-_NATIVE_LABEL = {"codex": "Codex", "openclaw": "OpenClaw"}
+_NATIVE_LABEL = {"codex": "Codex", "openclaw": "OpenClaw", "pi": "pi"}
 
 
 def _codex_install_commands(*, use_uv_run: bool, root: str | None) -> list[list[str]]:
@@ -498,6 +514,58 @@ def _openclaw_finish_gate_recipe() -> str:
     )
 
 
+# --- pi package delivery -----------------------------------------------------
+# pi installs extensions as PACKAGES (pi has no MCP client and loads AGENTS.md
+# natively). The package source resolves in tiers:
+#   1. ANVIL_PI_PACKAGE env — a verbatim pi package spec (npm:/git: with a
+#      pinned ref) for teams / wheels.
+#   2. The local anvil checkout's packaging/pi/anvil-pi — versioned by anvil's
+#      own VCS; resolved to an ABSOLUTE path so the settings entry works from
+#      any cwd.
+#   3. No checkout (wheel install) → no command; install prints guidance to set
+#      ANVIL_PI_PACKAGE. We never fabricate a remote spec that doesn't exist.
+_PI_LOCAL_PACKAGE_DIR = "packaging/pi/anvil-pi"
+
+
+def _pi_local_package_dir() -> Path:
+    return Path(__file__).resolve().parents[4] / _PI_LOCAL_PACKAGE_DIR
+
+
+def _pi_install_guidance() -> str:
+    return (
+        "# pi: no local anvil checkout found — set ANVIL_PI_PACKAGE to a pinned "
+        "pi package spec (e.g. git:github.com/fakoli/anvil-pi@v1) and rerun."
+    )
+
+
+def _pi_package_spec(root: str | None) -> tuple[str | None, str]:
+    """(spec, source) for the anvil-pi package. spec None → guidance needed."""
+    env_spec = (os.environ.get("ANVIL_PI_PACKAGE") or "").strip()
+    if env_spec:
+        return env_spec, "ANVIL_PI_PACKAGE"
+    local = _pi_local_package_dir()
+    if local.is_dir():
+        return str(local), "local checkout"
+    return None, _pi_install_guidance()
+
+
+def _pi_install_commands(root: str | None) -> list[list[str]]:
+    spec, _source = _pi_package_spec(root)
+    if spec is None:
+        return []
+    # Project scope (-l): the entry lands in .pi/settings.json beside the
+    # project anvil manages — per-project, exactly rollback-able, and pi
+    # installs missing packages on startup after the project is trusted.
+    return [["pi", "install", "-l", spec]]
+
+
+def _pi_rollback_commands(root: str | None) -> list[list[str]]:
+    spec, _source = _pi_package_spec(root)
+    if spec is None:
+        return []
+    return [["pi", "remove", "-l", spec]]
+
+
 def _native_install_commands(
     installer: str, *, use_uv_run: bool, root: str | None
 ) -> list[list[str]]:
@@ -505,14 +573,20 @@ def _native_install_commands(
         return _codex_install_commands(use_uv_run=use_uv_run, root=root)
     if installer == "openclaw":
         return _openclaw_install_commands(use_uv_run=use_uv_run, root=root)
+    if installer == "pi":
+        return _pi_install_commands(root)
     return []
 
 
-def _native_rollback_commands(installer: str) -> list[list[str]]:
+def _native_rollback_commands(
+    installer: str, root: str | None = None
+) -> list[list[str]]:
     if installer == "codex":
         return _codex_rollback_commands()
     if installer == "openclaw":
         return _openclaw_rollback_commands()
+    if installer == "pi":
+        return _pi_rollback_commands(root)
     return []
 
 
@@ -907,8 +981,10 @@ def install(
         label = _NATIVE_LABEL.get(h.native_installer or "", h.native_installer)
         cli = []
         note = None
-        if h.native_installer and had_install and not others:
-            cli = _run_or_print(_native_rollback_commands(h.native_installer), run=True)
+        # pi installs are PROJECT-scoped (-l): removal never affects other
+        # projects, so the global refcount does not gate it.
+        if h.native_installer and had_install and (not others or h.native_installer == "pi"):
+            cli = _run_or_print(_native_rollback_commands(h.native_installer, root=root), run=True)
         elif h.native_installer and others:
             note = f"kept global {label} registration — another project still uses it"
 
@@ -1036,6 +1112,7 @@ def install(
                 "mcp": {"path": mcp["path"], "action": mcp["action"], "note": mcp["note"]},
                 "instruction": {"path": instr["path"], "action": instr["action"]},
                 "native": native_results,
+                **({"note": _pi_install_guidance()} if harness == "pi" and not native_cmds else {}),
                 # Only present when --automations actually installed something, so a
                 # caller can't confuse "none requested" with "installed and paused".
                 **(
@@ -1047,6 +1124,8 @@ def install(
         )
         return
 
+    if harness == "pi" and not native_cmds:
+        typer.echo(_pi_install_guidance(), err=True)
     if native_cmds:
         label = _NATIVE_LABEL.get(h.native_installer or "", h.native_installer)
         cli_bin = native_cmds[0][0]

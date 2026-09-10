@@ -13,9 +13,12 @@ See the [glossary](../glossary.md).)
 
 `anvil install <harness>` wires this up for you, in two tiers:
 
-- **Supported end-to-end** — `claude-code`, `codex`, and `openclaw`. `codex` and
+- **Supported end-to-end** — `claude-code`, `codex`, `openclaw`, and `pi`. `codex` and
   `openclaw` install natively via their own CLI (skills, commands, and — for codex —
-  anvil's `AGENTS.md` spliced into a marked, removable block). `claude-code` is the
+  anvil's `AGENTS.md` spliced into a marked, removable block). `pi` installs the
+  `anvil-pi` package via its own CLI (`pi install -l` — pi has no MCP client; tools
+  arrive through the package extension, and pi reads `AGENTS.md` natively, so nothing
+  is spliced). `claude-code` is the
   anvil **plugin** itself: install it from the marketplace (see below) or wire
   `.mcp.json` by hand — there is no `anvil install claude-code`.
 - **MCP-only best-effort** — every other harness: install merges the anvil MCP server
@@ -27,7 +30,7 @@ See the [glossary](../glossary.md).)
   point the agent at the repo's `AGENTS.md` for usage guidance.
 
 Why tiers? Splicing instruction files and dropping skills into a dozen harnesses was
-the blast-radius behind a config-corruption incident. The three supported harnesses
+the blast-radius behind a config-corruption incident. The supported harnesses
 have a stable native surface; everywhere else the MCP server alone delivers the full
 toolset with zero file-format risk.
 
@@ -85,6 +88,7 @@ config this writes.
 | `claude-code` | **supported** | the anvil **plugin** — install from the marketplace (MCP + skills + hooks), or add anvil to a project `.mcp.json` by hand (not an `anvil install` target — see below) |
 | `codex` | **supported** | native `codex plugin marketplace add` + `codex mcp add` (skills via plugin) **and** splice `AGENTS.md` |
 | `openclaw` | **supported** | native `openclaw mcp add` + `openclaw plugins install` (plugin ships skills + instructions) |
+| `pi` | **supported** | native `pi install -l <package>` (anvil-pi extension tools + bounded snapshot; `ANVIL_PI_PACKAGE` picks a pinned `npm:`/`git:` spec when no checkout is present) |
 | `cursor` | MCP-only | merge MCP → `~/.cursor/mcp.json` |
 | `vscode` / `copilot` | MCP-only | merge MCP → `.vscode/mcp.json` |
 | `windsurf` | MCP-only | merge MCP → `~/.codeium/windsurf/mcp_config.json` |
