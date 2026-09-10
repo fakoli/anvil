@@ -91,9 +91,29 @@ async function test(name, fn) {
 // --- verb policy (REGISTERED Typer names) ------------------------------------------
 
 test("execution verbs allowed without planning gate (registered names)", () => {
-  for (const verb of ["status", "next", "claim", "packet", "submit", "apply", "doctor", "gate-check", "drift", "claim-guard", "merge-check"]) {
+  for (const verb of ["status", "next", "claim", "packet", "submit", "doctor", "gate-check", "drift", "claim-guard", "merge-check"]) {
     assert.equal(tools.checkVerb(verb, {}), null, verb);
   }
+  // apply is the human-review boundary: dedicated tool only (Greptile P1)
+  assert.equal(tools.checkVerb("apply", {}, { via: "dedicated" }), null, "apply via dedicated tool");
+  assert.match(tools.checkVerb("apply", {}), /dedicated anvil_apply tool/);
+  assert.match(tools.checkVerb("apply", {}, { via: "run" }), /human review gate/);
+});
+
+await test("G1 regression: anvil_run(apply, [--approve]) is rejected before spawn", async () => {
+  // the exact bypass Greptile flagged: escape hatch + --approve
+  const blocked = await tools.runAnvil("apply", ["T001", "--approve"], envWithFake(), undefined, undefined, { via: "run" });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.stderr, /human review gate/);
+  // ...and even without --approve, the escape hatch cannot reach apply at all
+  const noApprove = await tools.runAnvil("apply", ["T001"], envWithFake(), undefined, undefined, { via: "run" });
+  assert.equal(noApprove.ok, false);
+  assert.match(noApprove.stderr, /human review gate/);
+  // the dedicated tool path still works (fake anvil explicitly on PATH — with
+  // env undefined the real CI anvil would resolve and exit 1 with no state)
+  const dedicated = await tools.runAnvil("apply", ["T001"], envWithFake(), undefined, undefined, { via: "dedicated" });
+  assert.equal(dedicated.ok, true, dedicated.stderr);
+  assert.equal(dedicated.stdout.trim(), '{"ok":true}');
 });
 
 test("planning verbs denied by default, allowed with ANVIL_PI_PLANNING=1", () => {
@@ -209,6 +229,22 @@ test("presentResult caps oversized stdout AND oversized stderr", () => {
   const err = tools.presentResult({ ok: false, stdout: "", stderr: bigErr, exitCode: 1 });
   assert.ok(err.text.length <= "anvil error: ".length + tools.ERROR_MAX_CHARS + 2, `len ${err.text.length}`);
   assert.ok(err.text.endsWith("…"));
+});
+
+// --- per-verb flag contract (dogfood-caused: packet rejects --json) -------
+
+await test("runAnvil json:false omits --json (packet uses --format json)", async () => {
+  const result = await tools.runAnvil("packet", ["T001", "--format", "json"], envWithFake(), undefined, undefined, { json: false });
+  assert.equal(result.ok, true, result.stderr);
+  const args = readLastArgs().split("\n").filter(Boolean);
+  assert.deepEqual(args, ["packet", "T001", "--format", "json"], args.join(" "));
+  assert.ok(!args.includes("--json"), "--json must not be appended for json:false");
+});
+
+await test("runAnvil default still appends --json", async () => {
+  await tools.runAnvil("status", [], envWithFake());
+  const args = readLastArgs().split("\n").filter(Boolean);
+  assert.ok(args.includes("--json"), args.join(" "));
 });
 
 // --- task ids + tokenizer ---------------------------------------------------------------
@@ -500,17 +536,42 @@ const hasRealAnvil = (() => {
   }
 })();
 
+const requireContract = process.env.ANVIL_REQUIRE_CONTRACT === "1";
+
 if (hasRealAnvil) {
   await test("contract: every allowlisted/denied verb exists in the real CLI registry", async () => {
-    const { spawnSync } = require("node:child_process");
-    const help = spawnSync("anvil", ["--help"], { encoding: "utf8", timeout: 15_000 }).stdout;
+    const { spawnSync, execFileSync } = require("node:child_process");
+    // GitHub Actions sets GITHUB_ACTIONS=true -> typer/rich FORCE_TERMINAL=True
+    // injects ANSI escapes (see the pytest env note in ci.yml): strip them or
+    // every token match fails (caught by CI, not by the local run).
+    const ansiRe = /\x1B\[[0-9;]*[A-Za-z]/g;
+    const help = spawnSync("anvil", ["--help"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, _TYPER_FORCE_DISABLE_TERMINAL: "1", NO_COLOR: "1" } }).stdout.replace(ansiRe, "");
     assert.ok(help.length > 0);
     const helpTokens = new Set(help.split(/\s+/));
-    const { createRequire: cr } = await import("node:module");
+    const anvilBin = "anvil";
     const allVerbs = [...tools.EXECUTION_VERBS, ...tools.PLANNING_EXTRA_VERBS, ...tools.ALWAYS_DENY_VERBS, ...tools.UNCLASSIFIED_VERBS];
     const missing = allVerbs.filter((verb) => !helpTokens.has(verb));
     assert.deepEqual(missing, [], `verbs not registered in real CLI: ${missing.join(", ")}`);
+
+  // per-verb FLAG contract: the extension sends exact flags — each must exist
+  // on the real CLI (M4 dogfood caught packet rejecting --json).
+  const flagContract = {
+    packet: ["--format"],
+    submit: ["--commands", "--files-changed"],
+    claim: ["--actor", "--lease", "--force"],
+    apply: ["--approve", "--reject", "--reason"],
+  };
+  const flagProblems = [];
+  for (const [verb, flags] of Object.entries(flagContract)) {
+    const verbHelp = execFileSync(anvilBin, [verb, "--help"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, _TYPER_FORCE_DISABLE_TERMINAL: "1", NO_COLOR: "1" } }).replace(ansiRe, "");
+    for (const flag of flags) {
+      if (!verbHelp.includes(flag)) flagProblems.push(`anvil ${verb} does not offer ${flag}`);
+    }
+  }
+  assert.deepEqual(flagProblems, [], flagProblems.join("; "));
   });
+} else if (requireContract) {
+  assert.fail("ANVIL_REQUIRE_CONTRACT=1 but the real anvil CLI is not on PATH — CI must expose it");
 } else {
   console.log("  skip contract: real anvil CLI not on PATH");
 }

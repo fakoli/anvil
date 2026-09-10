@@ -50,18 +50,33 @@ launcher; see the rework notes at the bottom.
 Exit codes: `0` ok · pi's exit code forwarded · `2` policy/usage/staging ·
 `3` pin mismatch.
 
-## Deferred to M4 (not claimed here)
+## M4: tree pins, image, dogfood
 
-- **npm:/git: pins are rejected** — verification that is not bound to the
-  loaded bytes is false assurance. They return when artifacts are
-  materialized and staged at image build time.
-- **Container enforcement** of `network: none` / inference-only egress. Today
-  the child runs on the host; the posture is recorded but not enforced.
-- **Import closure attestation** — the pin covers the entry file plus its
-  same-directory siblings. Deeper imports (subdirectories, node_modules) are
-  loaded from the original tree at runtime; keep pinned extension entry
-  points self-contained for now, or wait for directory-tree staging in M4.
-- **Post-run loaded-set verification** against what pi actually loaded.
+- **Tree pins** — `{"source": "path:<rel>/entry.ts", "tree_sha256": "<64hex>"}`:
+  canonical digest over the entry's whole directory (sorted relpaths,
+  length-prefixed per-file sha256 records; version 2 encoding). Symlinks, special files, and `.git` /
+  `node_modules` directories are REJECTED, never skipped. Refresh after
+  changing the pinned source: `node scripts/pi-sandbox-policy.mjs tree-hash
+  packaging/pi/anvil-pi` (CI fails on drift via build-time + runtime verify).
+- **Flat `sha256` pins** still work for single-file extensions (entry verified;
+  siblings staged unverified; byte-counted caps).
+- **Image** (`packaging/pi/sandbox/Dockerfile`): bakes pi@0.85.1, the anvil
+  CLI (uv frozen), the sandbox scripts, the allowlist, and the pinned
+  anvil-pi tree; the build FAILS on pin drift
+  (`verify-baked-pins.mjs`). Entrypoint re-validates + re-stages from baked
+  bytes on every start, seeds `models.json` for the loopback mock provider,
+  and starts `mock-llm.mjs`.
+- **Docker run** (`scripts/pi-sandbox-docker.sh [--build] <profile>
+  <task-file> <workspace>`): `--network none`, read-only rootfs, tmpfs
+  scratch, `--cap-drop ALL`, `no-new-privileges`, pids/nofile limits,
+  workspace the only writable mount, task file read-only. `ANVIL_SANDBOX_IMAGE`
+  selects the image (use a digest for reproducibility).
+- **Dogfood** (CI job `pi-sandbox`): a fresh scratch anvil root + git repo;
+  the container drives status → next → claim → packet → submit unattended
+  (deterministic mock provider — no live model, no network). Assertions run
+  OUTSIDE the agent: packet on disk, report with evidence, task in
+  needs_review, and `done == 0` (apply is the HUMAN gate — the agent must
+  not self-approve).
 
 ## Usage
 

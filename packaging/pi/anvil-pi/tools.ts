@@ -75,15 +75,35 @@ export const ALWAYS_DENY_VERBS = new Set([
  * multi-command groups). */
 export const UNCLASSIFIED_VERBS = new Set(["sync", "proof", "project", "notify-digest"]);
 
+/** Per-verb JSON output flags — packet exposes JSON via `--format json` and
+ * REJECTS `--json`; every other audited verb takes `--json`. (M4 dogfood.) */
+export function jsonOutputFlagsFor(verb: string): string[] {
+  return verb === "packet" ? ["--format", "json"] : ["--json"];
+}
+
 export function planningSurfaceEnabled(env: Record<string, string | undefined> = process.env): boolean {
   const raw = env.ANVIL_PI_PLANNING ?? "";
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
+/** Verbs reserved for the dedicated structured tools — the anvil_run escape
+ * hatch must never reach them. `apply` is the human-review boundary: the
+ * dedicated anvil_apply tool runs it WITHOUT --approve, and approval itself
+ * is the human gate; an escape hatch accepting ["T001", "--approve"] would
+ * bypass it (Greptile P1, 2026-09-10). */
+export const DEDICATED_ONLY_VERBS = new Set(["apply"]);
+
 /** Validate a verb for anvil_run. Returns an error message or null. */
-export function checkVerb(verb: string, env: Record<string, string | undefined> = process.env): string | null {
+export function checkVerb(
+  verb: string,
+  env: Record<string, string | undefined> = process.env,
+  opts: { via?: "dedicated" | "run" } = {}
+): string | null {
   if (!/^[a-z][a-z_-]*$/.test(verb)) {
     return `invalid verb "${verb}"`;
+  }
+  if (opts.via !== "dedicated" && DEDICATED_ONLY_VERBS.has(verb)) {
+    return `verb "${verb}" is only available through the dedicated anvil_apply tool (human review gate; the escape hatch cannot pass --approve)`;
   }
   if (ALWAYS_DENY_VERBS.has(verb)) {
     return `verb "${verb}" is always denied by the anvil-pi extension (config/state-mutating operator action)`;
@@ -112,6 +132,17 @@ export interface AnvilRunOptions {
   maxArgChars?: number;
   maxTotalChars?: number;
   timeoutMs?: number;
+  /**
+   * Call site: "dedicated" (structured wrapper tools) or "run" (the anvil_run
+   * escape hatch). Human-review verbs are only reachable via "dedicated" —
+   * the escape hatch must not be able to pass --approve (Greptile P1).
+   */
+  via?: "dedicated" | "run";
+  /**
+   * Append the verb's JSON output flags (default true). Pass false to opt out
+   * entirely (args then carry the flags, e.g. `packet --format json`).
+   */
+  json?: boolean;
 }
 
 export interface AnvilCliResult {
@@ -133,8 +164,10 @@ const CAPTURE_MAX_BYTES = 1_000_000;
  * Run `anvil <verb> [args...] --json` asynchronously. The task does NOT block
  * the host event loop; `signal` (a tool-call cancellation) terminates the
  * child. Options-style args must be passed as their own elements
- * ("--actor", "alice"). `--json` is appended; args containing "--json" or a
- * bare "--" separator are rejected so the appended flag cannot be displaced.
+ * ("--actor", "alice"). The verb's JSON output flags are appended
+ * (status: --json; packet: --format json); args containing the appended flags
+ * or a bare "--" separator are rejected so the appended flags cannot be
+ * displaced, and verbs that do not accept --json reject it outright.
  */
 export function runAnvil(
   verb: string,
@@ -144,7 +177,7 @@ export function runAnvil(
   signal?: AbortSignal,
   options: AnvilRunOptions = {}
 ): Promise<AnvilCliResult> {
-  const check = checkVerb(verb, env);
+  const check = checkVerb(verb, env, { via: options.via });
   if (check) {
     return Promise.resolve({ ok: false, stdout: "", stderr: check, exitCode: -1 });
   }
@@ -157,12 +190,33 @@ export function runAnvil(
   if (cleanArgs.some((a) => a.length > maxArgChars) || cleanArgs.join(" ").length > maxTotalChars) {
     return Promise.resolve({ ok: false, stdout: "", stderr: `args exceed size caps (${maxArgChars} per arg, ${maxTotalChars} total)`, exitCode: -1 });
   }
-  if (cleanArgs.includes("--json") || cleanArgs.includes("--")) {
-    return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain "--json" or a bare "--" separator', exitCode: -1 });
+  if (cleanArgs.includes("--")) {
+    return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain a bare "--" separator', exitCode: -1 });
+  }
+  // Centralized per-verb output-flag selection (advisory F8): verbs whose
+  // JSON output uses a different flag are declared ONCE here, so both the
+  // dedicated tools and the anvil_run escape hatch emit valid argv.
+  const outputFlags = options.json === false ? [] : jsonOutputFlagsFor(verb);
+  if (cleanArgs.includes("--json")) {
+    if (!jsonOutputFlagsFor(verb).includes("--json")) {
+      // verbs like packet render JSON via a different flag; --json reaches the
+      // real CLI and is rejected there — fail here with the right flag instead
+      // (applies to BOTH json:true and json:false callers; Copilot round 2)
+      return Promise.resolve({
+        ok: false,
+        stdout: "",
+        stderr: `verb "${verb}" does not accept --json (use ${jsonOutputFlagsFor(verb).join(" ") || "no flag"} for JSON output)`,
+        exitCode: -1,
+      });
+    }
+    if (outputFlags.includes("--json")) {
+      // the appended --json cannot be displaced by one in args
+      return Promise.resolve({ ok: false, stdout: "", stderr: 'args must not contain "--json"', exitCode: -1 });
+    }
   }
 
   return new Promise((resolveResult) => {
-    const child = spawn(anvilBin(env), [verb, ...cleanArgs, "--json"], {
+    const child = spawn(anvilBin(env), [verb, ...cleanArgs, ...outputFlags], {
       cwd,
       env: env as NodeJS.ProcessEnv,
       stdio: ["ignore", "pipe", "pipe"],

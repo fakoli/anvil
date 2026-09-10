@@ -187,3 +187,130 @@ jobs:
       # validation note in mkdocs.yml; plan item D5).
       - name: Build docs site
         run: uvx --with-requirements docs/requirements.txt mkdocs build --strict
+
+  pi-sandbox:
+    name: pi sandbox (image + unattended dogfood loop)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: 'Sync anvil CLI (dev deps included: pytest)'
+        working-directory: bin
+        run: uv sync --frozen
+
+      # The extension tests need the pi harness (jiti + SDK aliases) on the
+      # HOST — the docker image cannot satisfy an earlier host-side step
+      # (advisory F2). Pin the same version the image bakes.
+      - name: Install pi harness (host)
+        run: |
+          npm install --global --no-audit --no-fund @earendil-works/pi-coding-agent@0.85.1
+          echo "PI_INSTALL_DIR=$(npm root -g)/@earendil-works/pi-coding-agent" >> "$GITHUB_ENV"
+
+      # Expose the synced anvil CLI so the real-CLI contract runs (never skips).
+      - name: Expose anvil on PATH
+        run: echo "$GITHUB_WORKSPACE/bin/.venv/bin" >> "$GITHUB_PATH"
+
+      # Hermetic: policy/launcher contract (tree pins, staging, seed dir).
+      - name: Sandbox launcher tests
+        run: pytest tests/test_pi_sandbox.py -q
+
+      # anvil-pi extension + mock-llm contracts incl. the per-verb flag
+      # contract against the real CLI (dogfood-caused: packet rejects --json).
+      # ANVIL_REQUIRE_CONTRACT: the contract must RUN, not silently skip.
+      - name: anvil-pi + mock provider tests
+        run: |
+          node tests/anvil_pi/extension.test.mjs
+          ANVIL_REQUIRE_CONTRACT=1 node tests/anvil_pi/extension.test.mjs > /dev/null
+          node tests/anvil_pi/mock-llm.test.mjs
+
+      # Build-time pin verification runs inside the Dockerfile; the build
+      # FAILS if baked bytes drift from the allowlist pins.
+      - name: Build sandbox image
+        run: docker build -f packaging/pi/sandbox/Dockerfile -t anvil-pi-sandbox .
+
+      # Dogfood: a fresh scratch anvil root + git repo; the container drives
+      # status -> next -> claim -> packet -> submit unattended (mock provider,
+      # network none). Assertions live OUTSIDE the agent, on host state.
+      - name: Seed scratch anvil root
+        run: |
+          rm -rf /tmp/anvil-dogfood && mkdir -p /tmp/anvil-dogfood/ws
+          cd /tmp/anvil-dogfood/ws
+          git init -q . && git config user.email ci@anvil.local && git config user.name ci
+          echo "# scratch" > README.md && git add -A && git commit -qm init
+          cd "${{ github.workspace }}/bin"
+          ANVIL_ROOT=/tmp/anvil-dogfood/ws ANVIL_STATE_LAYOUT=local uv run anvil init --with-sample
+
+      - name: Run unattended loop in sandbox
+        run: |
+          printf 'You are driving the anvil work loop for this project unattended.\nUse the anvil tools: check status, pick the next claimable task, claim it, render its packet, and submit completion evidence.\nWhen the loop finishes, write a short markdown report to /work/report.md summarizing what each verb returned.\n' > /tmp/anvil-dogfood/task.txt
+          scripts/pi-sandbox-docker.sh unattended-exec /tmp/anvil-dogfood/task.txt /tmp/anvil-dogfood/ws > /tmp/anvil-dogfood/run.log 2>&1 || {
+            echo "::error::sandbox dogfood loop failed"; tail -40 /tmp/anvil-dogfood/run.log; exit 1; }
+          # every steered step must have executed AND succeeded (advisory F6:
+          # a failed status/next must fail CI, not silently pass)
+          python3 - << 'PY'
+          import json
+          steps = []
+          for line in open("/tmp/anvil-dogfood/run.log"):
+              line = line.strip()
+              if not line.startswith("{"):
+                  continue
+              try:
+                  ev = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if ev.get("type") == "tool_execution_end":
+                  steps.append((ev["toolName"], ev["result"].get("isError")))
+          expected = ["anvil_status", "anvil_next", "anvil_claim", "anvil_packet", "anvil_submit", "write"]
+          got = [name for name, _ in steps]
+          assert got == expected, f"unexpected execution sequence: {got}"
+          for name, err in steps:
+              assert not err, f"step {name} failed"
+          print("steered sequence OK:", got)
+          PY
+
+      - name: Assert final state outside the agent
+        run: |
+          cd /tmp/anvil-dogfood/ws
+          test -f report.md || { echo "::error::report.md missing"; exit 1; }
+          test -f .anvil/packets/T001.json || { echo "::error::packet T001.json missing"; exit 1; }
+          cd "${{ github.workspace }}/bin"
+          ANVIL_ROOT=/tmp/anvil-dogfood/ws ANVIL_STATE_LAYOUT=local uv run anvil status --json > /tmp/anvil-dogfood/status.json
+          python3 - << 'PY'
+          import json, sys
+          tasks = json.load(open("/tmp/anvil-dogfood/status.json"))["data"]["tasks"]
+          assert tasks["needs_review"] == 1, f"expected T001 in needs_review, got {tasks}"
+          assert tasks["done"] == 0, "apply is the human gate — the agent must not self-approve"
+          report = open("/tmp/anvil-dogfood/ws/report.md").read()
+          import re
+          assert re.search(r"EV[0-9A-F]{6,}", report), "report must embed the real submit evidence id"
+          packet = json.load(open("/tmp/anvil-dogfood/ws/.anvil/packets/T001.json"))
+          assert packet.get("task_id") == "T001", f"packet task mismatch: {packet.get('task_id')}"
+          print("dogfood state OK:", tasks)
+          PY
+
+      - name: Upload dogfood run log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pi-sandbox-dogfood-log
+          path: /tmp/anvil-dogfood/run.log
+          if-no-files-found: ignore

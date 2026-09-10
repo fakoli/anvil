@@ -1,0 +1,43 @@
+{
+  "steps": [
+    {
+      "name": "anvil_status",
+      "args": {}
+    },
+    {
+      "name": "anvil_next",
+      "args": {}
+    },
+    {
+      "name": "anvil_claim",
+      "args": {
+        "task_id": "$NEXT_TASK_ID"
+      }
+    },
+    {
+      "name": "anvil_packet",
+      "args": {
+        "task_id": "$NEXT_TASK_ID"
+      }
+    },
+    {
+      "name": "anvil_submit",
+      "args": {
+        "task_id": "$NEXT_TASK_ID",
+        "commands": "anvil status --json",
+        "files_changed": [
+          "report.md"
+        ]
+      }
+    },
+    {
+      "name": "write",
+      "args": {
+        "path": "/work/report.md",
+        "content": "# sandbox dogfood loop report\n\nThe unattended loop ran inside the sandbox: status, next, claim, packet, submit.\nThe task now sits in needs_review \u2014 `apply` is the HUMAN review gate, intentionally\nnot driven by the agent. Real evidence from the executed verbs follows.\n",
+        "embed_last_tool_result": true
+      }
+    }
+  ],
+  "$comment": "Deterministic steering sequence for the mock provider: tool call N on request N; $NEXT_TASK_ID resolves from the most recent anvil_next result; the loop ENDS AT SUBMIT (needs_review) because apply is the human review gate; write embeds the submit result as evidence."
+}
