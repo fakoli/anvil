@@ -100,17 +100,18 @@ test("execution verbs allowed without planning gate (registered names)", () => {
   assert.match(tools.checkVerb("apply", {}, { via: "run" }), /human review gate/);
 });
 
-test("G1 regression: anvil_run(apply, [--approve]) is rejected before spawn", async () => {
+await test("G1 regression: anvil_run(apply, [--approve]) is rejected before spawn", async () => {
   // the exact bypass Greptile flagged: escape hatch + --approve
-  const blocked = await tools.runAnvil("apply", ["T001", "--approve"], { ANVIL_FAKE: "1" }, undefined, undefined, { via: "run" });
+  const blocked = await tools.runAnvil("apply", ["T001", "--approve"], envWithFake(), undefined, undefined, { via: "run" });
   assert.equal(blocked.ok, false);
   assert.match(blocked.stderr, /human review gate/);
   // ...and even without --approve, the escape hatch cannot reach apply at all
-  const noApprove = await tools.runAnvil("apply", ["T001"], { ANVIL_FAKE: "1" }, undefined, undefined, { via: "run" });
+  const noApprove = await tools.runAnvil("apply", ["T001"], envWithFake(), undefined, undefined, { via: "run" });
   assert.equal(noApprove.ok, false);
   assert.match(noApprove.stderr, /human review gate/);
-  // the dedicated tool path still works (fake anvil on PATH)
-  const dedicated = await tools.runAnvil("apply", ["T001"], undefined, undefined, undefined, { via: "dedicated" });
+  // the dedicated tool path still works (fake anvil explicitly on PATH — with
+  // env undefined the real CI anvil would resolve and exit 1 with no state)
+  const dedicated = await tools.runAnvil("apply", ["T001"], envWithFake(), undefined, undefined, { via: "dedicated" });
   assert.equal(dedicated.ok, true, dedicated.stderr);
   assert.equal(dedicated.stdout.trim(), '{"ok":true}');
 });
