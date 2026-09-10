@@ -12827,6 +12827,153 @@ class SqliteBackend:
                 "The task may have been reviewed by a concurrent operation."
             )
 
+    def _legacy_claimed_apply_evidence(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskAppliedPayload,
+    ) -> tuple[EvidenceSubmittedPayload, str, str] | None:
+        """Return the one recoverable legacy evidence submission, if any.
+
+        Early logs could record a valid-looking ``evidence.submitted`` fact
+        under a submitter different from the active claim owner.  The current
+        writer correctly refuses that fact, so a following unversioned,
+        unbound apply replays against ``claimed`` rather than ``needs_review``.
+        Replay alone may recover this precise historical shape: the exact
+        active, non-collided claim must be named by exactly one earlier raw
+        evidence event for the same task, and that event must carry the known
+        submitter/owner mismatch.  All live and versioned transitions retain
+        the regular state-machine and proof guards.
+        """
+        if (
+            not self._replaying
+            or payload.schema_version is not None
+            or "schema_version" in payload.model_fields_set
+            or payload.review_attempt_id is not None
+            or "review_attempt_id" in payload.model_fields_set
+            or payload.rejection is not None
+            or "rejection" in payload.model_fields_set
+        ):
+            return None
+        task_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (payload.task_id,)
+        ).fetchone()
+        if task_row is None or task_row[0] != "claimed":
+            return None
+        claim_rows = conn.execute(
+            """
+            SELECT id, claimed_by
+              FROM claims
+             WHERE task_id = ?
+               AND status = 'active'
+               AND bundle_claim_id IS NULL
+            """,
+            (payload.task_id,),
+        ).fetchall()
+        if len(claim_rows) != 1:
+            return None
+        claim_id, claimed_by = claim_rows[0]
+        if self._claim_replay_collision(conn, claim_id):
+            return None
+        evidence_rows = conn.execute(
+            """
+            SELECT id, timestamp, actor, payload_json
+              FROM events
+             WHERE action = 'evidence.submitted'
+               AND target_kind = 'task'
+               AND target_id = ?
+               AND json_extract(payload_json, '$.task_id') = ?
+               AND json_extract(payload_json, '$.claim_id') = ?
+             ORDER BY rowid
+            """,
+            (payload.task_id, payload.task_id, claim_id),
+        ).fetchall()
+        if len(evidence_rows) != 1:
+            return None
+        evidence_event_id, evidence_timestamp, evidence_actor, raw_payload = evidence_rows[0]
+        try:
+            evidence = EvidenceSubmittedPayload.model_validate(json.loads(raw_payload))
+        except Exception:  # noqa: BLE001 - malformed historical facts are not recoverable.
+            return None
+        if (
+            evidence.task_id != payload.task_id
+            or evidence.claim_id != claim_id
+            or evidence_actor != evidence.submitted_by
+            or evidence.submitted_by == claimed_by
+        ):
+            return None
+        return evidence, evidence_event_id, evidence_timestamp
+
+    @staticmethod
+    def _restore_legacy_evidence_submission(
+        conn: sqlite3.Connection,
+        evidence: EvidenceSubmittedPayload,
+        *,
+        evidence_event_id: str,
+        evidence_timestamp: str,
+    ) -> None:
+        """Restore the missing projection of one verified legacy evidence fact."""
+        proofs_json = json.dumps([proof.model_dump(mode="json") for proof in evidence.proofs])
+        conn.execute(
+            """
+            INSERT INTO evidence
+                (id, task_id, claim_id, commands_run, output_excerpt,
+                 files_changed, pr_url, commit_sha, screenshots,
+                 known_limitations, proofs, category, submitted_at,
+                 submitted_by)
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence.evidence_id,
+                evidence.task_id,
+                evidence.claim_id,
+                json.dumps(evidence.commands_run),
+                evidence.output_excerpt,
+                json.dumps(evidence.files_changed),
+                evidence.pr_url,
+                evidence.commit_sha,
+                json.dumps(evidence.screenshots or []),
+                evidence.known_limitations,
+                proofs_json,
+                evidence.category or "completion",
+                evidence_timestamp,
+                evidence.submitted_by,
+            ),
+        )
+        transitioned = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'needs_review', updated_at = ?
+             WHERE id = ? AND status = 'claimed'
+            """,
+            (evidence_timestamp, evidence.task_id),
+        )
+        released = conn.execute(
+            """
+            UPDATE claims
+               SET status = 'released',
+                   released_at = ?,
+                   release_reason = 'auto-released on submit'
+             WHERE id = ? AND task_id = ? AND status = 'active'
+            """,
+            (evidence_timestamp, evidence.claim_id, evidence.task_id),
+        )
+        if transitioned.rowcount != 1 or released.rowcount != 1:
+            raise TransactionAborted(
+                "task.applied: legacy evidence projection state changed during replay"
+            )
+        conn.execute(
+            """
+            UPDATE claim_progress_attestations
+               SET invalidated_by_event_id = ?
+             WHERE claim_id = ?
+               AND generation = (SELECT generation FROM claims WHERE id = ?)
+               AND consumed_by_event_id IS NULL
+               AND invalidated_by_event_id IS NULL
+            """,
+            (evidence_event_id, evidence.claim_id, evidence.claim_id),
+        )
+
     def _write_task_applied(
         self,
         conn: sqlite3.Connection,
@@ -12887,6 +13034,15 @@ class SqliteBackend:
                     "task.applied: unversioned review provenance is invalid"
                 )
 
+        legacy_evidence = self._legacy_claimed_apply_evidence(conn, payload)
+        if legacy_evidence is not None:
+            self._restore_legacy_evidence_submission(
+                conn,
+                legacy_evidence[0],
+                evidence_event_id=legacy_evidence[1],
+                evidence_timestamp=legacy_evidence[2],
+            )
+
         if decision == "accepted":
             if review_attempt_id is not None:
                 # Replay/catch-up bypasses ``_check_task_applied``. New-format
@@ -12903,16 +13059,18 @@ class SqliteBackend:
                     raise TransactionAborted(
                         "task.applied: accepted review attempt replay mismatch"
                     )
-            # Transition needs_review → accepted.
+            # Both current events and reconstructed legacy evidence transition
+            # from needs_review.  The compatibility helper above restores the
+            # missing evidence projection before this unchanged apply branch.
             conn.execute(
                 """
                 UPDATE tasks
                    SET status = 'accepted',
                        updated_at = ?
                  WHERE id = ?
-                   AND status = 'needs_review'
+                   AND status = ?
                 """,
-                (timestamp, task_id),
+                (timestamp, task_id, "needs_review"),
             )
             if conn.execute("SELECT changes()").fetchone()[0] == 0:
                 row = conn.execute(
