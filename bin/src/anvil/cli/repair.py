@@ -79,8 +79,9 @@ def _new_sibling(state_dir: Path, *, suffix: str) -> Path:
     return path
 
 
-def _remove_staging_artifacts(staging_path: Path) -> None:
-    """Remove only the exact temporary database and SQLite sidecars we created."""
+def _remove_staging_artifacts(staging_path: Path) -> tuple[str, ...]:
+    """Remove regular staging artifacts without touching substituted paths."""
+    skipped: list[str] = []
     for path in (
         staging_path,
         Path(f"{staging_path}-journal"),
@@ -91,9 +92,17 @@ def _remove_staging_artifacts(staging_path: Path) -> None:
             metadata = path.lstat()
         except FileNotFoundError:
             continue
-        if stat.S_ISDIR(metadata.st_mode) and not _is_link_or_reparse(metadata):
-            raise RuntimeError(f"unsafe staging artifact: {path.name}")
-        path.unlink()
+        if not stat.S_ISREG(metadata.st_mode):
+            skipped.append(path.name)
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except (IsADirectoryError, PermissionError):
+            # A replacement race must never cause a destructive cleanup attempt.
+            skipped.append(path.name)
+    return tuple(skipped)
 
 
 def _backup_sqlite(connection: sqlite3.Connection, backup_path: Path) -> None:
@@ -135,6 +144,24 @@ def _publish_staged_projection(
         _bounded_backup(source, destination, operation="publishing repaired projection")
     finally:
         source.close()
+
+
+def _checkpoint_and_fsync_live_projection(
+    connection: sqlite3.Connection, state_db: Path
+) -> None:
+    """Durably flush the in-place publication without disturbing peer handles."""
+    # PASSIVE never waits for readers that opened before repair. A committed WAL
+    # remains durable after its own fsync even when those readers defer checkpoint.
+    connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+    _fsync_file(state_db)
+    live_wal = Path(f"{state_db}-wal")
+    try:
+        _regular_path(live_wal, required=False)
+    except RuntimeError:
+        raise RuntimeError("unsafe live SQLite WAL") from None
+    if live_wal.exists():
+        _fsync_file(live_wal)
+    _fsync_directory(state_db.parent)
 
 
 def _verify_staged_projection(staging_path: Path, state_dir: Path) -> None:
@@ -199,6 +226,7 @@ def repair_projection(
 
     backup_path: Path | None = None
     staging_path: Path | None = None
+    skipped_staging_artifacts: tuple[str, ...] = ()
     backend = _open_backend(state_dir)
     try:
         with backend.claim_operation_lock():
@@ -217,7 +245,7 @@ def repair_projection(
                 raise RuntimeError("events.jsonl changed while projection repair ran")
             _regular_path(staging_path, required=True)
             _publish_staged_projection(staging_path, backend._require_conn())  # noqa: SLF001
-            _fsync_file(state_db)
+            _checkpoint_and_fsync_live_projection(backend._require_conn(), state_db)  # noqa: SLF001
             from anvil.cli.doctor import _ERROR, _check_replay
 
             finding = _check_replay(backend, state_dir)
@@ -229,7 +257,15 @@ def repair_projection(
     finally:
         backend.close()
         if staging_path is not None:
-            _remove_staging_artifacts(staging_path)
+            skipped_staging_artifacts = _remove_staging_artifacts(staging_path)
+
+    if skipped_staging_artifacts:
+        names = ", ".join(skipped_staging_artifacts)
+        typer.echo(
+            f"Error: projection repair left unsafe staging artifact(s): {names}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     assert backup_path is not None
     typer.echo("Projection repaired from local event history.")

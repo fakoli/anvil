@@ -304,3 +304,41 @@ def test_projection_repair_removes_staging_sqlite_sidecars(
 
     assert result.exit_code == 0, result.output
     assert not list(state_dir.glob(".state.db.repair-*.staging*"))
+
+
+def test_projection_repair_cleanup_never_unlinks_an_unsafe_staging_directory(
+    tmp_path: Path,
+) -> None:
+    repair_module = importlib.import_module("anvil.cli.repair")
+    staging_path = tmp_path / ".state.db.repair-test.staging"
+    staging_path.write_bytes(b"temporary")
+    unsafe_sidecar = Path(f"{staging_path}-wal")
+    unsafe_sidecar.mkdir()
+
+    skipped = repair_module._remove_staging_artifacts(staging_path)
+
+    assert skipped == (unsafe_sidecar.name,)
+    assert not staging_path.exists()
+    assert unsafe_sidecar.is_dir()
+
+
+def test_projection_repair_checkpoints_and_fsyncs_live_database_and_wal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repair_module = importlib.import_module("anvil.cli.repair")
+    state_db = tmp_path / "state.db"
+    connection = sqlite3.connect(state_db)
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("CREATE TABLE probe (id INTEGER)")
+    connection.commit()
+    fsynced: list[Path] = []
+    monkeypatch.setattr(repair_module, "_fsync_file", fsynced.append)
+    monkeypatch.setattr(repair_module, "_fsync_directory", lambda _: None)
+
+    try:
+        repair_module._checkpoint_and_fsync_live_projection(connection, state_db)
+    finally:
+        connection.close()
+
+    assert state_db in fsynced
+    assert Path(f"{state_db}-wal") in fsynced
