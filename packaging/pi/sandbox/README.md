@@ -53,8 +53,8 @@ Exit codes: `0` ok · pi's exit code forwarded · `2` policy/usage/staging ·
 ## M4: tree pins, image, dogfood
 
 - **Tree pins** — `{"source": "path:<rel>/entry.ts", "tree_sha256": "<64hex>"}`:
-  canonical digest over the entry's whole directory (sorted relpaths, per-file
-  sha256; version 1 encoding). Symlinks, special files, and `.git` /
+  canonical digest over the entry's whole directory (sorted relpaths,
+  length-prefixed per-file sha256 records; version 2 encoding). Symlinks, special files, and `.git` /
   `node_modules` directories are REJECTED, never skipped. Refresh after
   changing the pinned source: `node scripts/pi-sandbox-policy.mjs tree-hash
   packaging/pi/anvil-pi` (CI fails on drift via build-time + runtime verify).

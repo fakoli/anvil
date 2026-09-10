@@ -21,7 +21,6 @@
 //
 // Exit codes: 0 ok · pi's exit code forwarded · 2 policy/usage · 3 pin mismatch.
 
-import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile, readdir, readFile, lstat, mkdir, copyFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -35,7 +34,6 @@ import {
   loadAllowlist,
   readPinSnapshot,
   stageSnapshot,
-  treeHash,
 } from "./pi-sandbox-policy.mjs";
 
 function die(code, message) {

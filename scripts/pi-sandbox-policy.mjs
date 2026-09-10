@@ -147,11 +147,13 @@ export const STAGE_MAX_BYTES = 25 * 1024 * 1024; // per-extension staging cap
 export const STAGE_MAX_FILES = 4096; // per-extension file cap
 export const STAGE_MAX_DEPTH = 16; // per-extension directory depth cap
 
-// Tree-pin encoding, version 1 (advisory-reviewed): canonical digest over the
+// Tree-pin encoding, version 2 (length-prefixed; advisory-reviewed): digest over the
 // extension ROOT directory (the pinned entry's parent). Records are emitted for
 // every regular file in deterministic bytewise-sorted posix-relative order:
-//   <relpath>\n<sha256hex(file bytes)>\n
-// concatenated, then sha256'd. Empty directories are omitted (they carry no
+//   <relByteLength>:<relpath><sha256hex(file bytes)>\n
+// concatenated, then sha256'd. The byte-length prefix makes the record parse
+// unambiguous for ANY filename (v1's bare <rel>\n<hex>\n records could be
+// forged by newline-containing filenames — see canonicalTreeDigest). Empty directories are omitted (they carry no
 // bytes and pi cannot import them). Hash RAW file bytes — CRLF, whitespace, and
 // mode changes that matter must change the digest. Rejected, never skipped:
 // symlinks or special files anywhere in the tree, and `.git` / `node_modules`
