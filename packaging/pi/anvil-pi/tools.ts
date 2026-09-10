@@ -288,6 +288,13 @@ export function presentResult(result: AnvilCliResult): { text: string; isError: 
   const truncation = truncateHead(result.stdout, { maxLines: DEFAULT_MAX_LINES, maxBytes: TOOL_OUTPUT_MAX_BYTES });
   let text = truncation.content;
   if (truncation.truncated) {
+    if (truncation.firstLineExceedsLimit) {
+      // pi's truncateHead returns EMPTY content when the FIRST line alone
+      // exceeds the byte cap (firstLineExceedsLimit) — which is exactly what
+      // anvil's single-line JSON dumps look like. Keep a byte-slice head so
+      // the agent still gets the leading data instead of nothing.
+      text = Buffer.from(result.stdout, "utf8").subarray(0, TOOL_OUTPUT_MAX_BYTES).toString("utf8");
+    }
     text += `\n[truncated: ${truncation.outputLines}/${truncation.totalLines} lines, ${truncation.outputBytes}/${truncation.totalBytes} bytes; rerun with narrower args or use anvil directly]`;
   }
   return { text, isError: false };
