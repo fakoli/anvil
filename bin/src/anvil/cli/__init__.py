@@ -43,6 +43,7 @@ from anvil.cli.prd import prd_app
 from anvil.cli.progress import progress
 from anvil.cli.project import project_app
 from anvil.cli.proof import proof_app
+from anvil.cli.repair import repair_app
 from anvil.cli.replay import replay
 from anvil.cli.run_workflow import run_workflow
 from anvil.cli.scan import scan
@@ -104,6 +105,7 @@ app.add_typer(migrate_app, name="migrate")
 app.add_typer(proof_app, name="proof")
 app.add_typer(bundle_app, name="bundle")
 app.add_typer(project_app, name="project")
+app.add_typer(repair_app, name="repair")
 
 # ---------------------------------------------------------------------------
 # --version callback

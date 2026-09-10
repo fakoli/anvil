@@ -567,7 +567,9 @@ def _pi_install_commands(root: str | None) -> list[list[str]]:
     return _pi_package_delivery(root)[0]
 
 
-def _pi_rollback_commands(root: str | None, record: dict[str, Any] | None = None) -> list[list[str]]:
+def _pi_rollback_commands(
+    root: str | None, record: dict[str, Any] | None = None
+) -> list[list[str]]:
     # Rollback targets the RECORDED package ONLY. Re-deriving the spec from the
     # current environment is not a safe fallback: env overrides and checkouts
     # change between install and rollback, so a stale record could remove a
@@ -1067,7 +1069,11 @@ def install(
             pi_spec = pi_entry.get("native_package")
             pi_cwd = pi_entry.get("native_cwd") or str(_project_root())
             cli = _run_or_print(
-                _native_rollback_commands(h.native_installer, root=root, record=result.get("entry")),
+                _native_rollback_commands(
+                    h.native_installer,
+                    root=root,
+                    record=result.get("entry"),
+                ),
                 run=True,
                 cwd=pi_cwd if is_pi else None,
             )
@@ -1103,7 +1109,8 @@ def install(
                             )
                     elif absent is False:
                         note = (
-                            f"pi reported {'success' if all(c['ok'] for c in attempted) else 'failure'} "
+                            "pi reported "
+                            f"{'success' if all(c['ok'] for c in attempted) else 'failure'} "
                             f"but {_pi_settings_path(pi_cwd)} still lists the package — "
                             "install record preserved"
                         )
