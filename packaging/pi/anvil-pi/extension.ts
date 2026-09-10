@@ -26,7 +26,7 @@ import {
   type AnvilCliResult,
 } from "./tools.js";
 
-const WRAPPER_OPTS = { maxArgChars: MAX_WRAPPER_ARG_CHARS, maxTotalChars: MAX_WRAPPER_ARGS_TOTAL_CHARS };
+const WRAPPER_OPTS = { maxArgChars: MAX_WRAPPER_ARG_CHARS, maxTotalChars: MAX_WRAPPER_ARGS_TOTAL_CHARS, via: "dedicated" as const };
 
 function toolResult(result: AnvilCliResult) {
   const { text, isError } = presentResult(result);
@@ -136,7 +136,7 @@ export default function (pi: ExtensionAPI): void {
     name: "anvil_run",
     label: "Anvil run",
     description:
-      "Escape hatch: run any allowlisted `anvil <verb> [args...]` with --json appended. Execution verbs always allowed; planning verbs require ANVIL_PI_PLANNING=1; config/state-mutating operator verbs (install, mcp-config, hook, restore, migrate*, replay, run-workflow, backup) are always denied. Args must not contain --json or a bare -- separator.",
+      "Escape hatch: run any allowlisted `anvil <verb> [args...]` (apply excluded — it is the dedicated anvil_apply tool, the human review gate). Execution verbs always allowed; planning verbs require ANVIL_PI_PLANNING=1; config/state-mutating operator verbs (install, mcp-config, hook, restore, migrate*, replay, run-workflow, backup) are always denied. Args must not contain --json or a bare -- separator.",
     parameters: Type.Object({
       verb: Type.String({ description: "Anvil CLI verb (registered Typer name, e.g. gate-check, claim-guard)", pattern: "^[a-z][a-z_-]*$", maxLength: 64 }),
       args: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 32, description: "Extra CLI args (options as separate elements: [\"--actor\", \"alice\"])" })),
@@ -146,7 +146,7 @@ export default function (pi: ExtensionAPI): void {
       // same per-verb flags the dedicated tools emit (advisory F8 — packet
       // through anvil_run used to send a rejected --json).
       const args = [...(params.args ?? []), ...jsonOutputFlagsFor(params.verb)];
-      return toolResult(await runAnvil(params.verb, args, undefined, ctx.cwd, signal, { json: false }));
+      return toolResult(await runAnvil(params.verb, args, undefined, ctx.cwd, signal, { json: false, via: "run" }));
     },
   });
 

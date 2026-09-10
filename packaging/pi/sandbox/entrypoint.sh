@@ -72,10 +72,34 @@ until node -e "fetch('http://127.0.0.1:${MOCK_PORT}/v1/chat/completions',{method
   sleep 0.2
 done
 
-exec node "$SANDBOX_ROOT/scripts/pi-sandbox-launch.mjs" \
+# Supervising shell (Greptile P2): exec would replace this shell and lose the
+# mock-provider cleanup trap — on `docker stop` only PID 1 is signaled, so the
+# mock would linger until the SIGKILL grace period. Instead: run the launcher
+# as a child, forward stop signals to BOTH children, and propagate its exit code.
+node "$SANDBOX_ROOT/scripts/pi-sandbox-launch.mjs" \
   --profile "$PROFILE" \
   --workspace "$WORK" \
   --task-file "$TASK_FILE" \
   --allowlist "$SANDBOX_ROOT/packaging/pi/sandbox/allowlist.json" \
   --seed-dir "$SEED_DIR" \
-  --model "$MODEL"
+  --model "$MODEL" &
+LAUNCHER_PID=$!
+
+cleanup() {
+  kill "$LAUNCHER_PID" "$MOCK_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+set +e
+wait "$LAUNCHER_PID"
+RC=$?
+set -e
+kill "$MOCK_PID" 2>/dev/null || true
+# kill alone can leave the mock alive a moment; reap without blocking forever
+i=0
+while kill -0 "$MOCK_PID" 2>/dev/null && [ "$i" -lt 20 ]; do
+  i=$((i + 1))
+  sleep 0.1
+done
+kill -9 "$MOCK_PID" 2>/dev/null || true
+exit "$RC"

@@ -86,10 +86,24 @@ export function planningSurfaceEnabled(env: Record<string, string | undefined> =
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
+/** Verbs reserved for the dedicated structured tools — the anvil_run escape
+ * hatch must never reach them. `apply` is the human-review boundary: the
+ * dedicated anvil_apply tool runs it WITHOUT --approve, and approval itself
+ * is the human gate; an escape hatch accepting ["T001", "--approve"] would
+ * bypass it (Greptile P1, 2026-09-10). */
+export const DEDICATED_ONLY_VERBS = new Set(["apply"]);
+
 /** Validate a verb for anvil_run. Returns an error message or null. */
-export function checkVerb(verb: string, env: Record<string, string | undefined> = process.env): string | null {
+export function checkVerb(
+  verb: string,
+  env: Record<string, string | undefined> = process.env,
+  opts: { via?: "dedicated" | "run" } = {}
+): string | null {
   if (!/^[a-z][a-z_-]*$/.test(verb)) {
     return `invalid verb "${verb}"`;
+  }
+  if (opts.via !== "dedicated" && DEDICATED_ONLY_VERBS.has(verb)) {
+    return `verb "${verb}" is only available through the dedicated anvil_apply tool (human review gate; the escape hatch cannot pass --approve)`;
   }
   if (ALWAYS_DENY_VERBS.has(verb)) {
     return `verb "${verb}" is always denied by the anvil-pi extension (config/state-mutating operator action)`;
@@ -118,6 +132,12 @@ export interface AnvilRunOptions {
   maxArgChars?: number;
   maxTotalChars?: number;
   timeoutMs?: number;
+  /**
+   * Call site: "dedicated" (structured wrapper tools) or "run" (the anvil_run
+   * escape hatch). Human-review verbs are only reachable via "dedicated" —
+   * the escape hatch must not be able to pass --approve (Greptile P1).
+   */
+  via?: "dedicated" | "run";
   /**
    * Append the verb's JSON output flags (default true). Pass false to opt out
    * entirely (args then carry the flags, e.g. `packet --format json`).
@@ -157,7 +177,7 @@ export function runAnvil(
   signal?: AbortSignal,
   options: AnvilRunOptions = {}
 ): Promise<AnvilCliResult> {
-  const check = checkVerb(verb, env);
+  const check = checkVerb(verb, env, { via: options.via });
   if (check) {
     return Promise.resolve({ ok: false, stdout: "", stderr: check, exitCode: -1 });
   }
