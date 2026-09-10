@@ -639,8 +639,9 @@ def plan(
         # MODEL prd_id ('default' for the default PRD, e.g. 'v0.2' for a named
         # one), already collapsed from the 'prd' parse sentinel by the parser.
         # Orphan-prune, dependency inference, and proposed->drafted promotion
-        # all scope to this partition; conflict-group inference (below) does
-        # NOT — it spans every PRD so cross-PRD file overlaps are detected.
+        # all scope to this partition; conflict-group inference (below) spans
+        # every PRD's unfinished tasks so cross-PRD file overlaps that still
+        # need coordination are detected.
         scope_prd_id = parsed.prd.id
         stored_prd = backend.get_prd(scope_prd_id)
         if stored_prd is None:
@@ -721,7 +722,11 @@ def plan(
         other_prd_tasks = [
             task
             for task in backend.list_tasks()
-            if task.id not in subset_ids and task.id not in orphan_ids
+            if (
+                task.id not in subset_ids
+                and task.id not in orphan_ids
+                and task.status not in TERMINAL_TASK_STATUSES
+            )
         ]
         try:
             subset_with_deps = infer_dependencies(
@@ -822,15 +827,17 @@ def plan(
 
         # ------------------------------------------------------------------
         # Inference (T017): dependency inference + proposed->drafted promotion
-        # run over THIS PRD's subset; conflict-group inference spans ALL PRDs.
+        # run over THIS PRD's subset; conflict-group inference spans unfinished
+        # tasks across every PRD.
         #
         # Dependencies are intra-PRD by construction — the subset's strict
         # likely_files subset edges. Conflict groups are coordination
         # signals: a task in PRD-A and a task in PRD-B that touch the same
-        # file collide regardless of which PRD owns them, so the conflict
-        # scan reads backend.list_tasks() (all partitions). We feed it the
-        # in-memory subset (already carrying inferred deps) UNION the
-        # already-persisted OTHER-PRD tasks, so a cross-PRD overlap lands in
+        # file collide regardless of which PRD owns them. Terminal tasks are
+        # historical records rather than work needing coordination, so they
+        # are excluded before strict path validation. We feed the in-memory
+        # subset (already carrying inferred deps) UNION the persisted,
+        # unfinished OTHER-PRD tasks, so an active cross-PRD overlap lands in
         # a single CG-* group that both tasks reference.
         # ------------------------------------------------------------------
         # Re-upsert THIS PRD's tasks with inferred dependencies + conflict

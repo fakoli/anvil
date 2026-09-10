@@ -9204,9 +9204,9 @@ class TestPlanPrdScoping:
 
 
 class TestPlanCrossPrdConflictGroups:
-    """T017: conflict-group inference spans ALL PRDs (reads backend.list_tasks()
-    with no prd filter), so a default-PRD task and a named-PRD task that share a
-    likely_file land in ONE CG-* group that both task rows reference.
+    """T017: conflict-group inference spans unfinished tasks in all PRDs, so a
+    default-PRD task and a named-PRD task that share a likely_file land in ONE
+    CG-* group that both task rows reference.
     """
 
     def _setup(self, tmp_path: Path) -> None:
@@ -9255,6 +9255,65 @@ class TestPlanCrossPrdConflictGroups:
         cg_id = cross[0]
         assert cg_id in t001, f"default T001 must reference {cg_id}; got {t001}"
         assert cg_id in t900, f"named task must reference {cg_id}; got {t900}"
+
+    @pytest.mark.parametrize("status", ["accepted", "done"])
+    def test_named_plan_ignores_terminal_legacy_file_scope(
+        self, tmp_path: Path, status: str
+    ) -> None:
+        """Completed work cannot block later cross-PRD conflict inference.
+
+        Older task records may contain glob-style scope hints that are no
+        longer portable paths. They remain historical evidence, but they do
+        not represent work that needs a current conflict group.
+        """
+        self._setup(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        legacy_scope = [".codex/agents/anvil-*.toml"]
+        with sqlite3.connect(str(db)) as conn:
+            conn.execute(
+                "UPDATE tasks SET status = ?, likely_files = ? WHERE id = 'T001'",
+                (status, json.dumps(legacy_scope)),
+            )
+
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2", "--no-llm"])
+        assert result.exit_code == 0, result.output
+
+        with sqlite3.connect(str(db)) as conn:
+            persisted = conn.execute(
+                "SELECT status, likely_files FROM tasks WHERE id = 'T001'"
+            ).fetchone()
+            t900_groups = json.loads(
+                conn.execute(
+                    "SELECT conflict_groups FROM tasks WHERE id = 'v0.2:T900'"
+                ).fetchone()[0]
+            )
+        assert persisted == (status, json.dumps(legacy_scope))
+        assert t900_groups == []
+
+    def test_named_plan_keeps_validating_unfinished_cross_prd_scope(
+        self, tmp_path: Path
+    ) -> None:
+        """The terminal exclusion never weakens validation for active work."""
+        self._setup(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        legacy_scope = [".codex/agents/anvil-*.toml"]
+        with sqlite3.connect(str(db)) as conn:
+            conn.execute(
+                "UPDATE tasks SET likely_files = ? WHERE id = 'T001'",
+                (json.dumps(legacy_scope),),
+            )
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+
+        result = _invoke_cmd(
+            tmp_path, ["plan", "--prd", "v0.2", "--no-llm", "--json"]
+        )
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["error"]["code"] == "path_identity_error"
+        assert "valid portable project-relative file path" in payload["error"]["message"]
+        assert events_path.read_bytes() == before_events
 
 
 # ---------------------------------------------------------------------------
