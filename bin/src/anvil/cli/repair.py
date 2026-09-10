@@ -92,7 +92,7 @@ def _remove_staging_artifacts(staging_path: Path) -> tuple[str, ...]:
             metadata = path.lstat()
         except FileNotFoundError:
             continue
-        if not stat.S_ISREG(metadata.st_mode):
+        if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
             skipped.append(path.name)
             continue
         try:

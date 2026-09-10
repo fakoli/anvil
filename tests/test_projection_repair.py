@@ -322,6 +322,34 @@ def test_projection_repair_cleanup_never_unlinks_an_unsafe_staging_directory(
     assert unsafe_sidecar.is_dir()
 
 
+def test_projection_repair_cleanup_skips_regular_mode_reparse_sidecar(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repair_module = importlib.import_module("anvil.cli.repair")
+    staging_path = tmp_path / ".state.db.repair-test.staging"
+    staging_path.write_bytes(b"temporary")
+    reparse_sidecar = Path(f"{staging_path}-wal")
+    reparse_sidecar.write_bytes(b"temporary")
+    real_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):  # type: ignore[no-untyped-def]
+        result = real_lstat(path)
+        if path == reparse_sidecar:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_file_attributes=0x400,
+            )
+        return result
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    skipped = repair_module._remove_staging_artifacts(staging_path)
+
+    assert skipped == (reparse_sidecar.name,)
+    assert not staging_path.exists()
+    assert reparse_sidecar.exists()
+
+
 def test_projection_repair_checkpoints_and_fsyncs_live_database_and_wal(
     tmp_path: Path, monkeypatch
 ) -> None:
