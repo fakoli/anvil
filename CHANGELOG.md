@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-09-10
+
 ### Added
 
 - GPT-6 Astra planning through Codex's ChatGPT subscription, explicit reasoning
