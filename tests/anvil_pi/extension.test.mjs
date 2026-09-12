@@ -440,11 +440,15 @@ await test("anvil_submit forwards bounded command-proof files without shell inte
     assert.equal(property.maxItems, 16);
     assert.equal(property.items.maxLength, 512);
     const maximum = await pi.registry.tools.anvil_submit.execute("t1", {
-      task_id: "T001", commands: "pytest -q",
-      files_changed: Array.from({ length: 64 }, (_, i) => `src/f${i}.py`),
-      command_proof_files: Array.from({ length: 16 }, (_, i) => `evidence/p${i}.json`),
+      task_id: "T001", commands: "c".repeat(2000),
+      files_changed: Array.from({ length: 64 }, () => "f".repeat(512)),
+      command_proof_files: Array.from({ length: 16 }, () => "p".repeat(512)),
     }, undefined, undefined, makeCtx({}));
-    assert.equal(maximum.details.isError, false, "all declared array entries fit the dedicated wrapper's count cap");
+    assert.equal(maximum.details.isError, false, "all declared maximum inputs fit the dedicated wrapper caps");
+    rmSync(join(recordDir, "last-args"), { force: true });
+    const tooLarge = await tools.runAnvil("submit", ["x".repeat(49153)], envWithFake(), undefined, undefined, { via: "dedicated", maxArgChars: 50000, maxTotalChars: 49152 });
+    assert.equal(tooLarge.ok, false);
+    assert.equal(existsSync(join(recordDir, "last-args")), false);
     rmSync(join(recordDir, "last-args"), { force: true });
     const denied = await pi.registry.tools.anvil_submit.execute("t1", {
       task_id: "T001", commands: "pytest -q", files_changed: ["src/a.py"], command_proof_files: ["--approve"],

@@ -126,7 +126,8 @@ export const MAX_RUN_ARGS_TOTAL_CHARS = 4000;
 
 /** Structured-wrapper caps (submit/commands payloads are long by design). */
 export const MAX_WRAPPER_ARG_CHARS = 2000;
-export const MAX_WRAPPER_ARGS_TOTAL_CHARS = 8000;
+/** Dedicated structured tools accept their declared maximum submit payload. */
+export const MAX_WRAPPER_ARGS_TOTAL_CHARS = 48 * 1024;
 export const MAX_WRAPPER_ARGS = 192;
 
 export interface AnvilRunOptions {
