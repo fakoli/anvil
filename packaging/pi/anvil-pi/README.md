@@ -56,8 +56,8 @@ Recommended pin: an exact tag; M3's `anvil install pi` writes this for you.
 ## Commands
 
 `anvil_submit.command_proof_files` optionally accepts up to 16 existing proof
-artifact paths (512 characters each, subject to the dedicated wrapper's 48 KiB
-aggregate argument cap). State performs canonical, claim-bound proof validation. Passing a file
+artifact paths (512 characters each, subject to the dedicated wrapper's 49,152-character
+aggregate argument cap, measured with JavaScript string length). State performs canonical, claim-bound proof validation. Passing a file
 does not establish content freshness or grant acceptance: the project's trusted
 verification policy and human review gate remain authoritative. The interactive
 `/anvil:submit` also accepts repeated `--command-proof-file` options.
