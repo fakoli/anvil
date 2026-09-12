@@ -195,12 +195,12 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("anvil:submit", {
-    description: "Submit evidence: /anvil:submit T001 --commands 'pytest -q'",
+    description: "Submit evidence: /anvil:submit T001 --commands 'pytest -q' --files-changed src/x.py [--command-proof-file <path>]...",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const trimmed = (args ?? "").trim();
       if (!trimmed) {
-        ctx.ui.notify("usage: /anvil:submit <task-id> [--commands <cmds>] [--files-changed <files>]", "warning");
+        ctx.ui.notify("usage: /anvil:submit <task-id> --commands <cmds> --files-changed <path> [--files-changed <path>]... [--command-proof-file <path>]...", "warning");
         return;
       }
       // Quote-aware tokenizer: '--commands "pytest -q"' survives verbatim;
