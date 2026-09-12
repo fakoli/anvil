@@ -250,7 +250,7 @@ Catalog / comparison / commentary:
 - BCMS, *Spec-Driven Development* — https://thebcms.com/blog/spec-driven-development
 - HN discussions — https://news.ycombinator.com/item?id=45935763 · https://news.ycombinator.com/item?id=47197595
 
-Author's own thread (parallel-invention evidence, `sekoudoumbouya` blog):
+Author's own thread (parallel-invention evidence, the author's own blog):
 
 - *Platform Engineering Is Product Management for Infrastructure* (2025-11-15)
 - *Documentation Is Infrastructure* (2026-02-15)

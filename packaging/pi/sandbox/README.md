@@ -90,6 +90,36 @@ scripts/pi-sandbox-run.sh --profile unattended-exec --workspace . \
   --task-file task.txt
 ```
 
+## Run config (docker path)
+
+Knobs that were hardcoded are now settable through an optional run config,
+resolved + validated fail-closed by `scripts/pi-sandbox-config.mjs` (schema:
+`sandbox.config.schema.json`):
+
+| Field | Scope | Meaning |
+|---|---|---|
+| `image` | trusted only | Digest-pinned image reference (`repo@sha256:<64 hex>` — a digest is REQUIRED; `ANVIL_SANDBOX_IMAGE` env remains the explicit-intent escape hatch for unpinned local builds and still wins). A digest image cannot be a `--build` target. |
+| `network` | trusted only | Only `"none"` today; may never be looser than the profile's posture. `"inference"` is reserved and rejected. |
+| `caps` | trusted only | `"all-dropped"` (default, `--cap-drop ALL`) or `"docker-default"` (omits it; no-new-privileges + read-only rootfs still apply). Deliberate risk relaxation — prefer all-dropped. |
+| `max_containers` | any | Refuse launch when ≥ N sandbox containers (label `anvil.sandbox=pi-sandbox`) are running. Advisory anti-fork guard; TOCTOU tolerated. |
+
+Scope rules (fail-closed):
+
+- **Trusted scope** = explicit `--config FILE` or `~/.config/anvil/sandbox.config.json` — all fields.
+- **Project scope** = `<workspace>/.pi/sandbox.config.json` — `max_containers` ONLY; any
+  security field there is a refusal (exit 2), because the workspace is untrusted input
+  and must not loosen container security.
+- Precedence: `--config` > user config > defaults; project `max_containers` merges
+  with the most restrictive value winning.
+- Unknown keys, non-digest images, and loose network values exit non-zero — nothing runs.
+
+```sh
+scripts/pi-sandbox-docker.sh [--build] [--config FILE] <profile> <task-file> <workspace>
+```
+
+A `pi-sandbox-config: source=… image=… network=… caps=… max_containers=…`
+attestation line is printed to stderr before every launch.
+
 ## Honest boundary
 
 No sandbox is a security boundary against a malicious model with `bash`. The

@@ -64,8 +64,8 @@ ENV PATH="/app/bin/.venv/bin:${PATH}"
 
 # Run as a non-root user. State writes happen under the bind-mounted /project,
 # whose ownership is controlled by the host mount, so no chown is needed here.
-RUN useradd --create-home --uid 10001 fakoli
-USER fakoli
+RUN useradd --create-home --uid 10001 sandbox
+USER sandbox
 
 # ENTRYPOINT is the server module; CMD is empty so `docker run ... --help`
 # appends --help as an argument the entry point handles (print + exit 0).

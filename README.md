@@ -192,5 +192,5 @@ contract hardening; Linear/Monday providers and webhook sync are on the
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Built by Sekou Doumbouya
+MIT — see [LICENSE](LICENSE). Built by Fakoli
 ([@fakoli](https://github.com/fakoli)).
