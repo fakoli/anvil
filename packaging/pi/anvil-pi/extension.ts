@@ -23,10 +23,11 @@ import {
   tokenizeQuotedArgs,
   MAX_WRAPPER_ARG_CHARS,
   MAX_WRAPPER_ARGS_TOTAL_CHARS,
+  MAX_WRAPPER_ARGS,
   type AnvilCliResult,
 } from "./tools.js";
 
-const WRAPPER_OPTS = { maxArgChars: MAX_WRAPPER_ARG_CHARS, maxTotalChars: MAX_WRAPPER_ARGS_TOTAL_CHARS, via: "dedicated" as const };
+const WRAPPER_OPTS = { maxArgs: MAX_WRAPPER_ARGS, maxArgChars: MAX_WRAPPER_ARG_CHARS, maxTotalChars: MAX_WRAPPER_ARGS_TOTAL_CHARS, via: "dedicated" as const };
 
 function toolResult(result: AnvilCliResult) {
   const { text, isError } = presentResult(result);
@@ -100,7 +101,7 @@ export default function (pi: ExtensionAPI): void {
     name: "anvil_submit",
     label: "Anvil submit",
     description:
-      "Submit execution evidence for a claimed anvil task. Runs `anvil submit <id> --commands <cmds> --files-changed <files> --json`.",
+      "Submit evidence; all fields share a 12,000-character dedicated argv budget. Proofs are validated by State; this tool never approves acceptance.",
     parameters: Type.Object({
       task_id: taskIdParam,
       // REQUIRED by the CLI (`anvil submit --help` marks both *): making them
@@ -111,12 +112,21 @@ export default function (pi: ExtensionAPI): void {
         Type.String({ description: "One file path modified, e.g. src/x.py", minLength: 1, maxLength: 512 }),
         { minItems: 1, maxItems: 64, description: "File path(s) modified — sent as repeated --files-changed options (the CLI treats a space-separated string as ONE path)" }
       ),
+      command_proof_files: Type.Optional(Type.Array(
+        Type.String({ description: "Canonical claim-bound command-proof artifact path; State validates its identity and contents", minLength: 1, maxLength: 512 }),
+        { maxItems: 16, description: "Up to 16 proof paths within the shared 12,000-character argv budget" },
+      )),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!isValidTaskId(params.task_id)) return invalidTaskId(params.task_id);
+      const proofs = params.command_proof_files ?? [];
+      if (!Array.isArray(proofs) || proofs.length > 16 || proofs.some((p) => typeof p !== "string" || !p.trim() || p.length > 512 || p.startsWith("-") || p.includes("\0"))) {
+        return toolResult({ ok: false, stdout: "", stderr: "invalid command-proof paths: at most 16 non-option paths of 1-512 characters", exitCode: -1 });
+      }
       const args = [params.task_id];
       if (params.commands) args.push("--commands", params.commands);
       for (const f of params.files_changed) args.push("--files-changed", f);
+      for (const proof of proofs) args.push("--command-proof-file", proof);
       return toolResult(await runAnvil("submit", args, undefined, ctx.cwd, signal, WRAPPER_OPTS));
     },
   });
@@ -185,12 +195,12 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("anvil:submit", {
-    description: "Submit evidence: /anvil:submit T001 --commands 'pytest -q'",
+    description: "Submit evidence: /anvil:submit T001 --commands 'pytest -q' --files-changed src/x.py [--command-proof-file <path>]...",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const trimmed = (args ?? "").trim();
       if (!trimmed) {
-        ctx.ui.notify("usage: /anvil:submit <task-id> [--commands <cmds>] [--files-changed <files>]", "warning");
+        ctx.ui.notify("usage: /anvil:submit <task-id> --commands <cmds> --files-changed <path> [--files-changed <path>]... [--command-proof-file <path>]...", "warning");
         return;
       }
       // Quote-aware tokenizer: '--commands "pytest -q"' survives verbatim;
@@ -208,18 +218,26 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
       // Unknown args are rejected, not silently dropped.
-      const known = new Set(["--commands", "--files-changed"]);
+      const known = new Set(["--commands", "--files-changed", "--command-proof-file"]);
       const cmdArgs = [id];
+      let proofCount = 0;
       for (let i = 0; i < rest.length; i++) {
         const flag = rest[i];
         if (!known.has(flag)) {
-          ctx.ui.notify(`usage: unknown argument "${flag}" (supported: --commands, --files-changed)`, "warning");
+          ctx.ui.notify(`usage: unknown argument "${flag}" (supported: --commands, --files-changed, --command-proof-file)`, "warning");
           return;
         }
         const value = rest[i + 1];
         if (value === undefined || value.startsWith("--")) {
           ctx.ui.notify(`usage: ${flag} requires a value`, "warning");
           return;
+        }
+        if (flag === "--command-proof-file") {
+          proofCount++;
+          if (proofCount > 16 || !value.trim() || value.length > 512 || value.startsWith("-") || value.includes("\0")) {
+            ctx.ui.notify("usage: command-proof-file requires at most 16 non-option paths of 1-512 characters", "warning");
+            return;
+          }
         }
         cmdArgs.push(flag, value);
         i++;

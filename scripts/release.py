@@ -2,7 +2,7 @@
 """anvil release helper — bump the version in lockstep across every pinned file.
 
 A version bump touches four core files (enforced by tests/test_version_sync.py),
-five per-harness packaging manifests (tests/test_install_manifests.py), the
+portable and per-harness packaging manifests (tests/test_install_manifests.py), the
 CHANGELOG, and the user-facing version/schema examples in the docs — and it is
 easy to miss one by hand. This script does all of it from one command, so a
 release is `python3 scripts/release.py minor` instead of a grep-and-edit hunt.
@@ -26,6 +26,7 @@ What it edits (relative to the repo root):
         bin/src/anvil/__init__.py
         bin/uv.lock
     packaging manifests (version-locked to anvil.__version__):
+        plugin.json                         portable root plugin manifest
         packaging/codex/.codex-plugin/plugin.json
         packaging/codex/.agents/plugins/marketplace.json
         packaging/gemini/gemini-extension.json
@@ -52,6 +53,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 MANIFESTS = [
+    "plugin.json",
     "packaging/codex/.codex-plugin/plugin.json",
     "packaging/codex/.agents/plugins/marketplace.json",
     "packaging/gemini/gemini-extension.json",

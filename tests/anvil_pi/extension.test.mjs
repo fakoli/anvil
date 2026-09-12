@@ -423,6 +423,55 @@ await test("anvil_claim tool maps optional params to CLI flags", async () => {
   }
 });
 
+await test("anvil_submit forwards bounded command-proof files without shell interpretation", async () => {
+  useFakeEnv();
+  try {
+    const pi = makePi();
+    await extensionMod.default(pi);
+    const files = ["evidence/proof one.json", "evidence/proof;literal.json"];
+    await pi.registry.tools.anvil_submit.execute("t1", {
+      task_id: "T001", commands: "pytest -q", files_changed: ["src/a.py"], command_proof_files: files,
+    }, undefined, undefined, makeCtx({}));
+    assert.deepEqual(readLastArgs().split("\n").filter(Boolean), [
+      "submit", "T001", "--commands", "pytest -q", "--files-changed", "src/a.py",
+      "--command-proof-file", files[0], "--command-proof-file", files[1], "--json",
+    ]);
+    const property = pi.registry.tools.anvil_submit.parameters.properties.command_proof_files;
+    assert.equal(property.maxItems, 16);
+    assert.equal(property.items.maxLength, 512);
+    const maximum = await pi.registry.tools.anvil_submit.execute("t1", {
+      task_id: "T001", commands: "c".repeat(2000),
+      files_changed: ["f".repeat(512)],
+      command_proof_files: Array.from({ length: 16 }, () => "p".repeat(512)),
+    }, undefined, undefined, makeCtx({}));
+    assert.equal(maximum.details.isError, false, "bounded proof payload fits the dedicated wrapper cap");
+    rmSync(join(recordDir, "last-args"), { force: true });
+    const tooLarge = await tools.runAnvil("submit", ["x".repeat(12001)], envWithFake(), undefined, undefined, { via: "dedicated", maxArgChars: 50000, maxTotalChars: 12000 });
+    assert.equal(tooLarge.ok, false);
+    assert.equal(existsSync(join(recordDir, "last-args")), false);
+    const combined = await pi.registry.tools.anvil_submit.execute("t1", { task_id: "T001", commands: "c".repeat(2000), files_changed: Array.from({ length: 64 }, () => "f".repeat(512)), command_proof_files: Array.from({ length: 16 }, () => "p".repeat(512)) }, undefined, undefined, makeCtx({}));
+    assert.equal(combined.details.isError, true);
+    rmSync(join(recordDir, "last-args"), { force: true });
+    const denied = await pi.registry.tools.anvil_submit.execute("t1", {
+      task_id: "T001", commands: "pytest -q", files_changed: ["src/a.py"], command_proof_files: ["--approve"],
+    }, undefined, undefined, makeCtx({}));
+    assert.equal(denied.details.isError, true);
+    assert.equal(existsSync(join(recordDir, "last-args")), false);
+    const ctx = makeCtx({});
+    await pi.registry.commands["anvil:submit"].handler("T001 --commands 'pytest -q' --files-changed src/a.py --command-proof-file 'evidence/proof one.json'", ctx);
+    assert.ok(readLastArgs().includes("--command-proof-file\nevidence/proof one.json\n"));
+    rmSync(join(recordDir, "last-args"), { force: true });
+    await pi.registry.commands["anvil:submit"].handler(`T001 --commands ok --files-changed src/a.py ${Array.from({ length: 17 }, (_, i) => `--command-proof-file p${i}`).join(" ")}`, ctx);
+    assert.equal(existsSync(join(recordDir, "last-args")), false);
+    for (const proof of ["-o", "-"]) {
+      await pi.registry.commands["anvil:submit"].handler(`T001 --commands ok --files-changed src/a.py --command-proof-file ${proof}`, ctx);
+      assert.equal(existsSync(join(recordDir, "last-args")), false, `${proof} must not spawn anvil`);
+    }
+  } finally {
+    restoreEnv();
+  }
+});
+
 await test("commands are silent in print mode (ctx.hasUI false)", async () => {
   useFakeEnv();
   try {
@@ -557,7 +606,7 @@ if (hasRealAnvil) {
   // on the real CLI (M4 dogfood caught packet rejecting --json).
   const flagContract = {
     packet: ["--format"],
-    submit: ["--commands", "--files-changed"],
+    submit: ["--commands", "--files-changed", "--command-proof-file"],
     claim: ["--actor", "--lease", "--force"],
     apply: ["--approve", "--reject", "--reason"],
   };

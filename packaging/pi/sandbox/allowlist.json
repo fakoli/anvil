@@ -7,7 +7,7 @@
       "extensions": [
         {
           "source": "path:../anvil-pi/extension.ts",
-          "tree_sha256": "a7fbb67d056c10b804d819fb6e4b3fba80d16095b2fcbb327e18f03d3caa1961"
+          "tree_sha256": "efadaf282f1a2bcb9e411100849a9d630bbf484f9e462b7481e9f40b6893deb4"
         }
       ],
       "tools": [

@@ -126,9 +126,12 @@ export const MAX_RUN_ARGS_TOTAL_CHARS = 4000;
 
 /** Structured-wrapper caps (submit/commands payloads are long by design). */
 export const MAX_WRAPPER_ARG_CHARS = 2000;
-export const MAX_WRAPPER_ARGS_TOTAL_CHARS = 8000;
+/** Cross-platform dedicated argv budget; generic run stays at 4,000 chars. */
+export const MAX_WRAPPER_ARGS_TOTAL_CHARS = 12000;
+export const MAX_WRAPPER_ARGS = 192;
 
 export interface AnvilRunOptions {
+  maxArgs?: number;
   maxArgChars?: number;
   maxTotalChars?: number;
   timeoutMs?: number;
@@ -183,9 +186,12 @@ export function runAnvil(
   }
   const maxArgChars = options.maxArgChars ?? MAX_RUN_ARG_CHARS;
   const maxTotalChars = options.maxTotalChars ?? MAX_RUN_ARGS_TOTAL_CHARS;
+  const maxArgs = options.via === "dedicated"
+    ? Math.min(options.maxArgs ?? MAX_RUN_ARGS, MAX_WRAPPER_ARGS)
+    : MAX_RUN_ARGS;
   const cleanArgs = args.filter((a) => typeof a === "string" && a.length > 0);
-  if (cleanArgs.length > MAX_RUN_ARGS) {
-    return Promise.resolve({ ok: false, stdout: "", stderr: `too many args (${cleanArgs.length} > ${MAX_RUN_ARGS})`, exitCode: -1 });
+  if (cleanArgs.length > maxArgs) {
+    return Promise.resolve({ ok: false, stdout: "", stderr: `too many args (${cleanArgs.length} > ${maxArgs})`, exitCode: -1 });
   }
   if (cleanArgs.some((a) => a.length > maxArgChars) || cleanArgs.join(" ").length > maxTotalChars) {
     return Promise.resolve({ ok: false, stdout: "", stderr: `args exceed size caps (${maxArgChars} per arg, ${maxTotalChars} total)`, exitCode: -1 });
