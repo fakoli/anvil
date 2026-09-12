@@ -25,12 +25,18 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 IMAGE=${ANVIL_SANDBOX_IMAGE:-}
 BUILD=0
 CONFIG_FLAG=""
-if [ "${1:-}" = "--build" ]; then BUILD=1; shift; fi
-if [ "${1:-}" = "--config" ]; then
-  [ "$#" -ge 2 ] || { echo "pi-sandbox-docker: --config requires a file argument" >&2; exit 2; }
-  CONFIG_FLAG=$2
-  shift 2
-fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --build) BUILD=1; shift ;;
+    --config)
+      [ "$#" -ge 2 ] || { echo "pi-sandbox-docker: --config requires a file argument" >&2; exit 2; }
+      CONFIG_FLAG=$2
+      shift 2
+      ;;
+    --*) echo "pi-sandbox-docker: unknown option $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
 [ "$#" -eq 3 ] || {
   echo "usage: pi-sandbox-docker.sh [--build] [--config FILE] <profile> <task-file> <workspace>" >&2
   exit 2
@@ -55,12 +61,18 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 # ---- run-config resolution (fail-closed; validator prints KEY<TAB>VALUE) ----
+# Same early env-neutralization as pi-sandbox-run.sh: NODE_OPTIONS/LD_* are
+# consumed at node process startup — sanitizing inside the script would be late.
+unset NODE_OPTIONS NODE_PATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT \
+      DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH BASH_ENV ENV \
+      PYTHONSTARTUP PYTHONPATH ZDOTDIR RUBYOPT
 tab=$(printf '\t')
-config_args=""
-[ -n "$CONFIG_FLAG" ] && config_args="--config $CONFIG_FLAG"
-CONFIG_OUT=$(node "$script_dir/pi-sandbox-config.mjs" resolve \
-  --profile "$PROFILE" --workspace "$WORKSPACE" \
-  --allowlist "$script_dir/../packaging/pi/sandbox/allowlist.json" $config_args) || {
+set -- resolve --profile "$PROFILE" --workspace "$WORKSPACE" \
+  --allowlist "$script_dir/../packaging/pi/sandbox/allowlist.json"
+if [ -n "$CONFIG_FLAG" ]; then
+  set -- "$@" --config "$CONFIG_FLAG"
+fi
+CONFIG_OUT=$(node "$script_dir/pi-sandbox-config.mjs" "$@") || {
   echo "pi-sandbox-docker: run-config resolution failed (exit $?)" >&2
   exit 2
 }
@@ -69,7 +81,7 @@ while IFS= read -r line; do
   [ -n "$line" ] || continue
   key=${line%%"$tab"*}
   val=${line#*"$tab"}
-  if [ "$key" = "$line" ] || [ -z "$val" ] && [ "$key" != "IMAGE" ] && [ "$key" != "MAX_CONTAINERS" ]; then
+  if [ "$key" = "$line" ] || { [ -z "$val" ] && [ "$key" != "IMAGE" ] && [ "$key" != "MAX_CONTAINERS" ]; }; then
     echo "pi-sandbox-docker: malformed config output line: $line" >&2
     exit 2
   fi
@@ -128,13 +140,22 @@ fi
 WORK_ABS=$(cd -- "$WORKSPACE" && pwd -P)
 TASK_ABS=$(cd -- "$(dirname -- "$TASK_FILE")" && pwd -P)/$(basename -- "$TASK_FILE")
 
+if [ "$BUILD" -eq 1 ]; then
+  repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+  docker build -f "$repo_root/packaging/pi/sandbox/Dockerfile" -t "$IMAGE" "$repo_root"
+fi
+
 # Match the host user so bind-mounted workspaces (host-owned) are writable by
 # the child; tmpfs ownership below must follow. Keeps the non-root guarantee.
 HOST_UID=$(id -u); HOST_GID=$(id -g)
 
 # ---- max_containers guard (advisory: TOCTOU tolerated) ----------------------
 if [ -n "$CONFIG_MAX" ]; then
-  running=$(docker ps --filter label=anvil.sandbox=pi-sandbox --filter status=running -q | wc -l | tr -d '[:space:]')
+  ps_ids=$(docker ps --filter label=anvil.sandbox=pi-sandbox --filter status=running -q) || {
+    echo "pi-sandbox-docker: cannot verify running-container count (docker ps failed)" >&2
+    exit 2
+  }
+  running=$(printf '%s' "$ps_ids" | grep -c . || true)
   if [ "$running" -ge "$CONFIG_MAX" ]; then
     echo "pi-sandbox-docker: refusing launch — $running sandbox container(s) already running, max_containers=$CONFIG_MAX" >&2
     exit 2

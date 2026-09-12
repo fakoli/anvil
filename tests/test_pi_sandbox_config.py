@@ -405,3 +405,121 @@ def test_docker_build_refuses_digest_image(fake_docker: Path, sandbox_home: Path
     r = run_docker("--build", "unattended-exec", str(task), str(workspace), home=sandbox_home)
     assert r.returncode == 2
     assert "digest-pinned" in r.stderr
+
+# ---- review follow-ups: gaps closed -----------------------------------------
+
+
+def test_docker_build_invoked(fake_docker: Path, sandbox_home: Path, workspace: Path) -> None:
+    task = workspace / "task.txt"
+    task.write_text("hi")
+    r = run_docker("--build", "unattended-exec", str(task), str(workspace), home=sandbox_home)
+    assert r.returncode == 0, r.stderr
+    build_argv = (fake_docker / "build-argv").read_text().splitlines()
+    dockerfile = str(REPO_ROOT / "packaging" / "pi" / "sandbox" / "Dockerfile")
+    assert dockerfile in build_argv
+    assert build_argv[build_argv.index("-t") + 1] == "anvil-pi-sandbox"
+    assert (fake_docker / "run-argv").exists()
+
+
+def test_docker_flags_any_order(fake_docker: Path, sandbox_home: Path, workspace: Path, tmp_path: Path) -> None:
+    cfgdir = tmp_path / "my configs"
+    cfgdir.mkdir()
+    cfg = cfgdir / "sandbox.json"
+    cfg.write_text(json.dumps({"caps": "docker-default"}))
+    task = workspace / "task.txt"
+    task.write_text("hi")
+    r = run_docker("--config", str(cfg), "--build", "unattended-exec", str(task), str(workspace), home=sandbox_home)
+    assert r.returncode == 0, r.stderr
+    argv = docker_run_argv(fake_docker)
+    assert "--cap-drop" not in argv
+    assert (fake_docker / "build-argv").exists()
+
+
+def test_docker_config_flag_with_spaces(fake_docker: Path, sandbox_home: Path, workspace: Path, tmp_path: Path) -> None:
+    cfgdir = tmp_path / "my configs"
+    cfgdir.mkdir()
+    cfg = cfgdir / "sandbox.json"
+    cfg.write_text(json.dumps({"caps": "docker-default"}))
+    task = workspace / "task.txt"
+    task.write_text("hi")
+    r = run_docker("--config", str(cfg), "unattended-exec", str(task), str(workspace), home=sandbox_home)
+    assert r.returncode == 0, r.stderr
+    argv = docker_run_argv(fake_docker)
+    assert "--cap-drop" not in argv
+    assert "caps=docker-default" in r.stderr
+
+
+FAKE_NODE = """#!/bin/sh
+printf '%b\\n' "$FAKE_NODE_OUT"
+exit 0
+"""
+
+
+@pytest.fixture()
+def fake_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bindir = tmp_path / "fake-node-bin"
+    bindir.mkdir()
+    fake = bindir / "node"
+    fake.write_text(FAKE_NODE)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    return bindir
+
+
+def test_fake_node_malformed_output_refused(
+    fake_node: Path, fake_docker: Path, sandbox_home: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = workspace / "task.txt"
+    task.write_text("hi")
+    monkeypatch.setenv("FAKE_NODE_OUT", "GARBAGE")
+    r = run_docker("unattended-exec", str(task), str(workspace), home=sandbox_home)
+    assert r.returncode == 2
+    assert "malformed" in r.stderr
+    assert not (fake_docker / "run-argv").exists()
+
+
+def test_fake_node_non_none_network_refused(
+    fake_node: Path, fake_docker: Path, sandbox_home: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = workspace / "task.txt"
+    task.write_text("hi")
+    monkeypatch.setenv("FAKE_NODE_OUT", "NETWORK\\tinference")
+    r = run_docker("unattended-exec", str(task), str(workspace), home=sandbox_home)
+    assert r.returncode == 2
+    assert 'only network "none"' in r.stderr
+    assert not (fake_docker / "run-argv").exists()
+
+
+def test_env_image_shape_edges(fake_docker: Path, sandbox_home: Path, workspace: Path) -> None:
+    task = workspace / "task.txt"
+    task.write_text("hi")
+    r = run_docker("unattended-exec", str(task), str(workspace), home=sandbox_home, extra_env={"ANVIL_SANDBOX_IMAGE": "a;b"})
+    assert r.returncode == 2
+    assert "unexpected characters" in r.stderr
+
+    r2 = run_docker("unattended-exec", str(task), str(workspace), home=sandbox_home, extra_env={"ANVIL_SANDBOX_IMAGE": "evil:tag"})
+    assert r2.returncode == 0, r2.stderr  # documented env escape hatch: tag refs stay allowed
+    assert docker_run_argv(fake_docker)[-3] == "evil:tag"
+
+
+def test_unknown_option_mjs(sandbox_home: Path, workspace: Path) -> None:
+    r = run_config("resolve", "--bogus", home=sandbox_home)
+    assert r.returncode == 2
+    assert "unknown option" in r.stderr
+
+
+def test_fifo_config_refused_fast(sandbox_home: Path, workspace: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo not available")
+    (workspace / ".pi").mkdir()
+    fifo = workspace / ".pi" / "sandbox.config.json"
+    os.mkfifo(fifo)
+    r = run_config(
+        "resolve",
+        "--profile", "unattended-exec",
+        "--workspace", str(workspace),
+        "--allowlist", str(ALLOWLIST),
+        home=sandbox_home,
+    )
+    assert r.returncode == 2
+    assert "not a regular file" in r.stderr

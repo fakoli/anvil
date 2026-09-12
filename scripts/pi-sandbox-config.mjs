@@ -15,10 +15,10 @@
 //
 // Output protocol (for the sh wrapper): one KEY<TAB>VALUE line per field.
 // Values contain no tabs/newlines by construction.
-// Exit codes: 0 ok · 2 policy/usage · 3 config struct · 4 missing input.
+// Exit codes: 0 ok · 2 policy/usage · 3 config struct.
 // Stdlib node only; no subprocesses.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 
@@ -70,6 +70,17 @@ function parseArgv(argv) {
 // ---- file loading ----------------------------------------------------------
 
 function loadJsonFile(file, label) {
+  // Regular files only: a FIFO at a config path would block readFileSync
+  // forever (hang = fail-closed by omission, but refuse loudly instead).
+  let st;
+  try {
+    st = statSync(file);
+  } catch (e) {
+    fail(EXIT_POLICY, `${label}: cannot stat ${file}: ${e.code ?? e.message}`);
+  }
+  if (!st.isFile()) {
+    fail(EXIT_POLICY, `${label}: ${file} is not a regular file`);
+  }
   let raw;
   try {
     raw = readFileSync(file, "utf8");
@@ -111,6 +122,9 @@ function checkNetwork(config, where, profileNetwork) {
     );
   }
   if (profileNetwork === "none" && v !== "none") {
+    // Future-proofing: NETWORK_VALUES is ["none"] today, so this branch is
+    // unreachable until "inference" ships — kept as the second gate so a
+    // future enum widening cannot silently loosen a none-profile.
     fail(EXIT_POLICY, `${where}: network ${JSON.stringify(v)} is looser than the profile's network posture ("${profileNetwork}") — refusing`);
   }
 }
