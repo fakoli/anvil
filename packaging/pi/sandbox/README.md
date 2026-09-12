@@ -92,6 +92,10 @@ scripts/pi-sandbox-run.sh --profile unattended-exec --workspace . \
 
 ## Run config (docker path)
 
+> Host prerequisite: the wrapper resolves the run config with `node` before
+> touching Docker — a host without `node` fails fast (exit 4, Docker never
+> invoked), including for the legacy three-argument invocation.
+
 Knobs that were hardcoded are now settable through an optional run config,
 resolved + validated fail-closed by `scripts/pi-sandbox-config.mjs` (schema:
 `sandbox.config.schema.json`):

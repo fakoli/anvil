@@ -295,6 +295,35 @@ def test_malformed_json_is_struct_error(sandbox_home: Path, workspace: Path) -> 
     assert r.returncode == 3
 
 
+def test_image_registry_port_and_tag_forms_accepted(sandbox_home: Path, workspace: Path) -> None:
+    """greptile P2: digest refs from private registries (host:port, tag+digest)."""
+    for ref in [
+        "localhost:5000/anvil@" + DIGEST,
+        "registry.example:5000/team/anvil:stable@" + DIGEST,
+        "registry.example:5000/team/deep/anvil@" + DIGEST,
+    ]:
+        (sandbox_home / ".config" / "anvil" / "sandbox.config.json").write_text(json.dumps({"image": ref}))
+        r = run_config(
+            "resolve",
+            "--profile", "unattended-exec",
+            "--workspace", str(workspace),
+            "--allowlist", str(ALLOWLIST),
+            home=sandbox_home,
+        )
+        assert r.returncode == 0, f"{ref} refused: {r.stderr}"
+    # option-shaped and space-bearing values still refused
+    for bad in ["--privileged", "a b@sha256:" + "a" * 64, "host:/img@sha256:" + "a" * 64]:
+        (sandbox_home / ".config" / "anvil" / "sandbox.config.json").write_text(json.dumps({"image": bad}))
+        r = run_config(
+            "resolve",
+            "--profile", "unattended-exec",
+            "--workspace", str(workspace),
+            "--allowlist", str(ALLOWLIST),
+            home=sandbox_home,
+        )
+        assert r.returncode == 3, f"{bad} unexpectedly accepted"
+
+
 def test_validate_verb(sandbox_home: Path, tmp_path: Path) -> None:
     good = tmp_path / "good.json"
     good.write_text(json.dumps({"caps": "docker-default"}))

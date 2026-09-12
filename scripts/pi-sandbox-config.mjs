@@ -30,7 +30,12 @@ const NETWORK_VALUES = ["none"]; // "inference" reserved, not implemented on the
 const CAPS_PRESETS = ["all-dropped", "docker-default"];
 const MAX_CONTAINERS_MIN = 1;
 const MAX_CONTAINERS_MAX = 256;
-const IMAGE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]*@sha256:[a-f0-9]{64}$/;
+// Docker reference grammar (digest REQUIRED — see validateDigestImage):
+//   [host[:port]/]name[.…][:tag]@sha256:<64hex> — hosts may carry a port,
+//   paths may nest, a tag may precede the digest; everything else (spaces,
+//   option-shaped values, unpinned refs, malformed digests) is refused.
+const IMAGE_RE =
+  /^(?:[a-zA-Z0-9][a-zA-Z0-9.-]*(?::[0-9]+)?\/)?[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9._-]+)*(?::[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$/;
 
 const CONFIG_KEYS = ["image", "network", "caps", "max_containers"];
 const PROJECT_ALLOWED_KEYS = ["max_containers"];
