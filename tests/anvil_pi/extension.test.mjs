@@ -454,6 +454,9 @@ await test("anvil_submit forwards bounded command-proof files without shell inte
     const ctx = makeCtx({});
     await pi.registry.commands["anvil:submit"].handler("T001 --commands 'pytest -q' --files-changed src/a.py --command-proof-file 'evidence/proof one.json'", ctx);
     assert.ok(readLastArgs().includes("--command-proof-file\nevidence/proof one.json\n"));
+    rmSync(join(recordDir, "last-args"), { force: true });
+    await pi.registry.commands["anvil:submit"].handler(`T001 --commands ok --files-changed src/a.py ${Array.from({ length: 17 }, (_, i) => `--command-proof-file p${i}`).join(" ")}`, ctx);
+    assert.equal(existsSync(join(recordDir, "last-args")), false);
   } finally {
     restoreEnv();
   }

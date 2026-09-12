@@ -52,6 +52,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 MANIFESTS = [
+    "plugin.json",
     "packaging/codex/.codex-plugin/plugin.json",
     "packaging/codex/.agents/plugins/marketplace.json",
     "packaging/gemini/gemini-extension.json",

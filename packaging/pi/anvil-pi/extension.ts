@@ -220,6 +220,7 @@ export default function (pi: ExtensionAPI): void {
       // Unknown args are rejected, not silently dropped.
       const known = new Set(["--commands", "--files-changed", "--command-proof-file"]);
       const cmdArgs = [id];
+      let proofCount = 0;
       for (let i = 0; i < rest.length; i++) {
         const flag = rest[i];
         if (!known.has(flag)) {
@@ -230,6 +231,13 @@ export default function (pi: ExtensionAPI): void {
         if (value === undefined || value.startsWith("--")) {
           ctx.ui.notify(`usage: ${flag} requires a value`, "warning");
           return;
+        }
+        if (flag === "--command-proof-file") {
+          proofCount++;
+          if (proofCount > 16 || !value.trim() || value.length > 512 || value.includes("\0")) {
+            ctx.ui.notify("usage: command-proof-file requires at most 16 non-option paths of 1-512 characters", "warning");
+            return;
+          }
         }
         cmdArgs.push(flag, value);
         i++;

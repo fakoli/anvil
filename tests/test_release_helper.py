@@ -21,6 +21,7 @@ _SCRIPT = _REPO / "scripts" / "release.py"
 # CLAUDE.md and the two enforcement tests). If a manifest is added there, this
 # list — and release.py — must gain it too; that is the point of the guard.
 _PINNED = [
+    "plugin.json",
     ".claude-plugin/plugin.json",
     "bin/pyproject.toml",
     "bin/src/anvil/__init__.py",
