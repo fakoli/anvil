@@ -101,7 +101,7 @@ export default function (pi: ExtensionAPI): void {
     name: "anvil_submit",
     label: "Anvil submit",
     description:
-      "Submit execution evidence for a claimed anvil task. Optional command_proof_files are passed to State's claim-bound proof validator; this tool does not mint proofs or approve acceptance.",
+      "Submit evidence; all fields share a 12,000-character dedicated argv budget. Proofs are validated by State; this tool never approves acceptance.",
     parameters: Type.Object({
       task_id: taskIdParam,
       // REQUIRED by the CLI (`anvil submit --help` marks both *): making them
@@ -114,7 +114,7 @@ export default function (pi: ExtensionAPI): void {
       ),
       command_proof_files: Type.Optional(Type.Array(
         Type.String({ description: "Canonical claim-bound command-proof artifact path; State validates its identity and contents", minLength: 1, maxLength: 512 }),
-        { maxItems: 16, description: "Existing proof artifacts, sent as repeated --command-proof-file options" },
+        { maxItems: 16, description: "Up to 16 proof paths within the shared 12,000-character argv budget" },
       )),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {

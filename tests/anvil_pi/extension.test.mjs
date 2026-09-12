@@ -441,14 +441,16 @@ await test("anvil_submit forwards bounded command-proof files without shell inte
     assert.equal(property.items.maxLength, 512);
     const maximum = await pi.registry.tools.anvil_submit.execute("t1", {
       task_id: "T001", commands: "c".repeat(2000),
-      files_changed: Array.from({ length: 64 }, () => "f".repeat(512)),
+      files_changed: ["f".repeat(512)],
       command_proof_files: Array.from({ length: 16 }, () => "p".repeat(512)),
     }, undefined, undefined, makeCtx({}));
-    assert.equal(maximum.details.isError, false, "all declared maximum inputs fit the dedicated wrapper caps");
+    assert.equal(maximum.details.isError, false, "bounded proof payload fits the dedicated wrapper cap");
     rmSync(join(recordDir, "last-args"), { force: true });
-    const tooLarge = await tools.runAnvil("submit", ["x".repeat(49153)], envWithFake(), undefined, undefined, { via: "dedicated", maxArgChars: 50000, maxTotalChars: 49152 });
+    const tooLarge = await tools.runAnvil("submit", ["x".repeat(12001)], envWithFake(), undefined, undefined, { via: "dedicated", maxArgChars: 50000, maxTotalChars: 12000 });
     assert.equal(tooLarge.ok, false);
     assert.equal(existsSync(join(recordDir, "last-args")), false);
+    const combined = await pi.registry.tools.anvil_submit.execute("t1", { task_id: "T001", commands: "c".repeat(2000), files_changed: Array.from({ length: 64 }, () => "f".repeat(512)), command_proof_files: Array.from({ length: 16 }, () => "p".repeat(512)) }, undefined, undefined, makeCtx({}));
+    assert.equal(combined.details.isError, true);
     rmSync(join(recordDir, "last-args"), { force: true });
     const denied = await pi.registry.tools.anvil_submit.execute("t1", {
       task_id: "T001", commands: "pytest -q", files_changed: ["src/a.py"], command_proof_files: ["--approve"],

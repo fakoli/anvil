@@ -60,7 +60,7 @@ def test_dry_run_plans_every_pinned_file() -> None:
     r = _dry_run("patch")
     assert r.returncode == 0, r.stderr
     for rel in _PINNED:
-        assert rel in r.stdout, f"release.py --dry-run did not plan an edit for {rel}"
+        assert f"edit {rel}:" in r.stdout, f"release.py --dry-run did not plan an edit for {rel}"
 
 
 def test_dry_run_updates_user_facing_docs() -> None:

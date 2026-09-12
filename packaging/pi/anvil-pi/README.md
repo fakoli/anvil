@@ -35,7 +35,8 @@ Recommended pin: an exact tag; M3's `anvil install pi` writes this for you.
   options are passed as separate elements (`["--actor", "alice"]`). Args
   containing `--json` or a bare `--` separator are rejected so the appended
   flag cannot be displaced. Structured wrappers accept longer payloads
-  (≤2,000 chars/arg).
+  (≤2,000 chars/arg, ≤12,000 characters aggregate); individual field maxima
+  share this aggregate budget and cannot necessarily be combined.
 - Task IDs that could be reinterpreted as CLI flags (leading `-`, whitespace)
   are rejected before spawn.
 
@@ -56,14 +57,14 @@ Recommended pin: an exact tag; M3's `anvil install pi` writes this for you.
 ## Commands
 
 `anvil_submit.command_proof_files` optionally accepts up to 16 existing proof
-artifact paths (512 characters each, subject to the dedicated wrapper's 49,152-character
+artifact paths (512 characters each, subject to the dedicated wrapper's 12,000-character
 aggregate argument cap, measured with JavaScript string length). State performs canonical, claim-bound proof validation. Passing a file
 does not establish content freshness or grant acceptance: the project's trusted
 verification policy and human review gate remain authoritative. The interactive
 `/anvil:submit` also accepts repeated `--command-proof-file` options.
 
 `/anvil:status`, `/anvil:next`, `/anvil:claim <id>`, `/anvil:submit <id>
-[--commands <cmds>] [--files-changed <files>]` — thin UI over the same tools;
+[--commands <cmds>] [--files-changed <files>] [--command-proof-file <path> ...]` — thin UI over the same tools;
 silent in print/JSON modes.
 
 ## Session snapshot
