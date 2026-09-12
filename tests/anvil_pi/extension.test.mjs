@@ -576,4 +576,17 @@ if (hasRealAnvil) {
   console.log("  skip contract: real anvil CLI not on PATH");
 }
 
+
+await test("single-line output over the byte cap keeps a head slice, not nothing", () => {
+  // pi's truncateHead EMPTIES single-line payloads over the byte cap
+  // (firstLineExceedsLimit) — anvil's status/next JSON dumps are single-line,
+  // so presentResult must slice instead of handing the model nothing.
+  const big = "x".repeat(tools.TOOL_OUTPUT_MAX_BYTES + 2048);
+  const out = tools.presentResult({ ok: true, stdout: big, stderr: "", exitCode: 0 });
+  assert.equal(out.isError, false);
+  assert.ok(out.text.startsWith("x"), "head slice starts at byte 0");
+  assert.ok(out.text.length > tools.TOOL_OUTPUT_MAX_BYTES / 2, "head slice retains data");
+  assert.ok(out.text.includes("[truncated:"), "truncation note present");
+});
+
 console.log(`\n${passed} anvil-pi tests passed`);
