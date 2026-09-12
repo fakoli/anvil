@@ -277,6 +277,23 @@ export const TOOL_OUTPUT_MAX_BYTES = 12_000;
 /** Hard cap on error text surfaced to the model. */
 export const ERROR_MAX_CHARS = 2_000;
 
+/** Longest prefix of `buf` that is valid UTF-8. A byte slice can cut a
+ * multibyte character; at most 3 trailing bytes form an incomplete sequence,
+ * so shrinking ≤ 3 bytes always finds a clean boundary. */
+export function utf8SafePrefix(buf: Buffer): Buffer {
+  for (let trim = 0; trim < 4; trim++) {
+    const slice = buf.subarray(0, buf.length - trim);
+    if (slice.length === 0) return slice;
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(slice);
+      return slice;
+    } catch {
+      /* partial sequence at the tail — shrink one byte */
+    }
+  }
+  return buf.subarray(0, 0);
+}
+
 /** Parse + truncate CLI stdout for tool results. EVERY branch is capped —
  * including failure stderr, so a giant traceback can never blow the bound. */
 export function presentResult(result: AnvilCliResult): { text: string; isError: boolean } {
@@ -291,11 +308,16 @@ export function presentResult(result: AnvilCliResult): { text: string; isError: 
     if (truncation.firstLineExceedsLimit) {
       // pi's truncateHead returns EMPTY content when the FIRST line alone
       // exceeds the byte cap (firstLineExceedsLimit) — which is exactly what
-      // anvil's single-line JSON dumps look like. Keep a byte-slice head so
-      // the agent still gets the leading data instead of nothing.
-      text = Buffer.from(result.stdout, "utf8").subarray(0, TOOL_OUTPUT_MAX_BYTES).toString("utf8");
+      // anvil's single-line JSON dumps look like. Keep a UTF-8-safe byte-slice
+      // head so the agent still gets the leading data instead of nothing.
+      const buf = Buffer.from(result.stdout, "utf8");
+      const kept = utf8SafePrefix(buf.subarray(0, TOOL_OUTPUT_MAX_BYTES));
+      text =
+        kept.toString("utf8") +
+        `\n[truncated single-line output: showing first ${kept.length}/${buf.length} bytes (cut at a UTF-8 boundary); rerun with narrower args or use anvil directly]`;
+    } else {
+      text += `\n[truncated: ${truncation.outputLines}/${truncation.totalLines} lines, ${truncation.outputBytes}/${truncation.totalBytes} bytes; rerun with narrower args or use anvil directly]`;
     }
-    text += `\n[truncated: ${truncation.outputLines}/${truncation.totalLines} lines, ${truncation.outputBytes}/${truncation.totalBytes} bytes; rerun with narrower args or use anvil directly]`;
   }
   return { text, isError: false };
 }

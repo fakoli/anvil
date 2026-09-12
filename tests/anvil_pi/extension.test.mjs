@@ -224,7 +224,7 @@ test("presentResult caps oversized stdout AND oversized stderr", () => {
   const bigOut = JSON.stringify({ blob: "x".repeat(tools.TOOL_OUTPUT_MAX_BYTES + 5000) });
   const out = tools.presentResult({ ok: true, stdout: bigOut, stderr: "", exitCode: 0 });
   assert.ok(out.text.length < bigOut.length);
-  assert.match(out.text, /\[truncated:/);
+  assert.match(out.text, /\[truncated/); // single-line payloads use the byte-count variant
   const bigErr = "E".repeat(5000);
   const err = tools.presentResult({ ok: false, stdout: "", stderr: bigErr, exitCode: 1 });
   assert.ok(err.text.length <= "anvil error: ".length + tools.ERROR_MAX_CHARS + 2, `len ${err.text.length}`);
@@ -586,7 +586,21 @@ await test("single-line output over the byte cap keeps a head slice, not nothing
   assert.equal(out.isError, false);
   assert.ok(out.text.startsWith("x"), "head slice starts at byte 0");
   assert.ok(out.text.length > tools.TOOL_OUTPUT_MAX_BYTES / 2, "head slice retains data");
-  assert.ok(out.text.includes("[truncated:"), "truncation note present");
+  assert.ok(out.text.includes("[truncated single-line output:"), "single-line truncation note present");
+});
+
+await test("utf8SafePrefix trims at a character boundary, never splits multibyte chars", () => {
+  // "é" is 2 bytes; place the byte-cap cut exactly mid-character
+  const prefix = "x".repeat(tools.TOOL_OUTPUT_MAX_BYTES - 1);
+  const stdout = prefix + "é".repeat(50);
+  const out = tools.presentResult({ ok: true, stdout, stderr: "", exitCode: 0 });
+  assert.ok(out.text.startsWith(prefix), "retains the byte-prefix content");
+  assert.ok(!out.text.includes("\uFFFD"), "no replacement chars at the cut");
+  assert.ok(out.text.includes(`showing first ${tools.TOOL_OUTPUT_MAX_BYTES - 1}/`), "reports the retained byte count accurately");
+  assert.ok(out.text.includes(`/${Buffer.byteLength(stdout, "utf8")} bytes`), "reports the total byte count");
+  const big = "x".repeat(tools.TOOL_OUTPUT_MAX_BYTES + 2048);
+  const ascii = tools.presentResult({ ok: true, stdout: big, stderr: "", exitCode: 0 });
+  assert.ok(ascii.text.includes(`showing first ${tools.TOOL_OUTPUT_MAX_BYTES}/${big.length} bytes`), "pure-ASCII cut keeps the full cap");
 });
 
 console.log(`\n${passed} anvil-pi tests passed`);
