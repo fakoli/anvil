@@ -6,6 +6,20 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-09-12
+
+### Added
+
+- Pi's native `anvil_submit` tool and `/anvil:submit` command can forward
+  bounded, claim-bound command-proof artifact paths to Anvil State for its
+  existing validation. The extension never creates proofs or approves work.
+
+### Fixed
+
+- The dedicated Pi wrapper now applies a bounded argument-count limit that
+  accommodates the documented command-proof inputs without weakening the
+  generic `anvil_run` boundary.
+
 ## [0.6.7] - 2026-09-10
 
 ### Added
