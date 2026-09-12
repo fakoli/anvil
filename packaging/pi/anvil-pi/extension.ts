@@ -234,7 +234,7 @@ export default function (pi: ExtensionAPI): void {
         }
         if (flag === "--command-proof-file") {
           proofCount++;
-          if (proofCount > 16 || !value.trim() || value.length > 512 || value.includes("\0")) {
+          if (proofCount > 16 || !value.trim() || value.length > 512 || value.startsWith("-") || value.includes("\0")) {
             ctx.ui.notify("usage: command-proof-file requires at most 16 non-option paths of 1-512 characters", "warning");
             return;
           }

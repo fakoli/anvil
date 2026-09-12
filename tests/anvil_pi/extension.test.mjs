@@ -457,6 +457,10 @@ await test("anvil_submit forwards bounded command-proof files without shell inte
     rmSync(join(recordDir, "last-args"), { force: true });
     await pi.registry.commands["anvil:submit"].handler(`T001 --commands ok --files-changed src/a.py ${Array.from({ length: 17 }, (_, i) => `--command-proof-file p${i}`).join(" ")}`, ctx);
     assert.equal(existsSync(join(recordDir, "last-args")), false);
+    for (const proof of ["-o", "-"]) {
+      await pi.registry.commands["anvil:submit"].handler(`T001 --commands ok --files-changed src/a.py --command-proof-file ${proof}`, ctx);
+      assert.equal(existsSync(join(recordDir, "last-args")), false, `${proof} must not spawn anvil`);
+    }
   } finally {
     restoreEnv();
   }
