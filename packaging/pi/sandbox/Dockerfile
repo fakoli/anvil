@@ -65,10 +65,10 @@ COPY packaging/pi/sandbox/dogfood-sequence.json /opt/anvil-sandbox/dogfood-seque
 RUN node /opt/anvil-sandbox/packaging/pi/sandbox/verify-baked-pins.mjs
 
 RUN chmod 0755 /opt/anvil-sandbox/packaging/pi/sandbox/entrypoint.sh \
-    && useradd --create-home --uid 10001 fakoli \
+    && useradd --create-home --uid 10001 sandbox \
     && mkdir -p /work /seed \
-    && chown fakoli:fakoli /work /seed
-USER fakoli
+    && chown sandbox:sandbox /work /seed
+USER sandbox
 WORKDIR /work
 
 # Scratch writable space (staging dirs, agent dir) on an otherwise read-only rootfs.

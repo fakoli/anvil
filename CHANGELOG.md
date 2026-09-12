@@ -3619,7 +3619,7 @@ Phase 1: Plugin scaffold. No executable state operations ship in this release �
 - `.claude-plugin/plugin.json` — plugin manifest declaring name, version (`1.0.0`), description, author, repository, license, and marketplace keywords.
 - `README.md` — positions anvil against CCPM and issue-tracker-as-state patterns; documents the "5 must-do-better" list; install instructions (git clone until marketplace publication); Quick Start teaser for the intended `anvil init` flow; architecture overview; 8-phase build status table; integration notes for fakoli-flow and fakoli-crew.
 - `CHANGELOG.md` — this file; Keep a Changelog format.
-- `LICENSE` — MIT license, copyright 2026 Sekou Doumbouya.
+- `LICENSE` — MIT license, copyright 2026 (author attribution kept neutral for privacy).
 - `docs/specs/2026-05-24-anvil-v0.md` — canonical build specification: data model, CLI command set, MCP tool surface, hook event mappings, phasing plan, and integration contracts.
 - `bin/anvil` — bash wrapper that invokes `uv run python -m anvil.cli`; `--version` stub returns `1.0.0`.
 - `bin/anvil-mcp` — bash wrapper that invokes `uv run python -m anvil.mcp_server`; stubbed pending Phase 6 with a clean error message instead of a raw Python traceback.

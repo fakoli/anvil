@@ -4,7 +4,7 @@
   "version": "0.6.7",
   "description": "Local-first, runtime-neutral project state for humans and AI coding agents — turn PRDs into lockable, evidence-backed work packets. Hermes portable-plugin manifest (Agent Plugins v1).",
   "author": {
-    "name": "Sekou Doumbouya",
+    "name": "Fakoli",
     "url": "https://github.com/fakoli"
   },
   "repository": "https://github.com/fakoli/anvil",

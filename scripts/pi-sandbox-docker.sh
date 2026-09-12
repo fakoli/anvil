@@ -173,7 +173,7 @@ set -- docker run \
   --label anvil.sandbox=pi-sandbox \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,uid=$HOST_UID,gid=$HOST_GID,size=128m \
   --tmpfs /seed:rw,nosuid,nodev,uid=$HOST_UID,gid=$HOST_GID,size=8m \
-  --tmpfs /home/fakoli:rw,nosuid,nodev,size=64m \
+  --tmpfs /home/sandbox:rw,nosuid,nodev,size=64m \
   --pids-limit 256 \
   --memory 2g \
   --ulimit nofile=256:256 \
