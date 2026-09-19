@@ -8,6 +8,7 @@ import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -559,6 +560,49 @@ def test_log_ahead_refuses_without_healing(populated: SqliteBackend) -> None:
     assert refusal.value.error.code is ReadErrorCode.projection_not_converged
     assert (root / "state.db").read_bytes() == before_db
     assert events.read_bytes() == poisoned_log
+
+
+def test_complete_final_event_without_newline_converges(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    events = root / "events.jsonl"
+    baseline = read_project_snapshot(root)
+    original = events.read_bytes()
+    assert original.endswith(b"\n")
+    events.write_bytes(original.removesuffix(b"\n"))
+
+    assert read_project_snapshot(root) == baseline
+
+
+def test_spool_refuses_unterminated_noncanonical_event_over_exact_byte_limit() -> None:
+    def record(padding: int) -> bytes:
+        document = Event(
+            id="E1",
+            timestamp=_NOW,
+            actor="snapshot-test",
+            action="state.initialized",
+            target_kind="project",
+            target_id="project-1",
+            payload_json={"padding": "x" * padding},
+        ).model_dump(mode="json", exclude_none=True)
+        return json.dumps(document, separators=(", ", ": ")).encode()
+
+    base = record(0)
+    oversized = record(snapshot_module._MAX_EVENT_RECORD_BYTES - len(base) + 1)
+    assert len(oversized) == snapshot_module._MAX_EVENT_RECORD_BYTES + 1
+
+    spool = sqlite3.connect(":memory:")
+    spool.execute(
+        "CREATE TABLE event_spool ("
+        "id TEXT PRIMARY KEY, record BLOB NOT NULL, parent_id TEXT, lamport INTEGER)"
+    )
+    try:
+        with pytest.raises(ProjectSnapshotError) as refusal:
+            snapshot_module._spool_event_log(BytesIO(oversized), spool)
+    finally:
+        spool.close()
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
 
 
 def test_spoofed_feature_ownership_and_dependency_cycle_refuse_atomically(
