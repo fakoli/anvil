@@ -7686,8 +7686,8 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_twenty(self) -> None:
-        """Transactional claim Git bindings ship before SCHEMA_VERSION == 21
+    def test_schema_version_is_twenty_two(self) -> None:
+        """Root-set claim bindings ship at SCHEMA_VERSION == 22
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
@@ -7697,7 +7697,8 @@ class TestSchemaVersionPhase8:
         v16 = typed PRD assumptions; v17 = claim generations + attestations;
         v18 = exact revision-bound PRD source provenance;
         v19 = engine-derived task-rejection provenance;
-        v20 = transactional task and bundle claim Git bindings)."""
+        v20 = transactional task and bundle claim Git bindings; v21 =
+        revision-bound PRD lifecycle; v22 = root-set claim bindings)."""
         assert SCHEMA_VERSION == 22
         assert f"PRAGMA user_version = {SCHEMA_VERSION};" in DDL
 

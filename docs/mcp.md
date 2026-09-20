@@ -1533,7 +1533,7 @@ None.
 
 ```json
 {
-  "api_version": "14",
+  "api_version": "15",
   "engine_version": "0.6.8",
   "display_version": "0.6.8",
   "build_kind": "release_artifact",
@@ -1541,7 +1541,7 @@ None.
   "tag": "v0.6.8",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 21,
+  "schema_version": 22,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],
@@ -1596,7 +1596,7 @@ this skill/release contract.
 
 For the v0.6.5 / Workbench provider-v1 compatibility profile, consumers must
 fail closed before reading state unless the manifest reports exact
-`api_version == "14"`, operation-catalog version 1, the required operation at
+`api_version == "15"`, operation-catalog version 1, the required operation at
 version 1, and the exact version-1 schema resource paths. Do not infer
 compatibility from the engine version. The provider reads use their cataloged
 CLI transports; an MCP-only host can still discover and pin the same contract
