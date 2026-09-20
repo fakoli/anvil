@@ -17,7 +17,6 @@ from anvil.roots.registry import RootSetError, root_set_use_authorized
 from anvil.state.backend import EventRejected
 from anvil.state.models import EventDraft
 
-
 runner = CliRunner()
 
 
