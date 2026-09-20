@@ -45,6 +45,7 @@ from anvil.read_contracts import (
 )
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.hashing import canonical_json_bytes
+from anvil.state.payloads import PlanningBatchAppliedPayload
 from anvil.state.sqlite import query_only_transaction
 
 PRD_CONTENT_DIGEST_DOMAIN = b"anvil.prd-content.v1\0"
@@ -248,12 +249,23 @@ def _source_binding_is_projected(
     try:
         rows = connection.execute(
             "SELECT action, payload_json FROM events "
-            "WHERE action IN ('prd.parsed', 'prd.revised')"
+            "WHERE action IN ('prd.parsed', 'prd.revised', 'planning.batch_applied')"
         )
         for action, payload_json in rows:
             payload = json.loads(payload_json)
             if not isinstance(payload, dict):
                 continue
+            if action == "planning.batch_applied":
+                batch = PlanningBatchAppliedPayload.model_validate(payload)
+                if batch.prd_id != ref.prd_id:
+                    continue
+                operation = next((
+                    item for item in batch.operations
+                    if item.action in {"prd.parsed", "prd.revised"}
+                ), None)
+                if operation is None:
+                    continue
+                action, payload = operation.action, operation.payload_json
             event_prd_id = payload.get("prd_id", "default")
             event_revision = (
                 1 if action == "prd.parsed" else payload.get("revision")
