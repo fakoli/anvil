@@ -99,6 +99,7 @@ Independent software reviewers used deterministic tests and code inspection.
 | Separate client author reviewing Serving lifecycle/output | Found dispatch after local consent revocation, advisory cleanup delaying core stage shutdown, and digest syntax without input equality. Author added request-bound gates, reordered stop signaling, and exact sanitized-input digest checks. |
 | Privacy reviewer, Serving configuration | Found concurrent disable lost at policy publication. Existing owner locking now covers every supported writer; opened-file generation rejects stale policy. Final security/privacy re-review passed in both repositories (Anvil 297 checks; Serving 104). |
 | GitHub Copilot | Required independent current-head PR review before merge; final disposition belongs in the PR record. |
+| Automatic PR review, qualification gate | Found that a completed label mismatch still exited successfully. Reproduced with a failing regression, then required both full completion and matching expectations; matching, mismatching, unavailable, and dry-run cases are covered. Existing live results retain their original source digests. |
 
 Initial full Anvil run: 5,316 passed, 85 skipped, two failures. The failures were
 the CLI documentation count and frozen release contract. Updating the roster

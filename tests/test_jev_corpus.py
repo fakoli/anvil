@@ -7,10 +7,12 @@ must retain every outcome separately and never rewrite this file to fit it.
 import copy
 import json
 import math
+import sys
 from collections import Counter
 from pathlib import Path
 
 import pytest
+from scripts import qualify_jev
 
 from anvil.jev import CAPABILITIES, MAX_INPUT_BYTES, JevConfig, _json_bytes, _questions
 from anvil.jev_questions import build_questions, reject_secrets
@@ -58,3 +60,32 @@ def test_case_has_bounded_deterministic_request_and_valid_independent_labels(cas
             ceiling = len(question["criteria"]) - 1 if question["type"] == "score" else 1
             assert 0 <= low <= high <= ceiling
     assert "expected" not in state and "label_rationale" not in state
+
+
+@pytest.mark.parametrize(
+    ("live", "used", "answer", "exit_code"),
+    [(True, True, "supports", 0), (True, True, "contradicts", 1),
+     (True, False, None, 1), (False, False, None, 0)],
+)
+def test_qualification_exit_requires_completed_matching_labels(
+    tmp_path, monkeypatch, live, used, answer, exit_code,
+):
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([CASES[4]]), encoding="utf-8")
+    output = tmp_path / "report.json"
+    monkeypatch.chdir(CASES_PATH.parents[3])
+    monkeypatch.setattr(sys, "argv", [
+        "qualify_jev", "--cases", str(cases), "--output", str(output),
+        *(["--live"] if live else []),
+    ])
+    monkeypatch.setattr(qualify_jev, "evaluate", lambda *args, **kwargs: {
+        "used": used, "answers": {"relation": {"choice": answer}} if used else {},
+        "elapsed_ms": 1, "usage": {"input_tokens": 1, "output_tokens": 1},
+    })
+
+    assert qualify_jev.main() == exit_code
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["summary"]["completed"] == int(used)
+    assert report["cases"][0]["matches_expected"] == (
+        used and answer == "supports" if live else None
+    )

@@ -121,7 +121,12 @@ def main() -> int:
         json.dump(report, output, indent=2, ensure_ascii=False, allow_nan=False)
         output.write("\n")
     print(json.dumps(report["summary"]))
-    return 0 if not args.live or len(latencies) == len(cases) else 1
+    if args.live and (
+        len(latencies) != len(cases)
+        or report["summary"]["matches_expected"] != len(cases)
+    ):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
