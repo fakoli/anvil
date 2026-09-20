@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-09-19
+
 ## [0.6.8] - 2026-09-12
 
 ### Added

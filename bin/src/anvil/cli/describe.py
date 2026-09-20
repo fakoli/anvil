@@ -278,14 +278,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "14",
-          "engine_version": "0.6.8",
-          "display_version": "0.6.8",
-          "schema_version": 21,
+          "api_version": "15",
+          "engine_version": "0.6.9",
+          "display_version": "0.6.9",
+          "schema_version": 22,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.8",
+          "tag": "v0.6.9",
           "tag_distance": 0,
           "dirty": false,
           "cli": {
