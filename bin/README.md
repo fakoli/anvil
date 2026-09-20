@@ -9,7 +9,7 @@ coordinate on without conflicts.
 Current release: **v0.6.9** (schema 22, public API contract 15). The release
 adds revision-safe PRD lifecycle gates, transactional Git claims, bounded
 provider reads, scoped task routing, and faster no-UAC Windows test feedback;
-see the [full changelog](https://github.com/fakoli/anvil/blob/v0.6.5/CHANGELOG.md).
+see the [full changelog](https://github.com/fakoli/anvil/blob/v0.6.9/CHANGELOG.md).
 
 Runtime compatibility: the published package requires Python 3.11+,
 Pydantic 2.11.7+, and FastMCP 3.x (3.0.0 or newer). These are the lowest
