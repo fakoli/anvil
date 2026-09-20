@@ -2,6 +2,8 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
+> CLI: 76 executable leaf commands.
+
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
