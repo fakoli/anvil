@@ -1239,6 +1239,21 @@ class SqliteBackend:
                     if isinstance(exc, RootSetError):
                         raise EventRejected(f"{exc.code}: {exc}") from exc
                     raise EventRejected("root_set_authorization_required") from exc
+        if draft.action == "evidence.submitted" and isinstance(draft.payload_json, dict):
+            claim_id = draft.payload_json.get("claim_id")
+            if isinstance(claim_id, str):
+                row = conn.execute(
+                    "SELECT root_set FROM claims WHERE id = ?", (claim_id,)
+                ).fetchone()
+                if row is not None and row[0] is not None:
+                    try:
+                        require_root_set_use_authorization(
+                            RootSetClaimBinding.model_validate(json.loads(row[0]))
+                        )
+                    except (RootSetError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                        if isinstance(exc, RootSetError):
+                            raise EventRejected(f"{exc.code}: {exc}") from exc
+                        raise EventRejected("root_set_authorization_required") from exc
 
         with self._append_lock():
             if self._events_storage == "git":
@@ -12547,6 +12562,80 @@ class SqliteBackend:
                 return False
         return True
 
+    def _check_root_set_evidence_binding(
+        self,
+        *,
+        claim_id: str,
+        stored_root_set: str | None,
+        submitted: dict[str, Any] | None,
+        evidence_id: str,
+        commands_run: list[str],
+        files_changed: list[str],
+    ) -> None:
+        """Keep coordinated evidence bound to the retained canonical claim.
+
+        The live registry capability authorizes use, but it intentionally is not
+        an evidence serializer.  This local check is therefore also required for
+        direct backend writers and for replay: no global registry access occurs
+        while SQLite validates the historical claim facts.
+        """
+        if stored_root_set is None:
+            if submitted is not None:
+                raise EventRejected(
+                    "evidence.submitted: ordinary claims cannot carry root-set evidence."
+                )
+            return
+        if submitted is None:
+            raise EventRejected(
+                "evidence.submitted: coordinated claims require root-set evidence."
+            )
+        try:
+            binding = RootSetClaimBinding.model_validate(json.loads(stored_root_set))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise EventRejected(
+                "evidence.submitted: retained coordinated claim binding is invalid."
+            ) from exc
+        roots = submitted["roots"]
+        expected = {fact.root_id: fact for fact in binding.root_facts}
+        actual = {item["root_id"]: item for item in roots}
+        if set(actual) != set(expected):
+            raise EventRejected(
+                "evidence.submitted: root-set evidence roots do not match the canonical claim."
+            )
+        for root_id, fact in expected.items():
+            item = actual[root_id]
+            if (
+                item["baseline_sha"] != fact.baseline_sha
+                or item["commands"] != list(fact.verification_commands)
+            ):
+                raise EventRejected(
+                    "evidence.submitted: root-set evidence does not match frozen root facts."
+                )
+        expected_digest = binding.evidence_owner_manifest_digest(
+            claim_id=claim_id,
+            submission_id=submitted["submission_id"],
+            serving_manifest_digest=submitted["serving_manifest_digest"],
+            roots=roots,
+        )
+        if submitted["owner_manifest_digest"] != expected_digest:
+            raise EventRejected(
+                "evidence.submitted: root-set evidence owner digest does not match "
+                "the canonical claim."
+            )
+        expected_commands = [command for root in roots for command in root["commands"]]
+        expected_files = [
+            f"{root['root_id']}/{path}" for root in roots for path in root["files"]
+        ]
+        if (
+            evidence_id != "EVROOT-" + expected_digest[:24]
+            or commands_run != expected_commands
+            or files_changed != expected_files
+        ):
+            raise EventRejected(
+                "evidence.submitted: root-set evidence summary does not match "
+                "immutable per-root material."
+            )
+
     def _check_evidence_submitted(
         self,
         conn: sqlite3.Connection,
@@ -12608,7 +12697,7 @@ class SqliteBackend:
         task_id: str = payload.task_id
 
         claim_row = conn.execute(
-            "SELECT task_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
+            "SELECT task_id, claimed_by, root_set FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if claim_row is None:
             raise EventRejected(
@@ -12623,6 +12712,14 @@ class SqliteBackend:
             raise EventRejected(
                 "evidence.submitted: only the exact claim owner may submit evidence."
             )
+        self._check_root_set_evidence_binding(
+            claim_id=claim_id,
+            stored_root_set=claim_row[2],
+            submitted=payload.root_set_evidence,
+            evidence_id=evidence_id,
+            commands_run=payload.commands_run,
+            files_changed=payload.files_changed,
+        )
         active_bundle_child = conn.execute(
             "SELECT id FROM claims WHERE task_id = ? AND status = 'active' "
             "AND bundle_claim_id IS NOT NULL",
