@@ -423,10 +423,13 @@ def _spool_event_log(
             break
         if len(line) > _MAX_EVENT_RECORD_BYTES + 1:
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        if not line.endswith(b"\n") or line.startswith(b"\xef\xbb\xbf"):
+        record_line = line.removesuffix(b"\n")
+        if len(record_line) > _MAX_EVENT_RECORD_BYTES:
+            _refuse(ReadErrorCode.projection_not_converged, field="projection")
+        if line.startswith(b"\xef\xbb\xbf"):
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
         try:
-            document = _strict_json(line[:-1])
+            document = _strict_json(record_line)
             _validate_raw_event_document(document)
             event = Event.model_validate(document)
             record = canonical_json_bytes(
