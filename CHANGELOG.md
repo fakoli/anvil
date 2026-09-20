@@ -6,6 +6,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-09-19
+
+### Added
+
+- `anvil roots request-digest` derives a lost root-set claim response's immutable
+  lookup identity from its original task, actor, State checkout, and request file
+  without reading or mutating the owner registry or canonical project State.
+
 ## [0.6.9] - 2026-09-19
 
 ### Added

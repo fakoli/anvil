@@ -84,6 +84,61 @@ def test_disposable_cli_root_claim_conflict_status_and_release(tmp_path, monkeyp
         "roots", "claim", primary_task["id"], "--request-file", str(request_path),
         "--actor", "root-test", "--cwd", str(app_root), "--json",
     ], catch_exceptions=False))["data"]
+    before_lookup = ((app_root / ".anvil" / "events.jsonl").read_bytes(),
+                     (app_root / ".anvil" / "state.db").read_bytes(),
+                     (home / ".anvil" / "root-sets" / "registry.json").read_bytes(),
+                     request_path.read_bytes(),
+                     _git(app_root, "rev-parse", "HEAD"),
+                     _git(app_root, "status", "--porcelain=v1", "--untracked-files=all"))
+    missing_actor = runner.invoke(app, [
+        "roots", "request-digest", primary_task["id"], "--request-file", str(request_path),
+        "--cwd", str(app_root), "--json",
+    ], catch_exceptions=False)
+    assert missing_actor.exit_code == 2
+    assert "--actor" in missing_actor.output and "Missing option" in missing_actor.output
+    recovered_identity = _json(runner.invoke(app, [
+        "roots", "request-digest", primary_task["id"], "--request-file", str(request_path),
+        "--actor", "root-test", "--cwd", str(app_root), "--json",
+    ], catch_exceptions=False))["data"]
+    assert recovered_identity == {"schema": "anvil.root-set-request-digest/v1", "request_id": "request-one", "request_digest": claimed["request_digest"]}
+    assert before_lookup == (
+        (app_root / ".anvil" / "events.jsonl").read_bytes(),
+        (app_root / ".anvil" / "state.db").read_bytes(),
+        (home / ".anvil" / "root-sets" / "registry.json").read_bytes(),
+        request_path.read_bytes(),
+        _git(app_root, "rev-parse", "HEAD"),
+        _git(app_root, "status", "--porcelain=v1", "--untracked-files=all"),
+    )
+    drifted_digests = []
+    for changed_task, changed_actor, changed_request in (
+        ("T999", "root-test", request),
+        (primary_task["id"], "other-actor", request),
+        (primary_task["id"], "root-test", request | {"roots": [request["roots"][0] | {"expected_files": ["other.py"]}, request["roots"][1]]}),
+    ):
+        changed_path = tmp_path / f"changed-{len(drifted_digests)}.json"
+        changed_path.write_text(json.dumps(changed_request), encoding="utf-8")
+        identity = _json(runner.invoke(app, [
+            "roots", "request-digest", changed_task, "--request-file", str(changed_path),
+            "--actor", changed_actor, "--cwd", str(app_root), "--json",
+        ], catch_exceptions=False))["data"]
+        assert identity["request_digest"] != recovered_identity["request_digest"]
+        drifted_digests.append(identity["request_digest"])
+    other_state = _repo(tmp_path / "other-state")
+    monkeypatch.chdir(other_state)
+    assert runner.invoke(app, ["init", "--with-sample"], catch_exceptions=False).exit_code == 0
+    other_identity = _json(runner.invoke(app, [
+        "roots", "request-digest", primary_task["id"], "--request-file", str(request_path),
+        "--actor", "root-test", "--cwd", str(other_state), "--json",
+    ], catch_exceptions=False))["data"]
+    assert other_identity["request_digest"] != recovered_identity["request_digest"]
+    drifted_digests.append(other_identity["request_digest"])
+    for wrong_digest in drifted_digests:
+        refused = runner.invoke(app, [
+            "roots", "status", "--request-id", "request-one", "--request-digest", wrong_digest,
+            "--actor", "root-test", "--cwd", str(app_root), "--json",
+        ], catch_exceptions=False)
+        assert refused.exit_code == 1
+        assert json.loads(refused.output)["error"]["code"] == "root_set_reconciliation_required"
     assert claimed["status"] == "ready" and len(claimed["roots"]) == 2
     assert all(Path(root["claim_worktree"]).is_dir() for root in claimed["roots"])
     assert all(root["baseline_sha"] for root in claimed["roots"])
@@ -174,7 +229,7 @@ def test_disposable_cli_root_claim_conflict_status_and_release(tmp_path, monkeyp
     registry_data["reservations"]["request-one"]["claim_id"] = None
     registry_path.write_text(json.dumps(registry_data), encoding="utf-8")
     reconciled = _json(runner.invoke(app, [
-        "roots", "reconcile", "--request-id", "request-one", "--request-digest", claimed["request_digest"],
+        "roots", "reconcile", "--request-id", "request-one", "--request-digest", recovered_identity["request_digest"],
         "--actor", "root-test", "--cwd", str(app_root), "--json",
     ], catch_exceptions=False))["data"]
     assert reconciled["status"] == "ready"
@@ -389,6 +444,6 @@ def test_readiness_refusal_before_prelog_is_cancellable(tmp_path, monkeypatch):
     with RootSetRegistry().locked() as data:
         reservation = data["reservations"]["blocked-before-prelog"]
         assert reservation["state_append_attempted"] is False
-        request_digest_value = reservation["digest"]
+        request_digest_value = _json(runner.invoke(app, ["roots", "request-digest", task["id"], "--request-file", str(request_path), "--actor", "owner", "--cwd", str(repo), "--json"], catch_exceptions=False))["data"]["request_digest"]
     cancelled = runner.invoke(app, ["roots", "reconcile", "--request-id", "blocked-before-prelog", "--request-digest", request_digest_value, "--actor", "owner", "--cancel-if-no-claim", "--cwd", str(repo), "--json"], catch_exceptions=False)
     assert cancelled.exit_code == 0, cancelled.output

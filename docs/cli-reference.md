@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> CLI: 76 executable leaf commands.
+> CLI: 77 executable leaf commands.
 
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.9 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.10 (schema 22)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1080,8 +1080,15 @@ The request uses `anvil.root-set-request/v1` with a stable `request_id`, one
 `verification_commands`. The primary must be the State checkout and use the
 task's declared verification commands; secondary commands come from enrollment.
 
+If a claim response is lost, derive its lookup identity from the retained
+original inputs without reading the owner registry:
+
+```bash
+anvil roots request-digest T001 --request-file root-set.json --actor agent --json
+```
+
 `anvil roots status --request-id ID --request-digest SHA256 --actor ACTOR` and
-`anvil roots reconcile` require the original actor and immutable digest. A
+`anvil roots reconcile` require that original actor and immutable digest. A
 claim is `ready` only after every retained Git target and its canonical claim
 facts match. Enrolled repositories reject ordinary and bundle claims, including
 `--force`; use this surface to coordinate them. Root-set renew and release use
