@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> CLI: 79 executable leaf commands.
+> CLI: 86 executable leaf commands.
 
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.11 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.12 (schema 22)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1833,6 +1833,28 @@ flag list; full prose treatment may follow in a later pass.
   Dependency-batch refusals are bounded and do not expose raw payload or
   backend validation details. A rejected batch adds nothing to `events.jsonl`
   and leaves the complete dependency projection unchanged.
+
+**Optional Jev assistance** (default off; never proof or action authority)
+
+- `anvil jev status` — Inspect effective, non-secret policy without reading a
+  credential or probing the provider (`--json`).
+- `anvil jev enable CAPABILITY` — Enable one capability in project config;
+  `--allow-api` explicitly grants API permission without changing the planner.
+- `anvil jev disable [CAPABILITY]` — Disable all Jev calls or one capability;
+  preserves the configured provider and unrelated settings.
+- `anvil jev evaluate CAPABILITY --input FILE` — Evaluate deliberately selected
+  JSON only with `--allow-export`; `--no-jev` overrides enablement. Results
+  include typed answers, model/rubric/input provenance, and attempted-egress status.
+- `anvil jev assess --file FILE` — Keep local PRD findings separate from
+  optionally enabled, explicitly exported semantic acceptance-criterion advice.
+- `anvil jev audit --input FILE` — Evaluate up to 16 selected advisory items,
+  preserving independent results, source/policy checks, and a request count.
+- `anvil jev bridge` — Stateless bounded stdin/JSON contract for a trusted local
+  consumer that owns authorization and export policy; not a network authorization
+  service. No project initialization or state mutation.
+
+All seven accept `--json`. See [Optional Jev advice](how-to/optional-jev.md)
+for schemas, privacy, provenance, and explicit enable/disable workflows.
 
 **Diagnostics and health** (read-only)
 

@@ -1,0 +1,181 @@
+{
+  "schema": "anvil.jev.consumer-qualification.v1",
+  "synthetic_only": true,
+  "live": true,
+  "consumer": "Serving subprocess bridge to independently installed Anvil wheel",
+  "anvil_version": "0.6.12",
+  "corpus_sha256": "e4d3b39d83f25a93169f356aa72e6dec3d3634e06da322e14ecc13cf7e597810",
+  "results": [
+    {
+      "case_id": "skill_direct_match",
+      "capability": "skill_suggestion",
+      "consumer_elapsed_ms": 661,
+      "annotation": {
+        "schema": "anvil.jev.annotation.v1",
+        "provider": "typesafe",
+        "model": "jev-1.13.0",
+        "capability": "skill_suggestion",
+        "status": "completed",
+        "reason": "validated",
+        "requested": true,
+        "used": true,
+        "request_started": true,
+        "elapsed_ms": 415,
+        "rubric_digest": "4e8a4fdb69369b41f09639a1d5255f4cbae7247b088367f460393ca2c221e46a",
+        "input_digest": "4579ffcdec9024523d4d8e674ab7fd7fb05506c8fb7e42fa831a0c72fc68cc73",
+        "answers": {
+          "selection": {
+            "type": "choice",
+            "probabilities": {
+              "code_review": 1.0,
+              "slides": 0.0,
+              "none": 0.0
+            },
+            "confidence": 1.0,
+            "choice": "code_review"
+          }
+        },
+        "usage": {
+          "input_tokens": 488,
+          "output_tokens": 40
+        },
+        "advisory": true
+      }
+    },
+    {
+      "case_id": "context_direct_and_unrelated",
+      "capability": "context_ranking",
+      "consumer_elapsed_ms": 614,
+      "annotation": {
+        "schema": "anvil.jev.annotation.v1",
+        "provider": "typesafe",
+        "model": "jev-1.13.0",
+        "capability": "context_ranking",
+        "status": "completed",
+        "reason": "validated",
+        "requested": true,
+        "used": true,
+        "request_started": true,
+        "elapsed_ms": 373,
+        "rubric_digest": "49dfb831754d386a8469a4c0458c0c00e5ac4894e361546a66cdfd57644f902f",
+        "input_digest": "d0b060a5f5090bfb4197a28c2ec23cd09bf4d0e43c39885cb505fbb6e3c2c8b4",
+        "answers": {
+          "palette": {
+            "type": "score",
+            "probabilities": {
+              "0": 1.0,
+              "1": 0.0,
+              "2": 0.0
+            },
+            "confidence": 1.0,
+            "score": 0.0
+          },
+          "storage": {
+            "type": "score",
+            "probabilities": {
+              "0": 0.0,
+              "1": 0.0,
+              "2": 1.0
+            },
+            "confidence": 0.99,
+            "score": 1.99
+          }
+        },
+        "usage": {
+          "input_tokens": 536,
+          "output_tokens": 30
+        },
+        "advisory": true
+      },
+      "baseline": [
+        "storage",
+        "palette"
+      ],
+      "order": [
+        "storage",
+        "palette"
+      ]
+    },
+    {
+      "case_id": "incident_authentication",
+      "capability": "incident_triage",
+      "consumer_elapsed_ms": 625,
+      "annotation": {
+        "schema": "anvil.jev.annotation.v1",
+        "provider": "typesafe",
+        "model": "jev-1.13.0",
+        "capability": "incident_triage",
+        "status": "completed",
+        "reason": "validated",
+        "requested": true,
+        "used": true,
+        "request_started": true,
+        "elapsed_ms": 385,
+        "rubric_digest": "22972339d5ae2c314693ea60d0aed30e5e33dc2cfb0cecf1d1912e75824eb52c",
+        "input_digest": "a8b8743c7df3f986abd4a2bee06a79cf0e50a670dcc8c18745cd6710915db1ad",
+        "answers": {
+          "category": {
+            "type": "choice",
+            "probabilities": {
+              "incompatible_configuration": 0.0,
+              "authentication": 1.0,
+              "connectivity": 0.0,
+              "application_behavior": 0.0,
+              "unknown": 0.0,
+              "resource_exhaustion": 0.0,
+              "missing_dependency": 0.0,
+              "authorization_or_license": 0.0
+            },
+            "confidence": 1.0,
+            "choice": "authentication"
+          }
+        },
+        "usage": {
+          "input_tokens": 558,
+          "output_tokens": 87
+        },
+        "advisory": true
+      },
+      "next_check": "Inspect the selected client's credential reference and authentication status."
+    },
+    {
+      "case_id": "voice_information_not_execution",
+      "capability": "voice_intent",
+      "consumer_elapsed_ms": 615,
+      "annotation": {
+        "schema": "anvil.jev.annotation.v1",
+        "provider": "typesafe",
+        "model": "jev-1.13.0",
+        "capability": "voice_intent",
+        "status": "completed",
+        "reason": "validated",
+        "requested": true,
+        "used": true,
+        "request_started": true,
+        "elapsed_ms": 377,
+        "rubric_digest": "059dd201623290b57deec7e5809454676e881c3847160a4bf96da75ae3032a87",
+        "input_digest": "9679dcff77b7c335d880da59f0395108ff3a1b82a75a731aacc1f8d4176bcb7a",
+        "answers": {
+          "intent": {
+            "type": "choice",
+            "probabilities": {
+              "operational_change_request": 0.02,
+              "read_only_information": 0.87,
+              "unsupported": 0.0,
+              "conversation": 0.0,
+              "unclear": 0.11
+            },
+            "confidence": 0.84,
+            "choice": "read_only_information"
+          }
+        },
+        "usage": {
+          "input_tokens": 467,
+          "output_tokens": 61
+        },
+        "advisory": true
+      }
+    }
+  ],
+  "completed": 4
+}

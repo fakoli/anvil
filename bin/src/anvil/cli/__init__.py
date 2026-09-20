@@ -23,6 +23,7 @@ from anvil.cli.graph import graph
 from anvil.cli.hooks import hook_app
 from anvil.cli.init_status import init, status
 from anvil.cli.install import install
+from anvil.cli.jev import jev_app
 from anvil.cli.mcp_config import mcp_config
 from anvil.cli.merge_check import merge_check
 from anvil.cli.migrate import migrate_app, migrate_events
@@ -108,6 +109,7 @@ app.add_typer(bundle_app, name="bundle")
 app.add_typer(project_app, name="project")
 app.add_typer(repair_app, name="repair")
 app.add_typer(roots_app, name="roots")
+app.add_typer(jev_app, name="jev")
 
 # ---------------------------------------------------------------------------
 # --version callback

@@ -1,0 +1,25 @@
+[
+  {
+    "id": "handoff-readiness",
+    "capability": "evidence_triage",
+    "input": {
+      "claim": "The authenticated routed API is ready for use.",
+      "observation": "The backend process started. No routed request was tested."
+    }
+  },
+  {
+    "id": "release-note-grounding",
+    "capability": "evidence_triage",
+    "input": {
+      "claim": "This release deployed the feature to all running services.",
+      "observation": "The source branch passed unit tests and was merged. Running services were not upgraded."
+    }
+  },
+  {
+    "id": "missing-regression-experiment",
+    "capability": "proof_contracts",
+    "input": {
+      "claim": "The service configuration continues working after a machine restart."
+    }
+  }
+]
