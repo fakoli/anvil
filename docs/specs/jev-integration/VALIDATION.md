@@ -50,6 +50,12 @@ times were 661, 614, 625 and 615 ms for skill/context/incident/voice-text advice
 That includes CLI startup, unlike provider-only timing. It does not prove a
 deployed fleet path or a one-second voice SLA under contention.
 
+The [installed CLI audit run](evidence/audit-qualification-2026-09-20.json)
+then exercised the three-item example end to end in disposable local state:
+`insufficient`, `contradicts`, and `restart_persistence`, matching the three
+prewritten expectations. The event log was byte-identical before and after
+advice. This is separate from the frozen 40-case denominator.
+
 Earlier exploratory research produced three requests and fourteen questions.
 One initial fixture was ambiguous before clarification. Those observations
 are separate from this frozen corpus and are not added to its denominator.

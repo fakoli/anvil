@@ -1,0 +1,136 @@
+{
+  "synthetic_only": true,
+  "live": true,
+  "anvil_version": "0.6.12",
+  "events_unchanged": true,
+  "expected": [
+    "insufficient",
+    "contradicts",
+    "restart_persistence"
+  ],
+  "observed": [
+    "insufficient",
+    "contradicts",
+    "restart_persistence"
+  ],
+  "matches_expected": true,
+  "result": {
+    "ok": true,
+    "command": "jev audit",
+    "data": {
+      "schema": "anvil.jev.audit.v1",
+      "advisory": true,
+      "provider": "typesafe",
+      "source_digest": "1b7d9b60a5d5e7814d576d023f87432460e71bb45669ecb698b9f129a2079ce8",
+      "items": [
+        {
+          "id": "handoff-readiness",
+          "annotation": {
+            "schema": "anvil.jev.annotation.v1",
+            "provider": "typesafe",
+            "model": "jev-1.13.0",
+            "capability": "evidence_triage",
+            "status": "completed",
+            "reason": "validated",
+            "requested": true,
+            "used": true,
+            "request_started": true,
+            "elapsed_ms": 430,
+            "rubric_digest": "686a6f2bb3ebe3bd71c3f93cffaae3b6827e491a77451b343e62d9fa70d7cb1c",
+            "input_digest": "66527562b678e48570bb91045d7c744475342e7f56803a062c13a94126200948",
+            "answers": {
+              "relation": {
+                "type": "choice",
+                "probabilities": {
+                  "insufficient": 0.93,
+                  "contradicts": 0.07,
+                  "supports": 0.0
+                },
+                "confidence": 0.89,
+                "choice": "insufficient"
+              }
+            },
+            "usage": {
+              "input_tokens": 459,
+              "output_tokens": 46
+            }
+          }
+        },
+        {
+          "id": "release-note-grounding",
+          "annotation": {
+            "schema": "anvil.jev.annotation.v1",
+            "provider": "typesafe",
+            "model": "jev-1.13.0",
+            "capability": "evidence_triage",
+            "status": "completed",
+            "reason": "validated",
+            "requested": true,
+            "used": true,
+            "request_started": true,
+            "elapsed_ms": 353,
+            "rubric_digest": "686a6f2bb3ebe3bd71c3f93cffaae3b6827e491a77451b343e62d9fa70d7cb1c",
+            "input_digest": "8602b16946b21e97bbc9632900d5df530a9c0b2592b617b79d65a9c714fe757a",
+            "answers": {
+              "relation": {
+                "type": "choice",
+                "probabilities": {
+                  "supports": 0.0,
+                  "insufficient": 0.0,
+                  "contradicts": 1.0
+                },
+                "confidence": 1.0,
+                "choice": "contradicts"
+              }
+            },
+            "usage": {
+              "input_tokens": 465,
+              "output_tokens": 45
+            }
+          }
+        },
+        {
+          "id": "missing-regression-experiment",
+          "annotation": {
+            "schema": "anvil.jev.annotation.v1",
+            "provider": "typesafe",
+            "model": "jev-1.13.0",
+            "capability": "proof_contracts",
+            "status": "completed",
+            "reason": "validated",
+            "requested": true,
+            "used": true,
+            "request_started": true,
+            "elapsed_ms": 331,
+            "rubric_digest": "635f28f6b510d571deaab0a87be564144de357fe1c991b98a36c3f7fd2d511d1",
+            "input_digest": "e3aba2cac04e53fcb8715d6d4de4da0ca2377a3cc252cd50a70d8fbd557ef48b",
+            "answers": {
+              "category": {
+                "type": "choice",
+                "probabilities": {
+                  "restart_persistence": 0.85,
+                  "observable_behavior": 0.12,
+                  "failure_behavior": 0.0,
+                  "authorization_boundary": 0.0,
+                  "already_specific": 0.01,
+                  "routed_integration": 0.0,
+                  "needs_human_specification": 0.01,
+                  "deployment_identity": 0.01
+                },
+                "confidence": 0.83,
+                "choice": "restart_persistence"
+              }
+            },
+            "usage": {
+              "input_tokens": 534,
+              "output_tokens": 96
+            }
+          }
+        }
+      ],
+      "complete": true,
+      "input_count": 3,
+      "request_count": 3
+    }
+  }
+}
