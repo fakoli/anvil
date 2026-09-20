@@ -103,7 +103,10 @@ def main() -> int:
         }
         if latencies
         else {},
-        "limitations": "Synthetic illustrative corpus; not held-out production accuracy, calibration, or a security proof.",
+        "limitations": (
+            "Synthetic illustrative corpus; not held-out production accuracy, "
+            "calibration, or a security proof."
+        ),
     }
     sources = [
         "bin/src/anvil/jev.py",
