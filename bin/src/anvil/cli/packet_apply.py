@@ -924,6 +924,20 @@ def submit(
             typer.echo(f"Error: {message}", err=True)
             raise typer.Exit(code=1)
 
+        # Coordinated root-set claims have a dedicated owner CLI surface that
+        # validates every frozen root fact under the global coordinator.  The
+        # legacy submit path must never flatten those roots or crash on the
+        # backend's direct-write guard.
+        if task_claim.root_set is not None:
+            message = (
+                "root-set evidence must be submitted through "
+                "`anvil roots submit-evidence` with its retained owner manifest."
+            )
+            if json_output:
+                fail("submit", message, code="root_set_authorization_required")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1)
+
         # Parse repeatable / comma-separated arguments. --commands and
         # --files-changed are repeatable (one occurrence == one value), so a
         # value containing commas survives intact when the flag is repeated.

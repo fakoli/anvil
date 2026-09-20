@@ -1910,6 +1910,31 @@ class RootSetClaimBinding(BaseModel):
             raise ValueError("root-set digest does not match immutable root facts")
         return self
 
+    def evidence_owner_manifest_digest(
+        self,
+        *,
+        claim_id: str,
+        submission_id: str,
+        serving_manifest_digest: str,
+        roots: list[dict[str, Any]],
+    ) -> str:
+        """Derive a per-root evidence identity from immutable local claim facts."""
+        value = {
+            "claim_id": claim_id,
+            "request_id": self.request_id,
+            "request_digest": self.request_digest,
+            "reservation_id": self.reservation_id,
+            "root_set_digest": self.root_set_digest,
+            "submission_id": submission_id,
+            "serving_manifest_digest": serving_manifest_digest,
+            "roots": roots,
+        }
+        return hashlib.sha256(
+            json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        ).hexdigest()
+
 
 class Claim(BaseModel):
     """An exclusive lease that an agent holds on a Task while working on it."""

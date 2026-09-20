@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> CLI: 77 executable leaf commands.
+> CLI: 79 executable leaf commands.
 
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.10 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.11 (schema 22)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1096,6 +1096,18 @@ the existing `anvil renew` and `anvil release` commands. Release records a
 `release_pending` global overhold until runner-stop reconciliation can prove no
 write authority remains. MCP intentionally does not create, renew, or release
 coordinated root-set claims.
+
+Per-root evidence remains root-qualified through the owner surface. Submit a
+retained `anvil.root-set-evidence/v1` manifest, then use its read-only status
+command after an interrupted response:
+
+```bash
+anvil roots submit-evidence T001 --request-file root-set.json --manifest-file evidence.json --actor agent --json
+anvil roots evidence-status T001 --request-file root-set.json --manifest-file evidence.json --actor agent --json
+```
+
+This records evidence for the one frozen coordinated claim and leaves acceptance
+to the existing independent review flow.
 
 ## Execution bundles
 

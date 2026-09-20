@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -397,6 +399,122 @@ def _original_request_identity(*, task_id: str, request_file: Path, actor: str, 
     return request, request["request_id"], digest
 
 
+def _load_evidence_manifest(manifest_file: Path) -> dict[str, Any]:
+    """Read one bounded, literal root evidence manifest without path disclosure."""
+    try:
+        descriptor = os.open(
+            manifest_file,
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence manifest is unavailable.") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 262_144:
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence manifest must be a bounded regular file.")
+        raw = bytearray()
+        while len(raw) <= 262_144:
+            chunk = os.read(descriptor, min(262_145 - len(raw), 65_536))
+            if not chunk:
+                break
+            raw.extend(chunk)
+    finally:
+        os.close(descriptor)
+    if len(raw) > 262_144:
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence manifest exceeds its bound.")
+    try:
+        value = json.loads(bytes(raw).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence manifest must be valid UTF-8 JSON.") from exc
+    if not isinstance(value, dict) or set(value) != {"schema", "submission_id", "serving_manifest_digest", "roots"} or value.get("schema") != "anvil.root-set-evidence/v1":
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence manifest has an unsupported schema.")
+    try:
+        _require_id(value.get("submission_id"), "submission id")
+    except RootSetError as exc:
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence identity is invalid.") from exc
+    serving_digest = value.get("serving_manifest_digest")
+    if not isinstance(serving_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", serving_digest):
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence digest is invalid.")
+    roots = value.get("roots")
+    if not isinstance(roots, list) or not 1 <= len(roots) <= 16:
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence roots are invalid.")
+    result = []
+    seen: set[str] = set()
+    for item in roots:
+        if not isinstance(item, dict) or set(item) != {"root_id", "baseline_sha", "artifact_digest", "verification_digest", "commands", "files"}:
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence root is invalid.")
+        try:
+            root_id = _require_id(item.get("root_id"), "root id")
+        except RootSetError as exc:
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence root is invalid.") from exc
+        if root_id in seen:
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence roots must be unique.")
+        seen.add(root_id)
+        baseline = item.get("baseline_sha")
+        if not isinstance(baseline, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", baseline):
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence digest is invalid.")
+        for key in ("artifact_digest", "verification_digest"):
+            value_digest = item.get(key)
+            if not isinstance(value_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", value_digest):
+                raise RootSetError("root_set_evidence_invalid", "root-set evidence digest is invalid.")
+        try:
+            commands = _validate_commands(item.get("commands"))
+        except RootSetError as exc:
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence commands are invalid.") from exc
+        files = item.get("files")
+        if (not isinstance(files, list) or len(files) > 256
+                or any(not isinstance(path, str) or not path or len(path) > 512
+                       or path.startswith("/") or ".." in Path(path).parts
+                       or any(ord(char) < 32 or ord(char) == 127 for char in path)
+                       for path in files)):
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence files are invalid.")
+        result.append({"root_id": root_id, "baseline_sha": baseline,
+                       "artifact_digest": item["artifact_digest"],
+                       "verification_digest": item["verification_digest"],
+                       "commands": commands, "files": files})
+    return {"schema": value["schema"], "submission_id": value["submission_id"],
+            "serving_manifest_digest": serving_digest, "roots": result}
+
+
+def _root_evidence_payload(binding: object, claim_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Validate each immutable per-root submission fact and derive owner digest."""
+    facts = getattr(binding, "root_facts", ())
+    expected = {fact.root_id: fact for fact in facts}
+    actual = {item["root_id"]: item for item in manifest["roots"]}
+    if set(actual) != set(expected):
+        raise RootSetError("root_set_evidence_invalid", "root-set evidence roots do not match the canonical claim.")
+    for root_id, item in actual.items():
+        fact = expected[root_id]
+        if (
+            item["baseline_sha"] != fact.baseline_sha
+            or item["commands"] != list(fact.verification_commands)
+        ):
+            raise RootSetError("root_set_evidence_invalid", "root-set evidence does not match frozen root facts.")
+        if not item["files"] and item["artifact_digest"] != hashlib.sha256(b"").hexdigest():
+            raise RootSetError("root_set_evidence_invalid", "unchanged root evidence must retain the empty patch digest.")
+    owner_digest = binding.evidence_owner_manifest_digest(
+        claim_id=claim_id,
+        submission_id=manifest["submission_id"],
+        serving_manifest_digest=manifest["serving_manifest_digest"],
+        roots=manifest["roots"],
+    )
+    return {"schema": "anvil.root-set-evidence/v1", "submission_id": manifest["submission_id"],
+            "serving_manifest_digest": manifest["serving_manifest_digest"],
+            "owner_manifest_digest": owner_digest, "roots": manifest["roots"]}
+
+
+def _matching_root_claim(backend, task_id: str, actor: str, request_id: str, request_digest_value: str):
+    candidates = [
+        claim for claim in backend.list_claims()
+        if claim.task_id == task_id and claim.claimed_by == actor and claim.root_set is not None
+        and claim.root_set.request_id == request_id
+        and claim.root_set.request_digest == request_digest_value
+    ]
+    if len(candidates) != 1:
+        raise RootSetError("root_set_reconciliation_required", "canonical State cannot identify the root-set claim.")
+    return candidates[0]
+
+
 @roots_app.command("request-digest")
 def request_digest_command(
     task_id: str,
@@ -418,6 +536,119 @@ def request_digest_command(
         emit_success(command, data)
     else:
         typer.echo(f"Root-set request '{request_id}' digest derived.")
+
+
+def _root_evidence_status(backend, *, task_id: str, claim, evidence: dict[str, Any]) -> dict[str, Any] | None:
+    latest = backend.latest_event_payload(task_id, "evidence.submitted")
+    if latest is None:
+        return None
+    payload, submitted_at = latest
+    persisted = payload.get("root_set_evidence")
+    if (payload.get("claim_id") != claim.id or not isinstance(persisted, dict)
+            or persisted.get("owner_manifest_digest") != evidence["owner_manifest_digest"]):
+        return None
+    return {"schema": "anvil.root-set-evidence-status/v1", "status": "submitted",
+            "claim_id": claim.id, "evidence_id": payload.get("evidence_id"),
+            "submitted_at": submitted_at, "submission_id": evidence["submission_id"],
+            "owner_manifest_digest": evidence["owner_manifest_digest"]}
+
+
+@roots_app.command("evidence-status")
+def evidence_status(
+    task_id: str,
+    request_file: Path = typer.Option(..., "--request-file"),  # noqa: B008
+    manifest_file: Path = typer.Option(..., "--manifest-file"),  # noqa: B008
+    actor: str = typer.Option(..., "--actor"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Read the exact per-root evidence result after an uncertain response."""
+    command = "roots evidence-status"
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command=command, json_output=json_output)
+    resolved_actor = resolve_actor(actor)
+    try:
+        manifest = _load_evidence_manifest(manifest_file)
+        _request, request_id, digest = _original_request_identity(
+            task_id=task_id, request_file=request_file, actor=resolved_actor, state_dir=state_dir
+        )
+        backend = _open_backend(state_dir)
+        try:
+            claim = _matching_root_claim(backend, task_id, resolved_actor, request_id, digest)
+            evidence = _root_evidence_payload(claim.root_set, claim.id, manifest)
+            data = _root_evidence_status(backend, task_id=task_id, claim=claim, evidence=evidence)
+            if data is None:
+                data = {"schema": "anvil.root-set-evidence-status/v1", "status": "not_submitted",
+                        "claim_id": claim.id, "submission_id": evidence["submission_id"],
+                        "owner_manifest_digest": evidence["owner_manifest_digest"]}
+        finally:
+            backend.close()
+    except RootSetError as exc:
+        _root_fail(command, exc, json_output)
+    if json_output:
+        emit_success(command, data)
+    else:
+        typer.echo(f"Root-set evidence is {data['status']}.")
+
+
+@roots_app.command("submit-evidence")
+def submit_evidence(
+    task_id: str,
+    request_file: Path = typer.Option(..., "--request-file"),  # noqa: B008
+    manifest_file: Path = typer.Option(..., "--manifest-file"),  # noqa: B008
+    actor: str = typer.Option(..., "--actor"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Submit immutable per-root evidence without flattening root identity."""
+    command = "roots submit-evidence"
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command=command, json_output=json_output)
+    resolved_actor = resolve_actor(actor)
+    try:
+        manifest = _load_evidence_manifest(manifest_file)
+        _request, request_id, digest = _original_request_identity(
+            task_id=task_id, request_file=request_file, actor=resolved_actor, state_dir=state_dir
+        )
+        backend = _open_backend(state_dir)
+        try:
+            claim = _matching_root_claim(backend, task_id, resolved_actor, request_id, digest)
+            evidence = _root_evidence_payload(claim.root_set, claim.id, manifest)
+            previous = _root_evidence_status(backend, task_id=task_id, claim=claim, evidence=evidence)
+            if previous is not None:
+                data = previous
+            else:
+                from anvil.clock import SystemClock
+                from anvil.roots.registry import root_set_use_authorized
+                from anvil.state.models import EventDraft
+
+                commands = [command for item in evidence["roots"] for command in item["commands"]]
+                files = [f"{item['root_id']}/{path}" for item in evidence["roots"] for path in item["files"]]
+                evidence_id = "EVROOT-" + evidence["owner_manifest_digest"][:24]
+                payload = {
+                    "task_id": task_id, "claim_id": claim.id,
+                    "submitted_by": resolved_actor, "evidence_id": evidence_id,
+                    "commands_run": commands, "files_changed": files,
+                    "output_excerpt": "Per-root isolated verification retained by owner manifest.",
+                    "root_set_evidence": evidence,
+                }
+                with root_set_use_authorized(claim.root_set, backend=backend):
+                    backend.append(EventDraft(
+                        timestamp=SystemClock().now(), actor=resolved_actor,
+                        action="evidence.submitted", target_kind="task", target_id=task_id,
+                        payload_json=payload,
+                    ))
+                data = _root_evidence_status(backend, task_id=task_id, claim=claim, evidence=evidence)
+                if data is None:
+                    raise RootSetError("root_set_evidence_invalid", "root-set evidence submission was not retained.")
+        finally:
+            backend.close()
+    except RootSetError as exc:
+        _root_fail(command, exc, json_output)
+    if json_output:
+        emit_success(command, data)
+    else:
+        typer.echo(f"Root-set evidence '{data['evidence_id']}' submitted.")
 
 
 @roots_app.command("status")

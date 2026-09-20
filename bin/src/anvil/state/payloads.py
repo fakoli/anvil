@@ -1263,9 +1263,92 @@ class EvidenceSubmittedPayload(BaseModel):
     # Typed as the enum (review finding): an out-of-range category must be
     # rejected at WRITE time, not poison every later evidence read.
     category: EvidenceCategory | None = None
+    # Owner-coordinated root-set submissions retain their independently
+    # addressable per-root review material in the immutable event.  It stays
+    # optional so historical and ordinary single-root evidence keep their
+    # existing representation.
+    root_set_evidence: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _validate_claim_command_proof_batch(self) -> EvidenceSubmittedPayload:
+        if self.root_set_evidence is not None:
+            evidence = self.root_set_evidence
+            if set(evidence) != {
+                "schema", "submission_id", "serving_manifest_digest",
+                "owner_manifest_digest", "roots",
+            } or evidence.get("schema") != "anvil.root-set-evidence/v1":
+                raise ValueError("root-set evidence has an unsupported schema")
+            for field in ("submission_id",):
+                value = evidence.get(field)
+                if not isinstance(value, str) or not value or len(value) > 128:
+                    raise ValueError("root-set evidence identity is invalid")
+            for field in ("serving_manifest_digest", "owner_manifest_digest"):
+                value = evidence.get(field)
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(c not in "0123456789abcdef" for c in value)
+                ):
+                    raise ValueError("root-set evidence digest is invalid")
+            roots = evidence.get("roots")
+            if not isinstance(roots, list) or not 1 <= len(roots) <= 16:
+                raise ValueError("root-set evidence roots are invalid")
+            seen: set[str] = set()
+            for root in roots:
+                if not isinstance(root, dict) or set(root) != {
+                    "root_id", "baseline_sha", "artifact_digest",
+                    "verification_digest", "commands", "files",
+                }:
+                    raise ValueError("root-set evidence root is invalid")
+                root_id = root.get("root_id")
+                if (
+                    not isinstance(root_id, str)
+                    or not root_id
+                    or len(root_id) > 128
+                    or root_id in seen
+                ):
+                    raise ValueError("root-set evidence root is invalid")
+                seen.add(root_id)
+                for field in ("baseline_sha", "artifact_digest", "verification_digest"):
+                    value = root.get(field)
+                    allowed = {40, 64} if field == "baseline_sha" else {64}
+                    if (
+                        not isinstance(value, str)
+                        or len(value) not in allowed
+                        or any(c not in "0123456789abcdef" for c in value)
+                    ):
+                        raise ValueError("root-set evidence digest is invalid")
+                commands = root.get("commands")
+                files = root.get("files")
+                invalid_commands = (
+                    not isinstance(commands, list)
+                    or not commands
+                    or len(commands) > 32
+                    or any(
+                        not isinstance(value, str)
+                        or not value
+                        or len(value) > 1024
+                        or any(ord(c) < 32 for c in value)
+                        for value in commands
+                    )
+                )
+                invalid_files = (
+                    not isinstance(files, list)
+                    or len(files) > 256
+                    or any(
+                        not isinstance(value, str)
+                        or not value
+                        or len(value) > 512
+                        or value.startswith("/")
+                        or ".." in value.split("/")
+                        or any(ord(c) < 32 for c in value)
+                        for value in files
+                    )
+                )
+                if invalid_commands or invalid_files:
+                    raise ValueError("root-set evidence material is invalid")
+                if not files and root["artifact_digest"] != hashlib.sha256(b"").hexdigest():
+                    raise ValueError("unchanged root evidence must retain the empty patch digest")
         imported = [proof for proof in self.proofs if isinstance(proof, ClaimCommandProof)]
         if len(imported) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
             raise ValueError("too many claim-bound command proofs in one submission")

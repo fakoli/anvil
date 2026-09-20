@@ -526,3 +526,21 @@ def test_prd_content_request_refusal_does_not_touch_unavailable_state(
             expected_digest="not-a-digest",
         )
     assert caught.value.error.code.value == "invalid_request"
+
+
+def test_prd_show_reads_source_bound_by_sample_planning_batch(tmp_path: Path) -> None:
+    initialized = _invoke(tmp_path, ["init", "--with-sample"])
+    assert initialized.exit_code == 0, initialized.output
+    state_dir = tmp_path / ".anvil"
+    events = [json.loads(line) for line in (state_dir / "events.jsonl").read_text().splitlines()]
+    assert any(event["action"] == "planning.batch_applied" for event in events)
+    assert not any(event["action"] == "prd.parsed" for event in events)
+    source = (state_dir / "prd.md").read_bytes()
+    before = _manifest(state_dir)
+    result = _show(tmp_path)
+    assert result.exit_code == 0, result.output
+    data = _payload(result)["data"]
+    assert data["content"].encode("utf-8") == source
+    assert data["source_digest"] == hashlib.sha256(source).hexdigest()
+    assert data["prd_revision"] == 1
+    assert _manifest(state_dir) == before

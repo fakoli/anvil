@@ -6,6 +6,22 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.11] - 2026-09-19
+
+### Added
+
+- CLI-only root-set evidence submission and read-only recovery status preserve
+  immutable per-root baselines, verification commands, and file identities for
+  one coordinated claim. The owner keeps terminal reservations overheld until
+  explicit stopped-runner reconciliation; independent review still decides
+  acceptance.
+
+### Fixed
+
+- Root-set evidence now validates at the State append boundary, so direct
+  backend callers cannot substitute per-root facts, summaries, or owner
+  manifest digests.
+
 ## [0.6.10] - 2026-09-19
 
 ### Added

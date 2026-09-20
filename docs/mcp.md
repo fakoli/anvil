@@ -1533,12 +1533,12 @@ None.
 
 ```json
 {
-  "api_version": "16",
-  "engine_version": "0.6.10",
-  "display_version": "0.6.10",
+  "api_version": "17",
+  "engine_version": "0.6.11",
+  "display_version": "0.6.11",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.10",
+  "tag": "v0.6.11",
   "tag_distance": 0,
   "dirty": false,
   "schema_version": 22,
@@ -1551,8 +1551,8 @@ None.
       {"path": ["prd"], "kind": "group", "flags": []},
       {"path": ["prd", "source-name"], "kind": "command", "flags": ["--cwd", "--json", "--prd"]}
     ],
-    "contract_count": 79,
-    "count": 70
+    "contract_count": 90,
+    "count": 79
   },
   "mcp": {
     "tools": ["claim_task", "..."],
@@ -1596,7 +1596,7 @@ this skill/release contract.
 
 For the v0.6.5 / Workbench provider-v1 compatibility profile, consumers must
 fail closed before reading state unless the manifest reports exact
-`api_version == "16"`, operation-catalog version 1, the required operation at
+`api_version == "17"`, operation-catalog version 1, the required operation at
 version 1, and the exact version-1 schema resource paths. Do not infer
 compatibility from the engine version. The provider reads use their cataloged
 CLI transports; an MCP-only host can still discover and pin the same contract
@@ -1623,7 +1623,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.10","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
+{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.11","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh
