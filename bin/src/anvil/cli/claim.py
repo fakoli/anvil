@@ -1003,7 +1003,6 @@ def renew(
         try:
             if before is not None and before.root_set is not None:
                 from anvil.roots.registry import (
-                    RootSetError,
                     RootSetRegistry,
                     authorize_bound_root_set_claim,
                     live_claim_append_authorized,
