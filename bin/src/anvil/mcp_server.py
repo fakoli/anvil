@@ -1438,42 +1438,44 @@ def claim_task(
             )
             metadata = claim_git_metadata(plan)
             mutation_tracker = ClaimGitMutationTracker(plan)
-            with backend.claim_operation_lock():
-                require_canonical_prd_claim_binding(
-                    state_dir,
-                    backend.get_prd(task.prd_id),
-                )
-                revalidate_claim_plan(plan, cwd=project_dir)
-                result = manager.claim(
-                    task_id,
-                    expected_files=files,
-                    branch=metadata.branch if metadata is not None else None,
-                    worktree_path=(
-                        metadata.worktree_path if metadata is not None else None
-                    ),
-                    git_metadata=metadata,
-                    operation_locked=True,
-                    pre_log_check=lambda: require_canonical_prd_claim_binding(
+            from anvil.roots.registry import RootSetRegistry
+            with RootSetRegistry().ordinary_claim_coordinator(project_dir):
+                with backend.claim_operation_lock():
+                    require_canonical_prd_claim_binding(
                         state_dir,
                         backend.get_prd(task.prd_id),
-                    ),
-                )
-                try:
-                    apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
-                except BaseException:
+                    )
+                    revalidate_claim_plan(plan, cwd=project_dir)
+                    result = manager.claim(
+                        task_id,
+                        expected_files=files,
+                        branch=metadata.branch if metadata is not None else None,
+                        worktree_path=(
+                            metadata.worktree_path if metadata is not None else None
+                        ),
+                        git_metadata=metadata,
+                        operation_locked=True,
+                        pre_log_check=lambda: require_canonical_prd_claim_binding(
+                            state_dir,
+                            backend.get_prd(task.prd_id),
+                        ),
+                    )
                     try:
-                        manager.release(
-                            result.claim.id,
-                            reason="transactional Git claim failed",
-                        )
-                    finally:
-                        compensate_claim_plan_tracker(
-                            mutation_tracker, cwd=project_dir
-                        )
-                    raise
-                finalize_claim_plan_tracker(
-                    mutation_tracker, cwd=project_dir
-                )
+                        apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                    except BaseException:
+                        try:
+                            manager.release(
+                                result.claim.id,
+                                reason="transactional Git claim failed",
+                            )
+                        finally:
+                            compensate_claim_plan_tracker(
+                                mutation_tracker, cwd=project_dir
+                            )
+                        raise
+                    finalize_claim_plan_tracker(
+                        mutation_tracker, cwd=project_dir
+                    )
         except ClaimPlanError as exc:
             raise ToolError(f"{exc.code}: {exc}") from exc
         except PrdClaimBindingError as exc:
@@ -1576,6 +1578,11 @@ def release_task(
             raise _actor_mismatch_tool_error(
                 owner=active_claim.claimed_by, actual=actor, action="release the claim"
             )
+            if active_claim.root_set is not None:
+                raise ToolError(
+                    "root_set_unsupported: release coordinated root-set claims through "
+                    "`anvil release` so the owner reservation is reconciled."
+                )
 
         manager = ClaimManager(
             backend,
@@ -1661,6 +1668,11 @@ def renew_claim(
             raise _actor_mismatch_tool_error(
                 owner=active_claim.claimed_by, actual=actor, action="renew the claim"
             )
+            if active_claim.root_set is not None:
+                raise ToolError(
+                    "root_set_unsupported: renew coordinated root-set claims through "
+                    "`anvil renew` so the owner reservation is extended first."
+                )
 
         lease_minutes = max(1, extend_seconds // 60)
         manager = ClaimManager(
@@ -4648,6 +4660,12 @@ def claim_bundle(
                     "prefer the CLI worktree claim path."
                 )
         project_dir = _resolve_project_dir(Path(cwd) if cwd else None)
+        from anvil.roots.registry import RootSetError, assert_ordinary_claim_allowed
+
+        try:
+            assert_ordinary_claim_allowed(project_dir)
+        except RootSetError as exc:
+            raise ToolError(f"{exc.code}: {exc}") from exc
         manager = _bundle_manager(
             backend,
             state_dir,
@@ -4682,40 +4700,42 @@ def claim_bundle(
             )
             metadata = claim_git_metadata(plan)
             mutation_tracker = ClaimGitMutationTracker(plan)
-            with backend.claim_operation_lock():
-                require_canonical_prd_claim_binding(
-                    state_dir,
-                    backend.get_prd(bundle.prd_id),
-                )
-                revalidate_claim_plan(plan, cwd=project_dir)
-                result = manager.claim(
-                    bundle_id,
-                    branch=metadata.branch if metadata is not None else None,
-                    worktree_path=(
-                        metadata.worktree_path if metadata is not None else None
-                    ),
-                    git_metadata=metadata,
-                    pre_log_check=lambda: require_canonical_prd_claim_binding(
+            from anvil.roots.registry import RootSetRegistry
+            with RootSetRegistry().ordinary_claim_coordinator(project_dir):
+                with backend.claim_operation_lock():
+                    require_canonical_prd_claim_binding(
                         state_dir,
                         backend.get_prd(bundle.prd_id),
-                    ),
-                )
-                try:
-                    apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
-                except BaseException:
+                    )
+                    revalidate_claim_plan(plan, cwd=project_dir)
+                    result = manager.claim(
+                        bundle_id,
+                        branch=metadata.branch if metadata is not None else None,
+                        worktree_path=(
+                            metadata.worktree_path if metadata is not None else None
+                        ),
+                        git_metadata=metadata,
+                        pre_log_check=lambda: require_canonical_prd_claim_binding(
+                            state_dir,
+                            backend.get_prd(bundle.prd_id),
+                        ),
+                    )
                     try:
-                        manager.release(
-                            bundle_id,
-                            reason="transactional Git claim failed",
-                        )
-                    finally:
-                        compensate_claim_plan_tracker(
-                            mutation_tracker, cwd=project_dir
-                        )
-                    raise
-                finalize_claim_plan_tracker(
-                    mutation_tracker, cwd=project_dir
-                )
+                        apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                    except BaseException:
+                        try:
+                            manager.release(
+                                bundle_id,
+                                reason="transactional Git claim failed",
+                            )
+                        finally:
+                            compensate_claim_plan_tracker(
+                                mutation_tracker, cwd=project_dir
+                            )
+                        raise
+                    finalize_claim_plan_tracker(
+                        mutation_tracker, cwd=project_dir
+                    )
         except ClaimPlanError as exc:
             raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc
         except PrdClaimBindingError as exc:

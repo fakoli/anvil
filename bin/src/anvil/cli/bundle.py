@@ -232,18 +232,21 @@ def claim_bundle(
         if bundle is None:
             _fail(command, f"Bundle '{bundle_id}' not found.", json_output)
         manager = _manager(backend, state_dir, resolve_actor(actor), cwd=cwd)
-        with backend.claim_operation_lock():
-            require_canonical_prd_claim_binding(
-                state_dir,
-                backend.get_prd(bundle.prd_id),
-            )
-            result = manager.claim(
-                bundle_id,
-                pre_log_check=lambda: require_canonical_prd_claim_binding(
+        project_dir = _resolve_project_root(cwd)
+        from anvil.roots.registry import RootSetRegistry
+        with RootSetRegistry().ordinary_claim_coordinator(project_dir):
+            with backend.claim_operation_lock():
+                require_canonical_prd_claim_binding(
                     state_dir,
                     backend.get_prd(bundle.prd_id),
-                ),
-            )
+                )
+                result = manager.claim(
+                    bundle_id,
+                    pre_log_check=lambda: require_canonical_prd_claim_binding(
+                        state_dir,
+                        backend.get_prd(bundle.prd_id),
+                    ),
+                )
     except BundleActorMismatch as exc:
         if json_output:
             fail_with(

@@ -263,7 +263,13 @@ def progress(
                 **({"detail": detail} if detail is not None else {}),
             },
         )
-        backend.append(draft)
+        if active_claim is None or active_claim.root_set is None:
+            backend.append(draft)
+        else:
+            from anvil.roots.registry import root_set_use_authorized
+
+            with root_set_use_authorized(active_claim.root_set, backend=backend):
+                backend.append(draft)
     finally:
         backend.close()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from anvil.cli._helpers import (
     validate_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
+from anvil.roots.registry import RootSetError
 
 
 def _refuse_actor_mismatch(
@@ -198,6 +200,18 @@ def claim(
         )
 
         if bundle_mode:
+            # A bundle has no root-set binding shape.  Once this checkout is
+            # enrolled, fail closed instead of allowing its coordinator lease
+            # to bypass the owner-global repository reservation.
+            from anvil.roots.registry import assert_ordinary_claim_allowed
+
+            try:
+                assert_ordinary_claim_allowed(resolved_cwd)
+            except RootSetError as exc:
+                if json_output:
+                    fail("claim", str(exc), code=exc.code)
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             from anvil.bundles.manager import (
                 BundleActorMismatch,
                 BundleError,
@@ -249,6 +263,11 @@ def claim(
                     fail("claim", str(exc), code="bundle_claim_error")
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
+            except RootSetError as exc:
+                if json_output:
+                    fail("claim", str(exc), code=exc.code)
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
             isolation = cfg.worktree_isolation if cfg is not None else "advisory"
             if isolation == "require" and not shared_tree:
@@ -273,42 +292,44 @@ def claim(
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             try:
-                with backend.claim_operation_lock():
-                    require_canonical_prd_claim_binding(
-                        state_dir,
-                        backend.get_prd(execution_bundle.prd_id),
-                    )
-                    revalidate_claim_plan(plan, cwd=resolved_cwd)
-                    bundle_result = bundle_manager.claim(
-                        task_id,
-                        branch=metadata.branch if metadata is not None else branch,
-                        worktree_path=(
-                            metadata.worktree_path if metadata is not None else None
-                        ),
-                        git_metadata=metadata,
-                        pre_log_check=lambda: require_canonical_prd_claim_binding(
+                from anvil.roots.registry import RootSetRegistry
+                with RootSetRegistry().ordinary_claim_coordinator(resolved_cwd):
+                    with backend.claim_operation_lock():
+                        require_canonical_prd_claim_binding(
                             state_dir,
                             backend.get_prd(execution_bundle.prd_id),
-                        ),
-                    )
-                    try:
-                        apply_claim_plan(
-                            plan, cwd=resolved_cwd, tracker=mutation_tracker
                         )
-                    except BaseException:
+                        revalidate_claim_plan(plan, cwd=resolved_cwd)
+                        bundle_result = bundle_manager.claim(
+                            task_id,
+                            branch=metadata.branch if metadata is not None else branch,
+                            worktree_path=(
+                                metadata.worktree_path if metadata is not None else None
+                            ),
+                            git_metadata=metadata,
+                            pre_log_check=lambda: require_canonical_prd_claim_binding(
+                                state_dir,
+                                backend.get_prd(execution_bundle.prd_id),
+                            ),
+                        )
                         try:
-                            bundle_manager.release(
-                                task_id,
-                                reason="transactional Git claim failed",
+                            apply_claim_plan(
+                                plan, cwd=resolved_cwd, tracker=mutation_tracker
                             )
-                        finally:
-                            compensate_claim_plan_tracker(
-                                mutation_tracker, cwd=resolved_cwd
-                            )
-                        raise
-                    finalize_claim_plan_tracker(
-                        mutation_tracker, cwd=resolved_cwd
-                    )
+                        except BaseException:
+                            try:
+                                bundle_manager.release(
+                                    task_id,
+                                    reason="transactional Git claim failed",
+                                )
+                            finally:
+                                compensate_claim_plan_tracker(
+                                    mutation_tracker, cwd=resolved_cwd
+                                )
+                            raise
+                        finalize_claim_plan_tracker(
+                            mutation_tracker, cwd=resolved_cwd
+                        )
             except ClaimPlanError as exc:
                 if json_output:
                     fail("claim", str(exc), code=exc.code)
@@ -548,43 +569,45 @@ def claim(
             raise typer.Exit(code=1) from exc
 
         try:
-            with backend.claim_operation_lock():
-                require_canonical_prd_claim_binding(
-                    state_dir,
-                    backend.get_prd(task.prd_id),
-                )
-                revalidate_claim_plan(plan, cwd=resolved_cwd)
-                result = manager.claim(
-                    task_id,
-                    expected_files=expected_files,
-                    force=force,
-                    branch=metadata.branch if metadata is not None else branch,
-                    worktree_path=(
-                        metadata.worktree_path if metadata is not None else None
-                    ),
-                    git_metadata=metadata,
-                    operation_locked=True,
-                    pre_log_check=lambda: require_canonical_prd_claim_binding(
+            from anvil.roots.registry import RootSetRegistry
+            with RootSetRegistry().ordinary_claim_coordinator(resolved_cwd):
+                with backend.claim_operation_lock():
+                    require_canonical_prd_claim_binding(
                         state_dir,
                         backend.get_prd(task.prd_id),
-                    ),
-                )
-                try:
-                    apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
-                except BaseException:
+                    )
+                    revalidate_claim_plan(plan, cwd=resolved_cwd)
+                    result = manager.claim(
+                        task_id,
+                        expected_files=expected_files,
+                        force=force,
+                        branch=metadata.branch if metadata is not None else branch,
+                        worktree_path=(
+                            metadata.worktree_path if metadata is not None else None
+                        ),
+                        git_metadata=metadata,
+                        operation_locked=True,
+                        pre_log_check=lambda: require_canonical_prd_claim_binding(
+                            state_dir,
+                            backend.get_prd(task.prd_id),
+                        ),
+                    )
                     try:
-                        manager.release(
-                            result.claim.id,
-                            reason="transactional Git claim failed",
-                        )
-                    finally:
-                        compensate_claim_plan_tracker(
-                            mutation_tracker, cwd=resolved_cwd
-                        )
-                    raise
-                finalize_claim_plan_tracker(
-                    mutation_tracker, cwd=resolved_cwd
-                )
+                        apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
+                    except BaseException:
+                        try:
+                            manager.release(
+                                result.claim.id,
+                                reason="transactional Git claim failed",
+                            )
+                        finally:
+                            compensate_claim_plan_tracker(
+                                mutation_tracker, cwd=resolved_cwd
+                            )
+                        raise
+                    finalize_claim_plan_tracker(
+                        mutation_tracker, cwd=resolved_cwd
+                    )
         except ClaimPlanError as exc:
             if json_output:
                 fail("claim", str(exc), code=exc.code)
@@ -598,6 +621,11 @@ def claim(
         except ClaimError as exc:
             if json_output:
                 fail("claim", str(exc), code="claim_error")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except RootSetError as exc:
+            if json_output:
+                fail("claim", f"{exc.code}: {exc}", code=exc.code)
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -772,7 +800,9 @@ def release(
             typer.echo(f"Released bundle claim '{claim_id}'.")
             return
 
-        manager = ClaimManager(backend, clock, actor=resolved_actor)
+        manager = ClaimManager(
+            backend, clock, actor=resolved_actor, project_root=_resolve_project_dir(cwd)
+        )
         existing_claim = backend.get_claim(claim_id)
         if (
             existing_claim is not None
@@ -787,7 +817,42 @@ def release(
                 json_output=json_output,
             )
         try:
-            manager.release(claim_id, force=force, reason=reason)
+            if existing_claim is not None and existing_claim.root_set is not None:
+                from anvil.roots.registry import (
+                    RootSetError,
+                    RootSetRegistry,
+                )
+
+                canonical_released = False
+                try:
+                    registry_owner = RootSetRegistry()
+                    with registry_owner.locked() as registry:
+                        reservation = registry["reservations"].get(
+                            existing_claim.root_set.request_id
+                        )
+                        if (
+                            reservation is None
+                            or reservation.get("reservation_id")
+                            != existing_claim.root_set.reservation_id
+                        ):
+                            raise RootSetError(
+                                "root_set_reconciliation_required",
+                                "root-set reservation does not match canonical State.",
+                            )
+                        manager.release(claim_id, force=force, reason=reason)
+                        canonical_released = True
+                        RootSetRegistry.release_after_terminal(registry, reservation)
+                        registry_owner.checkpoint(registry)
+                except RootSetError as exc:
+                    # Authority reduction remains available during a registry
+                    # outage. The missing registry transition deliberately
+                    # overholds its reservation for later reconciliation.
+                    if exc.code != "root_set_registry_unavailable":
+                        raise ClaimError(f"{exc.code}: {exc}") from exc
+                    if not canonical_released:
+                        manager.release(claim_id, force=force, reason=reason)
+            else:
+                manager.release(claim_id, force=force, reason=reason)
         except ClaimError as exc:
             if json_output:
                 fail("release", str(exc), code="claim_error")
@@ -920,7 +985,11 @@ def renew(
             return
 
         manager = ClaimManager(
-            backend, clock, actor=resolved_actor, **lease_kwargs
+            backend,
+            clock,
+            actor=resolved_actor,
+            project_root=_resolve_project_dir(cwd),
+            **lease_kwargs,
         )
         before = backend.get_claim(claim_id)
         if before is not None and before.claimed_by != resolved_actor:
@@ -932,13 +1001,53 @@ def renew(
                 json_output=json_output,
             )
         try:
-            renewal = manager.renew_with_result(claim_id)
-            updated = renewal.claim
+            if before is not None and before.root_set is not None:
+                from anvil.roots.registry import (
+                    RootSetError,
+                    RootSetRegistry,
+                    authorize_bound_root_set_claim,
+                    live_claim_append_authorized,
+                )
+
+                with RootSetRegistry().locked() as registry:
+                    reservation = registry["reservations"].get(before.root_set.request_id)
+                    if (
+                        reservation is None
+                        or reservation.get("reservation_id") != before.root_set.reservation_id
+                        or reservation.get("state") != "bound"
+                    ):
+                        raise RootSetError(
+                            "root_set_reconciliation_required",
+                            "root-set reservation does not match canonical State.",
+                        )
+                    if manager.renewal_is_eligible(claim_id):
+                        RootSetRegistry.extend_before_canonical_renewal(
+                            registry, reservation, now=time.time()
+                        )
+                        RootSetRegistry().checkpoint(registry)
+                    # The registry lock stays outermost while State validates
+                    # progress and appends the renewal. A failed canonical
+                    # renewal retains the conservative bound reservation.
+                    with live_claim_append_authorized(
+                        binding=before.root_set,
+                        authorization=authorize_bound_root_set_claim(
+                            before.root_set, reservation
+                        ),
+                    ):
+                        renewal = manager.renew_with_result(claim_id)
+            else:
+                renewal = manager.renew_with_result(claim_id)
+        except RootSetError as exc:
+            if json_output:
+                fail("renew", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         except ClaimError as exc:
             if json_output:
                 fail("renew", str(exc), code="claim_error")
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
+        updated = renewal.claim
     finally:
         backend.close()
 

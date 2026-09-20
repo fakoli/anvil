@@ -89,11 +89,13 @@ Version history
   material digest, exact content-event identity, and the complete source/
   material/content lineage reviewed or approved. Historical lifecycle state
   without that binding is demoted to draft instead of being guessed.
+- v22: root-set claim bindings — root-set claims retain their immutable owner
+  reservation/request/digest binding without changing legacy claim rows.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 21
+SCHEMA_VERSION: int = 22
 
 
 def get_schema_version() -> int:
@@ -328,6 +330,7 @@ CREATE TABLE IF NOT EXISTS claims (
     branch             TEXT,
     worktree_path      TEXT,
     git_metadata       TEXT,
+    root_set           TEXT,
     session_id         TEXT,
     bundle_claim_id    TEXT REFERENCES bundle_claims(id) ON DELETE RESTRICT,
     expected_files     TEXT NOT NULL DEFAULT '[]',

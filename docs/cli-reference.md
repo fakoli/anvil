@@ -2,8 +2,8 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 72 executable leaf commands,
-> including the milestone bundle lifecycle. The most-used lifecycle
+> Single-page reference for the `anvil` CLI, including the milestone bundle and
+> coordinated-root lifecycles. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
 > one-line entry each. For narrative context on common workflows, see
@@ -40,6 +40,7 @@
   - [`anvil release`](#release)
   - [`anvil renew`](#renew)
   - [`anvil packet`](#packet)
+  - [Coordinated roots](#coordinated-roots)
 - [Execution bundles](#execution-bundles)
 - Submit and apply
   - [`anvil submit`](#submit)
@@ -1059,6 +1060,33 @@ generating the packet); the rendered packet feeds directly into Claude Code,
 Cursor, or any MCP-aware agent.
 
 ---
+
+## Coordinated roots
+
+`roots` is the CLI-only owner surface for one task that must reserve several
+repositories. Enroll each exact checkout once, then submit a request file
+whose roots and verification commands match the declared policy:
+
+```bash
+anvil roots enroll --repository-id app --path /work/app --origin https://example.test/org/app.git
+anvil roots claim T001 --request-file root-set.json --actor agent --json
+```
+
+The request uses `anvil.root-set-request/v1` with a stable `request_id`, one
+`primary_root_id`, and 1–16 roots. Each root declares `root_id`,
+`repository_id`, absolute `path`, `expected_files`, and
+`verification_commands`. The primary must be the State checkout and use the
+task's declared verification commands; secondary commands come from enrollment.
+
+`anvil roots status --request-id ID --request-digest SHA256 --actor ACTOR` and
+`anvil roots reconcile` require the original actor and immutable digest. A
+claim is `ready` only after every retained Git target and its canonical claim
+facts match. Enrolled repositories reject ordinary and bundle claims, including
+`--force`; use this surface to coordinate them. Root-set renew and release use
+the existing `anvil renew` and `anvil release` commands. Release records a
+`release_pending` global overhold until runner-stop reconciliation can prove no
+write authority remains. MCP intentionally does not create, renew, or release
+coordinated root-set claims.
 
 ## Execution bundles
 

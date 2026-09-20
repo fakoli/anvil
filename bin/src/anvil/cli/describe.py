@@ -78,7 +78,7 @@ _COMMAND = "describe"
 # accept-rate governor projection, and MCP ``get_next_task`` changed from a bare
 # task/null to a typed task+governor envelope. Consumers of API 9 must
 # deliberately accept the new response shapes.
-API_VERSION = "14"
+API_VERSION = "15"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
