@@ -8,6 +8,20 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [0.6.9] - 2026-09-19
 
+### Added
+
+- Owner-local, POSIX-locked root-set enrollment and CLI claim coordination
+  (`anvil roots enroll|claim|status|reconcile`). A canonical task claim retains
+  immutable facts for every enrolled Git root, while ordinary and bundle claims
+  refuse enrolled repositories.
+- API 15 and schema 22 provider-read contracts, including regenerated snapshot
+  schemas and canonical fixtures for the expanded owner CLI surface.
+
+### Fixed
+
+- Consistent event-log reads accept a complete final JSON record without its
+  terminal newline while continuing to reject malformed or torn JSON records.
+
 ## [0.6.8] - 2026-09-12
 
 ### Added
