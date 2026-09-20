@@ -1856,7 +1856,7 @@ flag list; full prose treatment may follow in a later pass.
 All seven accept `--json`. See [Optional Jev advice](how-to/optional-jev.md)
 for schemas, privacy, provenance, and explicit enable/disable workflows.
 
-**Project diagnostics and health** (read-only)
+**Diagnostics and health** (read-only)
 
 - `anvil doctor` — One-shot health diagnosis: schema/db reachability, config
   parse status, active/stale claims, replay integrity, reconciliation drift
