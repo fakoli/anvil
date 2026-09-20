@@ -18,6 +18,8 @@ from typing import Final, Literal
 
 import yaml
 
+from anvil.jev import JevConfig
+
 logger = logging.getLogger(__name__)
 
 # v1.21.0 — complexity score at/above which a task is queued for sub-task
@@ -101,6 +103,8 @@ class Config:
     # API execution requires permission independently of provider selection.
     # Subscription-backed agent-sdk/codex never read API keys or fall back.
     llm_allow_api: bool = False
+    # Independent typed advice; never selects a planner or participates in gates.
+    jev: JevConfig = field(default_factory=JevConfig)
     llm_reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     # Extra reasoning allowance for Responses only; zero preserves caller caps.
     # Explicitly increase after measuring a workload, never retry with more silently.
@@ -818,6 +822,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         llm_provider=llm_provider_value,
         llm_fallback=llm_fallback,
         llm_allow_api=llm_allow_api,
+        jev=JevConfig.from_mapping(data.get("jev", {})),
         llm_reasoning_effort=llm_reasoning_effort,  # type: ignore[arg-type]
         openai_reasoning_budget=openai_reasoning_budget,
         llm_model=_str_or_none(data.get("llm_model")),
@@ -1194,6 +1199,12 @@ events_path: events.jsonl
 llm_provider:                       # blank = agent-sdk
 llm_fallback: false                 # env auto-detect also requires llm_allow_api: true
 llm_allow_api: false                # explicit permission for any API provider
+jev:
+  enabled: false                   # no key lookup or calls while disabled
+  capabilities: []                 # explicitly enable only the advice you want
+  model: jev-1.13.0                 # pinned; no automatic model upgrades
+  api_key_env: TYPESAFE_API_KEY     # environment reference, never a literal key
+  timeout_seconds: 5
 llm_reasoning_effort: medium        # codex/openai: low|medium|high|xhigh|max
 openai_reasoning_budget: 0          # additional Responses output tokens; explicit opt-in
 llm_tier:                           # Claude only: opus|sonnet|haiku

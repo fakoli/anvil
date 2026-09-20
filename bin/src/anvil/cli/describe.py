@@ -279,13 +279,13 @@ def build_manifest() -> dict[str, Any]:
 
         {
           "api_version": "17",
-          "engine_version": "0.6.11",
-          "display_version": "0.6.11",
+          "engine_version": "0.6.12",
+          "display_version": "0.6.12",
           "schema_version": 22,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.11",
+          "tag": "v0.6.12",
           "tag_distance": 0,
           "dirty": false,
           "cli": {

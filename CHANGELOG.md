@@ -6,6 +6,18 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.12] - 2026-09-20
+
+### Added
+
+- Default-off, explicitly attributed TypeSafe Jev advice for PRD criteria,
+  evidence scope, proof-contract preparation, skill suggestions, context
+  relevance, incident triage, and finalized voice intent. Per-capability and
+  per-operation cloud-export controls preserve existing proof and approval gates.
+- Bounded advisory CLI, selected-item audits, a stateless local consumer bridge,
+  four integration PRDs, and a reproducible synthetic qualification corpus.
+  No new runtime dependency, provider switch, or automatic action is introduced.
+
 ## [0.6.11] - 2026-09-19
 
 ### Added

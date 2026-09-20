@@ -117,6 +117,7 @@ nav:
       - Execute in the current or local-model harness: how-to/execute-in-your-harness.md
       - Using anvil on any harness: how-to/using-anvil-on-any-harness.md
       - Syncing with GitHub: how-to/syncing-with-github.md
+      - Optional Jev advice: how-to/optional-jev.md
   - Reference:
       - CLI: cli-reference.md
       - MCP server (36 tools): mcp.md
@@ -144,6 +145,11 @@ nav:
       - Running the bake-off: plans/bake-off.md
       - Packet quality: plans/packet-quality.md
       - Specs:
+          - Jev integration suite: specs/jev-integration/README.md
+          - Jev foundation: specs/jev-integration/foundation.md
+          - Jev semantic assurance: specs/jev-integration/semantic-assurance.md
+          - Jev agent assistance: specs/jev-integration/agent-assistance.md
+          - Jev Serving assistance: specs/jev-integration/serving-assistance.md
           - Historical v0 build spec: specs/2026-05-24-anvil-v0.md
           - Plugin audit & critics: specs/2026-05-26-plugin-audit-and-critics.md
           - Event-sourcing write path (SL-1): specs/2026-06-01-sl1-rr-1-event-sourcing-write-path.md
