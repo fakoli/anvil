@@ -1030,7 +1030,17 @@ def hook_record_file_change(
                     "changed_at": now.isoformat(),
                 },
             )
-            backend.append(draft)
+            root_claim = next(
+                (claim for claim in backend.list_active_claims() if claim.root_set is not None),
+                None,
+            )
+            if root_claim is None:
+                backend.append(draft)
+            else:
+                from anvil.roots.registry import root_set_use_authorized
+
+                with root_set_use_authorized(root_claim.root_set, backend=backend):
+                    backend.append(draft)
         finally:
             backend.close()
     except SystemExit:

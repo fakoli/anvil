@@ -7686,8 +7686,8 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_twenty(self) -> None:
-        """Transactional claim Git bindings ship before SCHEMA_VERSION == 21
+    def test_schema_version_is_twenty_two(self) -> None:
+        """Root-set claim bindings ship at SCHEMA_VERSION == 22
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
@@ -7697,8 +7697,9 @@ class TestSchemaVersionPhase8:
         v16 = typed PRD assumptions; v17 = claim generations + attestations;
         v18 = exact revision-bound PRD source provenance;
         v19 = engine-derived task-rejection provenance;
-        v20 = transactional task and bundle claim Git bindings)."""
-        assert SCHEMA_VERSION == 21
+        v20 = transactional task and bundle claim Git bindings; v21 =
+        revision-bound PRD lifecycle; v22 = root-set claim bindings)."""
+        assert SCHEMA_VERSION == 22
         assert f"PRAGMA user_version = {SCHEMA_VERSION};" in DDL
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
@@ -7762,7 +7763,7 @@ class TestV18ToV19RejectionProvenanceMigration:
 
         migrated = _make_backend(tmp_path)
         try:
-            assert migrated.get_schema_version() == SCHEMA_VERSION == 21
+            assert migrated.get_schema_version() == SCHEMA_VERSION == 22
             rows = {
                 row.id: row
                 for row in migrated.list_reviews()
@@ -10295,7 +10296,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 21
+            assert b.get_schema_version() == SCHEMA_VERSION == 22
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -10474,7 +10475,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 21
+            assert b.get_schema_version() == SCHEMA_VERSION == 22
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.
@@ -14506,7 +14507,7 @@ class TestClaimProgressAttestationState:
         )
         b.initialize()
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 21
+            assert b.get_schema_version() == SCHEMA_VERSION == 22
             assert b.get_claim("C001").generation == 1  # type: ignore[union-attr]
             assert b.get_claim("C002").generation == 2  # type: ignore[union-attr]
             assert b.get_claim("C001").attestation_context is None  # type: ignore[union-attr]

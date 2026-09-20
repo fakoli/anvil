@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from anvil import __version__
+from anvil.cli.describe import API_VERSION
 
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -106,7 +107,7 @@ def _qualify_wheel(wheel: Path, root: Path) -> dict[str, Any]:
             "--expected-version",
             __version__,
             "--expected-api-version",
-            "14",
+            API_VERSION,
         ],
         cwd=root,
         env=clean_env,

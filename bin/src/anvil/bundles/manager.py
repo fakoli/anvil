@@ -91,6 +91,29 @@ class BundleManager:
         git_metadata: ClaimGitMetadata | None = None,
         pre_log_check: Callable[[], None] | None = None,
     ) -> BundleClaimResult:
+        from anvil.roots.registry import (
+            RootSetError,
+            RootSetRegistry,
+            assert_unscoped_claim_allowed,
+            live_claim_append_authorized,
+            ordinary_claim_coordinator_held,
+        )
+
+        try:
+            if self._project_root is None:
+                assert_unscoped_claim_allowed()
+            elif not ordinary_claim_coordinator_held():
+                # Keep the owner journal locked through the append.  A caller
+                # which already holds State must establish this context first.
+                with RootSetRegistry().ordinary_claim_coordinator(self._project_root):
+                    return self.claim(
+                        bundle_id, branch=branch, worktree_path=worktree_path,
+                        git_metadata=git_metadata, pre_log_check=pre_log_check,
+                    )
+            else:
+                pass
+        except RootSetError as exc:
+            raise BundleError(f"{exc.code}: {exc}") from exc
         bundle = self.preflight(bundle_id)
         tasks = [self._backend.get_task(task_id) for task_id in bundle.task_ids]
         if any(task is None for task in tasks):  # pragma: no cover - preflight
@@ -136,10 +159,11 @@ class BundleManager:
             },
         )
         try:
-            if pre_log_check is None:
-                self._backend.append(draft)
-            else:
-                self._backend.append(draft, pre_log_check=pre_log_check)
+            with live_claim_append_authorized():
+                if pre_log_check is None:
+                    self._backend.append(draft)
+                else:
+                    self._backend.append(draft, pre_log_check=pre_log_check)
         except BackendError as exc:
             raise BundleError(str(exc)) from exc
         claimed_bundle = self._backend.get_bundle(bundle_id)

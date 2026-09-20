@@ -53,6 +53,7 @@ from anvil.state.models import (
     PRDAssumption,
     ProofArtifact,
     ReviewDecision,
+    RootSetClaimBinding,
     TaskRejectionProvenance,
 )
 
@@ -1134,6 +1135,7 @@ class ClaimCreatedPayload(BaseModel):
     branch: str | None = None
     worktree_path: str | None = None
     git_metadata: ClaimGitMetadata | None = None
+    root_set: RootSetClaimBinding | None = None
     session_id: str | None = None
     expected_files: list[Any] = []
     # v17 lifecycle binding.  Legacy events omit both fields; replay assigns a

@@ -78,7 +78,7 @@ _COMMAND = "describe"
 # accept-rate governor projection, and MCP ``get_next_task`` changed from a bare
 # task/null to a typed task+governor envelope. Consumers of API 9 must
 # deliberately accept the new response shapes.
-API_VERSION = "14"
+API_VERSION = "15"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -278,14 +278,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "14",
-          "engine_version": "0.6.8",
-          "display_version": "0.6.8",
-          "schema_version": 21,
+          "api_version": "15",
+          "engine_version": "0.6.9",
+          "display_version": "0.6.9",
+          "schema_version": 22,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.8",
+          "tag": "v0.6.9",
           "tag_distance": 0,
           "dirty": false,
           "cli": {

@@ -101,6 +101,7 @@ from anvil.state.models import (
     Requirement,
     Review,
     ReviewDecision,
+    RootSetClaimBinding,
     Score,
     SyncMapping,
     Task,
@@ -1154,7 +1155,90 @@ class SqliteBackend:
           - Raise ``TransactionAborted``.
           - Forward catch-up on the next ``initialize()`` heals the skew.
         """
+        # This live-write guard runs before the SQLite/event-log lock. Replay
+        # uses projection routines rather than append(), so it never reads the
+        # owner-global registry while rebuilding historical State.
+        from anvil.roots.registry import (
+            RootSetError,
+            require_root_set_lifecycle_authorization,
+            require_root_set_use_authorization,
+            validate_live_claim_append,
+        )
+
+        try:
+            validate_live_claim_append(draft.action, draft.payload_json)
+        except RootSetError as exc:
+            raise EventRejected(f"{exc.code}: {exc}") from exc
         conn = self._require_conn()
+        # A direct Backend append must not extend a coordinated lease behind
+        # the owner journal.  This check is intentionally local-only and runs
+        # before the SQLite/event-log lock; replay never calls append().
+        if draft.action == "claim.renewed" and isinstance(draft.payload_json, dict):
+            claim_id = draft.payload_json.get("claim_id")
+            if isinstance(claim_id, str):
+                row = conn.execute(
+                    "SELECT root_set FROM claims WHERE id = ?", (claim_id,)
+                ).fetchone()
+                if row is not None and row[0] is not None:
+                    try:
+                        require_root_set_lifecycle_authorization(
+                            RootSetClaimBinding.model_validate(json.loads(row[0]))
+                        )
+                    except (RootSetError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                        if isinstance(exc, RootSetError):
+                            raise EventRejected(f"{exc.code}: {exc}") from exc
+                        raise EventRejected(
+                            "root_set_authorization_required: coordinated claim binding is invalid."
+                        ) from exc
+        if draft.action == "progress.noted" and isinstance(draft.payload_json, dict):
+            task_id = draft.payload_json.get("task_id")
+            if isinstance(task_id, str):
+                row = conn.execute(
+                    "SELECT root_set FROM claims WHERE task_id = ? AND status = 'active' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if row is not None and row[0] is not None:
+                    try:
+                        require_root_set_use_authorization(
+                            RootSetClaimBinding.model_validate(json.loads(row[0]))
+                        )
+                    except (RootSetError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                        if isinstance(exc, RootSetError):
+                            raise EventRejected(f"{exc.code}: {exc}") from exc
+                        raise EventRejected("root_set_authorization_required") from exc
+        if draft.action == "progress.attested" and isinstance(draft.payload_json, dict):
+            claim_id = draft.payload_json.get("claim_id")
+            if isinstance(claim_id, str):
+                row = conn.execute(
+                    "SELECT root_set FROM claims WHERE id = ?", (claim_id,)
+                ).fetchone()
+                if row is not None and row[0] is not None:
+                    try:
+                        require_root_set_use_authorization(
+                            RootSetClaimBinding.model_validate(json.loads(row[0]))
+                        )
+                    except (RootSetError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                        if isinstance(exc, RootSetError):
+                            raise EventRejected(f"{exc.code}: {exc}") from exc
+                        raise EventRejected("root_set_authorization_required") from exc
+        if draft.action == "file_changed":
+            # Hooks do not carry a claim id. Conservatively block direct file
+            # progress writes while any coordinated claim is active; supported
+            # hook callers establish the binding context below.
+            row = conn.execute(
+                "SELECT root_set FROM claims WHERE status = 'active' AND root_set IS NOT NULL "
+                "LIMIT 1"
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                try:
+                    require_root_set_use_authorization(
+                        RootSetClaimBinding.model_validate(json.loads(row[0]))
+                    )
+                except (RootSetError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    if isinstance(exc, RootSetError):
+                        raise EventRejected(f"{exc.code}: {exc}") from exc
+                    raise EventRejected("root_set_authorization_required") from exc
 
         with self._append_lock():
             if self._events_storage == "git":
@@ -4739,6 +4823,14 @@ class SqliteBackend:
             raise
         conn.execute("COMMIT")
 
+    def _m_to_v22(self, conn: sqlite3.Connection) -> None:
+        """v21 -> v22: immutable root-set claim binding (additive)."""
+        try:
+            conn.execute("ALTER TABLE claims ADD COLUMN root_set TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -4759,6 +4851,7 @@ class SqliteBackend:
         (18, _m_to_v19),
         (19, _m_to_v20),
         (20, _m_to_v21),
+        (21, _m_to_v22),
     ]
 
     @staticmethod
@@ -11456,6 +11549,7 @@ class SqliteBackend:
         branch: str | None = payload.branch
         worktree_path: str | None = payload.worktree_path
         git_metadata = payload.git_metadata
+        root_set = payload.root_set
         expected_files = payload.expected_files
         generation = payload.generation
         if generation is None:
@@ -11559,11 +11653,11 @@ class SqliteBackend:
             """
             INSERT OR IGNORE INTO claims
                 (id, task_id, claimed_by, claim_type, status, branch,
-                 worktree_path, git_metadata, session_id, expected_files, generation,
+                 worktree_path, git_metadata, root_set, session_id, expected_files, generation,
                  attestation_context, created_at,
                  lease_expires_at, last_heartbeat_at, released_at, release_reason)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """,
             (
                 claim_id,
@@ -11580,6 +11674,15 @@ class SqliteBackend:
                         separators=(",", ":"),
                     )
                     if git_metadata is not None
+                    else None
+                ),
+                (
+                    json.dumps(
+                        root_set.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if root_set is not None
                     else None
                 ),
                 getattr(payload, "session_id", None),
@@ -13648,6 +13751,8 @@ class SqliteBackend:
             d["attestation_context"] = json.loads(d["attestation_context"])
         if isinstance(d.get("git_metadata"), str):
             d["git_metadata"] = json.loads(d["git_metadata"])
+        if isinstance(d.get("root_set"), str):
+            d["root_set"] = json.loads(d["root_set"])
         return Claim.model_validate(d)
 
     @staticmethod

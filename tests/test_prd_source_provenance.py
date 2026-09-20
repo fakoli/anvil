@@ -643,7 +643,7 @@ def test_schema_v18_migration_preserves_tasks_and_demotes_unbound_lifecycle(
 
     migrated = _projection_backend(state_dir)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 21
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 22
         prd = migrated.get_prd("release")
         assert prd is not None
         assert prd.status.value == "draft"

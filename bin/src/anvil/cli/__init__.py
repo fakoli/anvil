@@ -45,6 +45,7 @@ from anvil.cli.project import project_app
 from anvil.cli.proof import proof_app
 from anvil.cli.repair import repair_app
 from anvil.cli.replay import replay
+from anvil.cli.roots import roots_app
 from anvil.cli.run_workflow import run_workflow
 from anvil.cli.scan import scan
 from anvil.cli.sync import sync_app
@@ -106,6 +107,7 @@ app.add_typer(proof_app, name="proof")
 app.add_typer(bundle_app, name="bundle")
 app.add_typer(project_app, name="project")
 app.add_typer(repair_app, name="repair")
+app.add_typer(roots_app, name="roots")
 
 # ---------------------------------------------------------------------------
 # --version callback

@@ -118,6 +118,8 @@ __all__ = [
     "ClaimAttestationContext",
     "ClaimProgressAttestation",
     "ClaimGitMetadata",
+    "RootSetRootFact",
+    "RootSetClaimBinding",
     "Claim",
     "BundleClaim",
     "Evidence",
@@ -1839,6 +1841,76 @@ class ClaimGitMetadata(BaseModel):
         return self
 
 
+class RootSetRootFact(BaseModel):
+    """One immutable prepared-root fact retained with a canonical claim."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    root_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    repository_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    baseline_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    canonical_root: StrictStr = Field(min_length=1, max_length=4096)
+    claim_worktree: StrictStr = Field(min_length=1, max_length=4096)
+    branch: StrictStr = Field(min_length=1, max_length=512)
+    verification_commands: tuple[StrictStr, ...] = Field(max_length=16)
+
+    @model_validator(mode="after")
+    def _validate_safe_fact(self) -> RootSetRootFact:
+        for value in (self.canonical_root, self.claim_worktree, self.branch):
+            if any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise ValueError("root-set fact contains a control character")
+        if not self.canonical_root.startswith("/") or not self.claim_worktree.startswith("/"):
+            raise ValueError("root-set paths must be absolute")
+        for command in self.verification_commands:
+            if (
+                not command
+                or len(command.encode("utf-8")) > 1024
+                or any(ord(char) < 32 or ord(char) == 127 for char in command)
+            ):
+                raise ValueError("root-set verification command is invalid")
+        return self
+
+
+class RootSetClaimBinding(BaseModel):
+    """Immutable owner-global reservation facts for a coordinated root-set claim.
+
+    State retains bounded prepared-root facts as well as the owner journal
+    identities, so lost registry data cannot make arbitrary targets ready.
+    All fields are absent for legacy claims.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    request_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    primary_root_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    request_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    root_set_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    reservation_id: StrictStr = Field(pattern=r"^R[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    root_facts: tuple[RootSetRootFact, ...] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def _validate_root_facts(self) -> RootSetClaimBinding:
+        if len({fact.root_id for fact in self.root_facts}) != len(self.root_facts):
+            raise ValueError("root-set root ids must be unique")
+        if len({fact.repository_id for fact in self.root_facts}) != len(self.root_facts):
+            raise ValueError("root-set repository ids must be unique")
+        if self.primary_root_id not in {fact.root_id for fact in self.root_facts}:
+            raise ValueError("root-set primary root must be present")
+        digest_input = {
+            "primary_root_id": self.primary_root_id,
+            "roots": [fact.model_dump(mode="json") for fact in self.root_facts],
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                digest_input, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        ).hexdigest()
+        if self.root_set_digest != digest:
+            raise ValueError("root-set digest does not match immutable root facts")
+        return self
+
+
 class Claim(BaseModel):
     """An exclusive lease that an agent holds on a Task while working on it."""
 
@@ -1852,6 +1924,7 @@ class Claim(BaseModel):
     branch: str | None = None
     worktree_path: str | None = None
     git_metadata: ClaimGitMetadata | None = None
+    root_set: RootSetClaimBinding | None = None
     expected_files: list[str] = Field(default_factory=list)
     # Monotonic per-task lifecycle generation.  v17 migration deterministically
     # assigns generations to legacy rows; only claims with an immutable context
@@ -1908,6 +1981,8 @@ class Claim(BaseModel):
             data.pop("bundle_claim_id", None)
         if data.get("git_metadata") is None:
             data.pop("git_metadata", None)
+        if data.get("root_set") is None:
+            data.pop("root_set", None)
         return data
 
 

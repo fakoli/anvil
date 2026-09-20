@@ -44,7 +44,7 @@ def _init(tmp_path: Path) -> None:
 def test_get_schema_version_matches_constant() -> None:
     """The public accessor returns the current SCHEMA_VERSION constant."""
     assert get_schema_version() == SCHEMA_VERSION
-    assert get_schema_version() == 21
+    assert get_schema_version() == 22
 
 
 def test_backend_get_schema_version_matches_constant(tmp_path: Path) -> None:
@@ -103,13 +103,59 @@ def test_v19_migration_adds_nullable_task_and_bundle_git_metadata(
     )
     migrated.initialize()
     try:
-        assert migrated.get_schema_version() == 21
+        assert migrated.get_schema_version() == 22
         conn = migrated._require_conn()  # noqa: SLF001
         for table in ("claims", "bundle_claims"):
             columns = {
                 row[1] for row in conn.execute(f"PRAGMA table_info({table})")
             }
             assert "git_metadata" in columns
+    finally:
+        migrated.close()
+
+
+def test_v21_migration_adds_nullable_root_set_claim_binding(
+    tmp_path: Path,
+) -> None:
+    """The additive v21->v22 step preserves legacy claim projections."""
+    import sqlite3
+
+    from anvil.clock import SystemClock
+    from anvil.state.sqlite import SqliteBackend
+
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    events_path = state_dir / "events.jsonl"
+    events_path.touch()
+    db_path = state_dir / "state.db"
+    initial = SqliteBackend(
+        db_path=str(db_path),
+        events_path=str(events_path),
+        clock=SystemClock(),
+    )
+    initial.initialize()
+    initial.close()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("ALTER TABLE claims DROP COLUMN root_set")
+        conn.execute("PRAGMA user_version = 21")
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrated = SqliteBackend(
+        db_path=str(db_path),
+        events_path=str(events_path),
+        clock=SystemClock(),
+    )
+    migrated.initialize()
+    try:
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 22
+        columns = {
+            row[1]
+            for row in migrated._require_conn().execute("PRAGMA table_info(claims)")  # noqa: SLF001
+        }
+        assert "root_set" in columns
     finally:
         migrated.close()
 

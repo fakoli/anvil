@@ -39,6 +39,7 @@ from anvil.state.models import (
     ClaimStatus,
     ClaimType,
     EventDraft,
+    RootSetClaimBinding,
     Task,
     TaskPriority,
     TaskStatus,
@@ -509,6 +510,8 @@ class ClaimManager:
         branch: str | None = None,
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
+        root_set: RootSetClaimBinding | None = None,
+        root_set_authorization: object | None = None,
         operation_locked: bool = False,
         pre_log_check: Callable[[], None] | None = None,
     ) -> ClaimResult:
@@ -573,29 +576,98 @@ class ClaimManager:
             ClaimError: If any gate fails (task not found, wrong status, PRD gate,
                         or conflict with force=False).
         """
+        # The owner-global root registry is intentionally consulted before the
+        # State operation lock.  It is never read under SQLite's append lock.
+        # Absent activation preserves legacy claims byte-for-byte.
+        if root_set is not None:
+            from anvil.roots.registry import root_set_claim_authorized
+
+            if not root_set_claim_authorized(root_set, root_set_authorization):
+                raise ClaimError(
+                    "root_set_authorization_required: canonical root-set claims "
+                    "must be created by the locked owner registry."
+                )
+        elif operation_locked:
+            # Callers that already hold the State operation lock must have
+            # acquired the owner lock first.  Opening the registry here would
+            # invert global -> State ordering.
+            from anvil.roots.registry import ordinary_claim_coordinator_held
+
+            if not ordinary_claim_coordinator_held():
+                raise ClaimError(
+                    "root_set_coordinator_required: ordinary claims under the "
+                    "State operation lock require the owner coordinator."
+                )
+        else:
+            from anvil.roots.registry import (
+                RootSetError,
+                RootSetRegistry,
+                assert_unscoped_claim_allowed,
+            )
+
+            try:
+                if self._project_root is None:
+                    assert_unscoped_claim_allowed()
+                else:
+                    with RootSetRegistry().ordinary_claim_coordinator(self._project_root):
+                        return self._claim_after_authorization(
+                            task_id, expected_files, claim_type, force, branch,
+                            worktree_path, git_metadata, root_set,
+                            root_set_authorization, pre_log_check, operation_locked,
+                        )
+            except RootSetError as exc:
+                raise ClaimError(f"{exc.code}: {exc}") from exc
+        return self._claim_after_authorization(
+            task_id, expected_files, claim_type, force, branch, worktree_path,
+            git_metadata, root_set, root_set_authorization, pre_log_check,
+            operation_locked,
+        )
+
+    def _claim_after_authorization(
+        self,
+        task_id: str,
+        expected_files: list[str] | None,
+        claim_type: ClaimType,
+        force: bool,
+        branch: str | None,
+        worktree_path: str | None,
+        git_metadata: ClaimGitMetadata | None,
+        root_set: RootSetClaimBinding | None,
+        root_set_authorization: object | None,
+        pre_log_check: Callable[[], None] | None,
+        operation_locked: bool,
+    ) -> ClaimResult:
         lock_factory = getattr(self._backend, "claim_operation_lock", None)
         if lock_factory is not None and not operation_locked:
             with lock_factory():
-                return self._claim_unlocked(
-                    task_id,
-                    expected_files=expected_files,
-                    claim_type=claim_type,
-                    force=force,
-                    branch=branch,
-                    worktree_path=worktree_path,
-                    git_metadata=git_metadata,
-                    pre_log_check=pre_log_check,
+                return self._claim_with_live_append_authorization(
+                    task_id, expected_files, claim_type, force, branch,
+                    worktree_path, git_metadata, root_set,
+                    root_set_authorization, pre_log_check,
                 )
-        return self._claim_unlocked(
-            task_id,
-            expected_files=expected_files,
-            claim_type=claim_type,
-            force=force,
-            branch=branch,
-            worktree_path=worktree_path,
-            git_metadata=git_metadata,
-            pre_log_check=pre_log_check,
+        return self._claim_with_live_append_authorization(
+            task_id, expected_files, claim_type, force, branch, worktree_path,
+            git_metadata, root_set, root_set_authorization, pre_log_check,
         )
+
+    def _claim_with_live_append_authorization(
+        self, task_id: str, expected_files: list[str] | None, claim_type: ClaimType,
+        force: bool, branch: str | None, worktree_path: str | None,
+        git_metadata: ClaimGitMetadata | None, root_set: RootSetClaimBinding | None,
+        root_set_authorization: object | None,
+        pre_log_check: Callable[[], None] | None,
+    ) -> ClaimResult:
+        from anvil.roots.registry import live_claim_append_authorized
+
+        with live_claim_append_authorized(
+            binding=root_set, authorization=root_set_authorization
+        ):
+            return self._claim_unlocked(
+                task_id, expected_files=expected_files, claim_type=claim_type,
+                force=force, branch=branch, worktree_path=worktree_path,
+                git_metadata=git_metadata, root_set=root_set,
+                pre_log_check=pre_log_check,
+            )
 
     def _claim_unlocked(
         self,
@@ -607,6 +679,7 @@ class ClaimManager:
         branch: str | None = None,
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
+        root_set: RootSetClaimBinding | None = None,
         pre_log_check: Callable[[], None] | None = None,
     ) -> ClaimResult:
         """Claim implementation; caller owns same-backend serialization."""
@@ -790,6 +863,7 @@ class ClaimManager:
             branch=branch,
             worktree_path=worktree_path,
             git_metadata=git_metadata,
+            root_set=root_set,
             generation=generation,
             attestation_context=attestation_context,
         )
@@ -1037,17 +1111,22 @@ class ClaimManager:
             lease_expires_at=claim.lease_expires_at,
             released_at=claim.released_at,
         )
+        draft = EventDraft(
+            timestamp=now,
+            actor=self._actor,
+            action="progress.attested",
+            target_kind="claim",
+            target_id=claim.id,
+            payload_json=verified.model_dump(),
+        )
         try:
-            self._backend.append(
-                EventDraft(
-                    timestamp=now,
-                    actor=self._actor,
-                    action="progress.attested",
-                    target_kind="claim",
-                    target_id=claim.id,
-                    payload_json=verified.model_dump(),
-                )
-            )
+            if claim.root_set is None:
+                self._backend.append(draft)
+            else:
+                from anvil.roots.registry import root_set_use_authorized
+
+                with root_set_use_authorized(claim.root_set, backend=self._backend):
+                    self._backend.append(draft)
         except BackendError as exc:
             raise ProgressAttestationError("attestation_rejected", str(exc)) from exc
         persisted = self._backend.get_progress_attestation(
@@ -1062,6 +1141,51 @@ class ClaimManager:
     def renew(self, claim_id: str) -> Claim:
         """Compatibility wrapper returning only the updated Claim model."""
         return self.renew_with_result(claim_id).claim
+
+    def renewal_is_eligible(self, claim_id: str) -> bool:
+        """Validate the non-mutating gates required before a global renewal.
+
+        The owner-global roots journal must record its extension before the
+        canonical State event.  Keeping this preflight here ensures that it
+        uses the same owner, lease, max-age, and progress semantics as
+        :meth:`renew_with_result`; the latter repeats all gates under State's
+        normal append path before it mutates anything.
+        """
+        claim = self._backend.get_claim(claim_id)
+        if claim is None:
+            raise ClaimError(f"Claim '{claim_id}' not found.")
+        if claim.claimed_by != self._actor:
+            raise ClaimError(
+                f"Claim '{claim_id}' belongs to '{claim.claimed_by}', "
+                f"not '{self._actor}'. Only the owning actor can renew a claim."
+            )
+        if claim.status != ClaimStatus.active:
+            raise ClaimError(
+                f"Claim '{claim_id}' has status '{claim.status}'; "
+                "only active claims can be renewed."
+            )
+        now = self._clock.now()
+        if claim.lease_expires_at < now:
+            raise ClaimError(
+                f"Claim '{claim_id}' lease expired at "
+                f"{claim.lease_expires_at.isoformat()} "
+                f"(now: {now.isoformat()}). The lease has already expired; "
+                "please re-claim the task."
+            )
+        max_age_deadline = claim.created_at + datetime.timedelta(
+            minutes=self._max_claim_age_minutes
+        )
+        if now >= max_age_deadline:
+            raise ClaimError(
+                f"Claim '{claim_id}' has exceeded its max age of "
+                f"{self._max_claim_age_minutes:g} min; renewal refused."
+            )
+        pending = (
+            self._backend.get_pending_progress_attestation(claim.id, claim.generation)
+            if claim.attestation_context is not None
+            else None
+        )
+        return pending is not None or self._has_progress_since(claim)
 
     def renew_with_result(self, claim_id: str) -> RenewResult:
         """Heartbeat a claim — extend the lease and record last_heartbeat_at.
@@ -1104,6 +1228,16 @@ class ClaimManager:
         claim = self._backend.get_claim(claim_id)
         if claim is None:
             raise ClaimError(f"Claim '{claim_id}' not found.")
+        if claim.root_set is not None:
+            from anvil.roots.registry import (
+                RootSetError,
+                require_root_set_lifecycle_authorization,
+            )
+
+            try:
+                require_root_set_lifecycle_authorization(claim.root_set)
+            except RootSetError as exc:
+                raise ClaimError(f"{exc.code}: {exc}") from exc
 
         if claim.claimed_by != self._actor:
             raise ClaimError(
@@ -1320,6 +1454,7 @@ class ClaimManager:
         branch: str | None = None,
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
+        root_set: RootSetClaimBinding | None = None,
         generation: int = 1,
         attestation_context: dict[str, object] | None = None,
     ) -> Claim:
@@ -1334,6 +1469,7 @@ class ClaimManager:
             branch=branch,
             worktree_path=worktree_path,
             git_metadata=git_metadata,
+            root_set=root_set,
             session_id=self._session_id,
             expected_files=expected_files,
             generation=generation,

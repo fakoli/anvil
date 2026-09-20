@@ -34,6 +34,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v19     | Task-rejection provenance | `reviews` adds immutable engine-derived category, reason, attempt/claim identity, evidence digest, typed findings, matched process predicate, and accept-rate accounting. Historical task rejections migrate conservatively as counting `quality`; no missing identity is fabricated. |
 | v20     | Transactional claim Git bindings | `claims` and `bundle_claims` add nullable `git_metadata` containing the validated selected base, exact claim-start identity, branch, repository root, and shared/isolated target. Historical claims remain unbound. |
 | v21     | Revision-bound PRD lifecycle | `prds` adds canonical material/content identity and the exact source/material/content lineage reviewed or approved. Pre-v21 review and approval state is preserved in the audit log but demoted to unbound `draft`; Anvil never fabricates proof that historical content was reviewed. |
+| v22     | Coordinated root-set claim binding | `claims` adds nullable immutable owner reservation/request/digest/root facts for coordinated multi-root claims. Historical claim rows remain unbound. |
 
 Canonical PRD titles require no new schema migration: `prds.title` has existed
 since v7. Historical rows and legacy events that have no title remain `""`;
@@ -186,6 +187,13 @@ H1 project title may retain that binding because title is replaced by a fixed
 sentinel for the material digest; every other material change returns the PRD
 to `draft`. Live append and replay both validate the complete lineage.
 
+## Coordinated root-set claim bindings — v21 → v22 auto-upgrade
+
+The v22 migration adds nullable `root_set` to task claim projections. New
+coordinated claims retain their immutable owner reservation, request, digest,
+primary-root, and per-root Git facts. Existing claims remain `NULL`; migration
+does not inspect repositories or fabricate a multi-root authority.
+
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
 The schema diff from v1/v2 to v3 is **purely additive**:
@@ -285,13 +293,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v21, including the final v20→v21 step) that already lives in
+(currently v22, including the final v21→v22 step) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v21
+Schema migration  : v3 -> v22
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -299,7 +307,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v21.
+Migrated state.db v3 -> v22.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 

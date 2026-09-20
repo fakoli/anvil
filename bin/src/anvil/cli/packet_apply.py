@@ -559,6 +559,7 @@ def packet(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir)
 
+    root_set_claim = None
     backend = _open_backend(state_dir)
     try:
         _reap_stale_claims(backend)
@@ -644,6 +645,11 @@ def packet(
             if claim.task_id == task_id:
                 active_claim = claim
                 break
+        root_set_claim = (
+            active_claim
+            if active_claim is not None and active_claim.root_set is not None
+            else None
+        )
 
         # T017 — surface prior deferred / failed-review findings whose files
         # overlap this task's files. The concrete claim (if any) carries the
@@ -693,18 +699,35 @@ def packet(
     finally:
         backend.close()
 
-    # Determine output path and content.
-    packets_dir = state_dir / "packets"
-    packets_dir.mkdir(exist_ok=True)
+    # Re-open only for the owner-authorized sidecar write.  The first reader
+    # was deliberately closed before this point; the second authoritative read
+    # happens under global -> State ordering and defeats stale packet claims.
+    use_backend = _open_backend(state_dir) if root_set_claim is not None else None
+    try:
+        from contextlib import nullcontext
 
-    if fmt == "json":
-        out_path = packets_dir / f"{safe_path_component(task_id)}.json"
-        content = json.dumps(work_packet.json_data, indent=2)
-    else:
-        out_path = packets_dir / f"{safe_path_component(task_id)}.md"
-        content = work_packet.markdown
+        from anvil.roots.registry import root_set_use_authorized
 
-    out_path.write_text(content, encoding="utf-8")
+        use_context = (
+            root_set_use_authorized(root_set_claim.root_set, backend=use_backend)
+            if root_set_claim is not None
+            else nullcontext()
+        )
+        with use_context:
+            packets_dir = state_dir / "packets"
+            packets_dir.mkdir(exist_ok=True)
+
+            if fmt == "json":
+                out_path = packets_dir / f"{safe_path_component(task_id)}.json"
+                content = json.dumps(work_packet.json_data, indent=2)
+            else:
+                out_path = packets_dir / f"{safe_path_component(task_id)}.md"
+                content = work_packet.markdown
+
+            out_path.write_text(content, encoding="utf-8")
+    finally:
+        if use_backend is not None:
+            use_backend.close()
     typer.echo(f"Wrote packet to {out_path}")
     typer.echo("")
     # Echo the rendered content matching the selected format. Greptile PR #41
