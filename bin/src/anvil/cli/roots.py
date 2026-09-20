@@ -243,9 +243,8 @@ def claim(
     _require_state_dir(state_dir, command=command, json_output=json_output)
     project_root = _resolve_project_dir(cwd)
     try:
-        request = _load_request(request_file)
+        request, _request_id, digest = _original_request_identity(task_id=task_id, request_file=request_file, actor=resolved_actor, state_dir=state_dir)
         request["task_id"] = task_id
-        digest = request_digest({"task_id": task_id, "actor": resolved_actor, "state_identity": str(state_dir.resolve()), "request": {key: request[key] for key in ("schema", "request_id", "primary_root_id", "roots")}})
         registry_owner = RootSetRegistry()
         backend = _open_backend(state_dir)
         try:
@@ -389,6 +388,36 @@ def _load_reservation(request_id: str, actor: str, digest: str) -> dict[str, Any
         if reservation is None or reservation.get("actor") != actor or reservation.get("digest") != digest:
             raise RootSetError("root_set_reconciliation_required", "root-set request identity is unavailable.")
         return dict(reservation)
+
+
+def _original_request_identity(*, task_id: str, request_file: Path, actor: str, state_dir: Path) -> tuple[dict[str, Any], str, str]:
+    """Derive a lost-response lookup identity without exposing digest rules."""
+    request = _load_request(request_file)
+    digest = request_digest({"task_id": task_id, "actor": actor, "state_identity": str(state_dir.resolve()), "request": {key: request[key] for key in ("schema", "request_id", "primary_root_id", "roots")}})
+    return request, request["request_id"], digest
+
+
+@roots_app.command("request-digest")
+def request_digest_command(
+    task_id: str,
+    request_file: Path = typer.Option(..., "--request-file"),  # noqa: B008
+    actor: str = typer.Option(..., "--actor"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Derive the immutable lookup digest for an original root-set request."""
+    command = "roots request-digest"
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command=command, json_output=json_output)
+    try:
+        _request, request_id, digest = _original_request_identity(task_id=task_id, request_file=request_file, actor=resolve_actor(actor), state_dir=state_dir)
+    except RootSetError as exc:
+        _root_fail(command, exc, json_output)
+    data = {"schema": "anvil.root-set-request-digest/v1", "request_id": request_id, "request_digest": digest}
+    if json_output:
+        emit_success(command, data)
+    else:
+        typer.echo(f"Root-set request '{request_id}' digest derived.")
 
 
 @roots_app.command("status")
