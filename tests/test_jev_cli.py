@@ -13,9 +13,26 @@ from typer.testing import CliRunner
 from anvil.cli import app
 from anvil.cli import jev as cli
 from anvil.config import load_config, load_merged_config
+from anvil import jev
 from anvil.jev import JevConfig
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_jev_home_and_transport(tmp_path, monkeypatch):
+    """Jev CLI tests may only use a synthetic home and injected transport."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    bounded_request = jev._bounded_request
+
+    def deny_live_transport(config, key, body, transport, deadline):
+        if transport is None:
+            raise AssertionError("Jev tests require an injected transport")
+        return bounded_request(config, key, body, transport, deadline)
+
+    monkeypatch.setattr(jev, "_bounded_request", deny_live_transport)
 
 
 @pytest.fixture
@@ -50,6 +67,25 @@ def test_default_off_skips_missing_input_and_key(project, monkeypatch):
     assert report["status"] == "disabled"
     assert report["request_started"] is False
     assert report["used"] is False
+
+
+def test_cli_uses_selected_cwd_for_default_credential_project(project, tmp_path, monkeypatch):
+    payload(invoke(project, "enable", "evidence_triage", "--allow-api"))
+    source = project / "selected.json"
+    source.write_text('{"claim":"Works","observation":"Started"}')
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / ".env").write_text("TYPESAFE_API_KEY=wrong-project-key\n")
+    captured = []
+
+    def fake(*args, **kwargs):
+        captured.append(kwargs["project_root"])
+        return {"status": "disabled", "reason": "disabled", "request_started": False, "used": False, "answers": {}}
+
+    monkeypatch.chdir(other)
+    monkeypatch.setattr(cli, "call_jev", fake)
+    payload(invoke(project, "evaluate", "evidence_triage", "--input", str(source), "--allow-export"))
+    assert captured == [project.resolve()]
 
 
 def test_enable_is_scoped_explicit_and_preserves_providers(project):

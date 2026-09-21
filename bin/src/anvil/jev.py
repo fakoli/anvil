@@ -12,10 +12,12 @@ import math
 import multiprocessing
 import os
 import re
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,6 +30,7 @@ API_URL = "https://api.typesafe.ai/v1/systemone"
 MAX_INPUT_BYTES = 32 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_QUESTIONS = 32
+MAX_CREDENTIAL_FILE_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,72 @@ class JevConfig:
             raise ValueError("jev.capabilities must be a list")
         values["capabilities"] = tuple(capabilities)
         return cls(**values)
+
+
+def _dotenv_key(path: Path) -> str | None:
+    """Read one literal TYPESAFE_API_KEY assignment without shell evaluation."""
+    if path.is_symlink():
+        raise ValueError("credential_source_invalid")
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    with os.fdopen(descriptor, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("credential_source_invalid")
+        raw = source.read(MAX_CREDENTIAL_FILE_BYTES + 1)
+    if len(raw) > MAX_CREDENTIAL_FILE_BYTES:
+        raise ValueError("credential_source_invalid")
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise ValueError("credential_source_invalid") from None
+
+    matches: list[str] = []
+    assignment = re.compile(r"^[ \t]*(?:export[ \t]+)?TYPESAFE_API_KEY[ \t]*=[ \t]*(.*)$")
+    malformed = re.compile(
+        r"^[ \t]*(?:export[ \t]+)?TYPESAFE_API_KEY(?![A-Za-z0-9_])(?:[ \t]*$|[ \t]*[^=])"
+    )
+    for line in lines:
+        match = assignment.match(line)
+        if match is None:
+            if malformed.match(line):
+                raise ValueError("credential_source_invalid")
+            continue
+        value = match.group(1).strip()
+        if value[:1] in {"'", '"'}:
+            quote = value[0]
+            if len(value) < 2 or quote not in value[1:]:
+                raise ValueError("credential_source_invalid")
+            end = value.find(quote, 1)
+            if value[end + 1:].strip() and not value[end + 1:].lstrip().startswith("#"):
+                raise ValueError("credential_source_invalid")
+            value = value[1:end]
+        else:
+            value = re.split(r"[ \t]+#", value, maxsplit=1)[0].rstrip()
+        if not value:
+            raise ValueError("credential_source_invalid")
+        matches.append(value)
+    if len(matches) > 1:
+        raise ValueError("credential_source_invalid")
+    return matches[0] if matches else None
+
+
+def resolve_api_key(config: JevConfig, project_root: Path | None = None) -> str | None:
+    """Resolve the default Jev key from env, selected project, then home."""
+    key = os.environ.get(config.api_key_env)
+    if key:
+        return key
+    if config.api_key_env != "TYPESAFE_API_KEY":
+        return None
+    candidates = ([] if project_root is None else [project_root / ".env"]) + [Path.home() / ".env"]
+    for path in candidates:
+        try:
+            key = _dotenv_key(path)
+        except FileNotFoundError:
+            continue
+        if key is not None:
+            return key
+    return None
 
 
 def _json_bytes(value: object) -> bytes:
@@ -286,6 +355,7 @@ def evaluate(
     allow_api: bool = False,
     disabled: bool = False,
     transport: httpx.BaseTransport | None = None,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Return a sanitized, advisory report. No retries, fallback, or state writes.
 
@@ -328,7 +398,10 @@ def evaluate(
         report["input_digest"] = hashlib.sha256(_json_bytes(snapshot["state"])).hexdigest()
     except (TypeError, ValueError, UnicodeError, RecursionError):
         return finish("blocked", "invalid_input")
-    key = os.environ.get(config.api_key_env)
+    try:
+        key = resolve_api_key(config, project_root)
+    except (OSError, ValueError):
+        return finish("unavailable", "credential_source_invalid")
     if not key:
         return finish("unavailable", "missing_credentials")
     if len(key) > 4096 or any(not 33 <= ord(c) <= 126 for c in key):
