@@ -10,10 +10,10 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from anvil import jev
 from anvil.cli import app
 from anvil.cli import jev as cli
 from anvil.config import load_config, load_merged_config
-from anvil import jev
 from anvil.jev import JevConfig
 
 runner = CliRunner()
