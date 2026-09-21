@@ -478,8 +478,20 @@ _SCHEMA_INITIALIZATION_LOCK = threading.RLock()
 _SCHEMA_INITIALIZATION_LOCAL = threading.local()
 
 
+def _require_no_event_recovery(db_path: str | os.PathLike[str]) -> None:
+    """Fail closed until an interrupted local history repair is resumed."""
+    marker = Path(db_path).parent / ".local-event-recovery.json"
+    # lexists includes broken links: an unsafe marker never means idle state.
+    if os.path.lexists(marker):
+        raise SchemaProbeFailed(
+            "Local event recovery is pending; use anvil repair local-event --resume."
+        )
+
+
 @contextmanager
-def _schema_initialization_lock(db_path: str, events_path: str) -> Iterator[None]:
+def _schema_initialization_lock(
+    db_path: str, events_path: str, *, allow_event_recovery: bool = False
+) -> Iterator[None]:
     """Serialize Anvil initializers without creating a separate lock entry.
 
     The event log is the stable token because Git replay can replace the SQLite
@@ -488,6 +500,8 @@ def _schema_initialization_lock(db_path: str, events_path: str) -> Iterator[None
     future schema still creates nothing.  A per-thread stack reuses ownership
     during nested Git projection rebuilds.
     """
+    if not allow_event_recovery:
+        _require_no_event_recovery(db_path)
     canonical = os.path.normcase(os.path.realpath(db_path))
     with _SCHEMA_INITIALIZATION_LOCK:
         stack: list[tuple[str, Any | None]] = getattr(
@@ -527,6 +541,8 @@ def _schema_initialization_lock(db_path: str, events_path: str) -> Iterator[None
                     time.sleep(min(next(delays), remaining))
             stack.append((canonical, lock_fh))
             try:
+                if not allow_event_recovery:
+                    _require_no_event_recovery(db_path)
                 yield
             finally:
                 stack.pop()
@@ -724,6 +740,7 @@ def query_only_transaction(
     proven to exist and is never written.  Callers may seek/read it while the
     lock and SQLite snapshot remain held.
     """
+    _require_no_event_recovery(db_path)
     database = Path(db_path)
     events = Path(events_path)
     if not database.is_file() or not events.is_file():
@@ -777,6 +794,7 @@ def query_only_transaction(
                     time.sleep(min(next(delays), remaining))
             stack.append((canonical, lock_fh))
             try:
+                _require_no_event_recovery(db_path)
                 confirmed = read_db_schema_version(database)
                 if confirmed != SCHEMA_VERSION:
                     raise SchemaMismatch(
@@ -1550,6 +1568,8 @@ class SqliteBackend:
            Any interior malformed line raises — that is corruption, not a torn write.
         5. Re-seed ``_next_seq`` from the max id seen during replay.
         """
+        _require_no_event_recovery(self._db_path)
+        _require_no_event_recovery(Path(events_path).parent / "state.db")
         if self._events_storage == "git":
             # v1.22.0 — order-tolerant replay; see _replay_from_empty_git.
             # The strict-sequence body below is the LOCAL path and stays
@@ -2843,6 +2863,8 @@ class SqliteBackend:
         (an unbounded replay would have applied a different set, so silently
         replaying everything would be a lie about the bound).
         """
+        _require_no_event_recovery(self._db_path)
+        _require_no_event_recovery(Path(events_path).parent / "state.db")
         if self._events_storage == "git":
             self._replay_to_event_id_git(events_path, stop_after_event_id)
             return
@@ -4922,6 +4944,7 @@ class SqliteBackend:
 
     def _require_conn(self) -> sqlite3.Connection:
         """Return the open connection or raise if not initialised."""
+        _require_no_event_recovery(self._db_path)
         if self._conn is None:
             raise RuntimeError(
                 "SqliteBackend.initialize() must be called before any query or mutation."
@@ -4986,6 +5009,7 @@ class SqliteBackend:
                         # Clamp so the final sleep cannot overshoot the budget.
                         self._sleep_fn(min(next(delays), remaining))
                 try:
+                    _require_no_event_recovery(self._db_path)
                     self._append_lock_depth = 1
                     yield
                 finally:
@@ -5237,6 +5261,7 @@ class SqliteBackend:
         append). One line of lookahead preserves that distinction without
         holding the whole JSONL source in memory.
         """
+        _require_no_event_recovery(Path(events_path).parent / "state.db")
         previous: tuple[int, str] | None = None
         with open(events_path, encoding="utf-8") as fh:
             for line_number, raw_line in enumerate(fh, start=1):

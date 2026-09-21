@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> CLI: 86 executable leaf commands.
+> CLI: 87 executable leaf commands.
 
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.12 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.13 (schema 22)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1782,6 +1782,38 @@ flag list; full prose treatment may follow in a later pass.
   append one current `project.created` event after replay verification. It
   refuses existing project history, malformed or divergent owners, and unsafe
   state artifacts.
+- `anvil repair local-event --receipt recovery.json --json` — Preview restoring
+  one interior local event omitted after an audited write failure. The original
+  line must come from a matching historical backup. The live projection must
+  equal baseline replay, apart from the precisely recognized legacy `root_set`
+  default/column-placement representation. Recovery preserves the live schema
+  and every existing row, including those legacy representations; only the
+  missing event row is added. The strict reader remains unchanged.
+
+  A reviewed receipt has exactly `schema_version` (integer `1`), `project_id`,
+  `event_id`, `log_sha256`, `event_line_sha256`, `backup_path`, and
+  `audit_record_sha256`. Digests are lowercase SHA-256: log/line digests cover
+  their exact bytes (including the line ending); the audit digest covers Anvil's
+  canonical JSON encoding of the matching `write_failed_after_log` record.
+  Keep operator receipts and backups outside public Git. A supplied hash alone
+  is not evidence of provenance; review the original backup and matching audit.
+
+  After independent review, `--apply --exclusive-access` publishes the verified
+  recovery. `--exclusive-access` attests that ALL other Anvil clients and
+  operations, including backup/restore, are stopped for the entire operation;
+  the command does not stop them. Upgrading a peer alone is insufficient.
+  Keep peers stopped after an interruption until explicit resume finishes.
+  Pending-marker guards reject newly started accesses; they do not cancel
+  operations already in flight. Older MCP servers must be replaced before
+  reconnecting. Unrelated serving processes do not need restarting.
+
+  Publication retains the live log and database inodes and durable before/after
+  copies. An interruption leaves `.local-event-recovery.json`; normal access
+  refuses until `anvil repair local-event --resume --exclusive-access --json`
+  safely completes the recorded operation. Do not delete the marker or run
+  another repair around it. Unexpected state or unsafe artifacts cause refusal.
+  Current bounds are 64 MiB per input artifact, 2 MiB per event/audit line, and
+  64 KiB per receipt. No S3 upload, invented event, or PRD approval occurs.
 
 **PRD authoring extras**
 

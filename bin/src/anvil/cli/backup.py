@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import typer
 
 from anvil.cli._helpers import _resolve_state_dir
+from anvil.state.sqlite import _require_no_event_recovery
 
 if TYPE_CHECKING:
     from anvil.config import Config
@@ -32,6 +33,7 @@ def backup(
     from anvil.state.durable import S3Error
 
     state_dir = _resolve_state_dir(cwd)
+    _require_no_event_recovery(state_dir / "state.db")
     config = _load_config_required(state_dir)
     store = _make_store(config)
     try:
@@ -56,6 +58,7 @@ def restore(
 ) -> None:
     """Pull events.jsonl from S3 and replay into state.db (destructive)."""
     state_dir = _resolve_state_dir(cwd)
+    _require_no_event_recovery(state_dir / "state.db")
     config = _load_config_required(state_dir)
     if not yes:
         typer.confirm(
