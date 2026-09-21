@@ -15,7 +15,7 @@ from typing import Any
 import typer
 import yaml
 
-from anvil.cli._helpers import _require_state_dir, _resolve_state_dir
+from anvil.cli._helpers import _require_state_dir, _resolve_project_dir, _resolve_state_dir
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.config import Config, global_config_path, load_merged_config
 from anvil.jev import CAPABILITIES, JevConfig
@@ -65,12 +65,16 @@ def advise(
     allow_api: bool,
     allow_export: bool,
     disabled: bool = False,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Validate a product rubric only after all export guards pass."""
     if disabled or not config.enabled or capability not in config.capabilities or not allow_api:
-        return call_jev(config, capability, {}, {}, allow_api=allow_api, disabled=disabled)
+        return call_jev(
+            config, capability, {}, {}, allow_api=allow_api, disabled=disabled,
+            project_root=project_root,
+        )
     if allow_export is not True:
-        report = call_jev(config, capability, {}, {}, allow_api=False)
+        report = call_jev(config, capability, {}, {}, allow_api=False, project_root=project_root)
         report["reason"] = "export_permission_required"
         return report
     from anvil.jev_questions import build_questions
@@ -78,10 +82,12 @@ def advise(
     try:
         state, questions = build_questions(capability, value)
     except (ValueError, TypeError, RecursionError):
-        report = call_jev(config, capability, {}, {}, allow_api=False)
+        report = call_jev(config, capability, {}, {}, allow_api=False, project_root=project_root)
         report["reason"] = "invalid_or_sensitive_input"
         return report
-    return call_jev(config, capability, state, questions, allow_api=allow_api)
+    return call_jev(
+        config, capability, state, questions, allow_api=allow_api, project_root=project_root,
+    )
 
 
 def _show(command: str, report: dict[str, Any], json_output: bool) -> None:
@@ -309,6 +315,7 @@ def evaluate(
         allow_api=config.llm_allow_api,
         allow_export=allow_export,
         disabled=no_jev or not _current(state_dir, config, generation),
+        project_root=_resolve_project_dir(cwd),
     )
     # Recheck a concurrent off switch before exposing a late recommendation.
     if not _current(state_dir, config, generation):
@@ -351,6 +358,7 @@ def audit(
             allow_api=config.llm_allow_api,
             allow_export=allow_export,
             disabled=no_jev,
+            project_root=_resolve_project_dir(cwd),
         )
         _show("jev audit", report, json_output)
         return
@@ -390,6 +398,7 @@ def audit(
             item["input"],
             allow_api=config.llm_allow_api,
             allow_export=allow_export,
+            project_root=_resolve_project_dir(cwd),
         )
         reports.append({"id": item["id"], "annotation": report})
     try:
@@ -494,6 +503,7 @@ def assess(
         allow_api=config.llm_allow_api,
         allow_export=allow_export,
         disabled=not _current(state_dir, config, generation),
+        project_root=_resolve_project_dir(cwd),
     )
     if not _current(state_dir, config, generation):
         report.update(status="unavailable", reason="policy_changed", used=False, answers={})

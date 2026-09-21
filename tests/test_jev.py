@@ -22,6 +22,22 @@ QUESTIONS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _isolate_jev_home_and_transport(tmp_path, monkeypatch):
+    """Jev tests may only use a synthetic home and an injected transport."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    bounded_request = jev._bounded_request
+
+    def deny_live_transport(config, key, body, transport, deadline):
+        if transport is None:
+            raise AssertionError("Jev tests require an injected transport")
+        return bounded_request(config, key, body, transport, deadline)
+
+    monkeypatch.setattr(jev, "_bounded_request", deny_live_transport)
+
+
 def payload():
     return {"model": "jev-1.13.0", "answers": {
         "support": {"type": "choice", "choice": "supports", "confidence": 0.9,
@@ -76,6 +92,15 @@ def test_off_guard_precedes_credentials_network_and_serialization(monkeypatch, c
     assert report["status"] == status
     assert report["used"] is report["request_started"] is False
     assert report["input_digest"] is report["rubric_digest"] is None
+
+
+def test_disabled_or_api_denied_does_not_resolve_credential_files(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("credential resolution should be gated")
+
+    monkeypatch.setattr(jev, "resolve_api_key", forbidden)
+    assert jev.evaluate(jev.JevConfig(), "prd_review", "source", QUESTIONS, allow_api=True)["status"] == "disabled"
+    assert jev.evaluate(CONFIG, "prd_review", "source", QUESTIONS)["reason"] == "api_permission_required"
 
 
 def test_config_defaults_and_strict_controls():
@@ -239,11 +264,86 @@ def test_transport_errors_do_not_leak_exception_text(monkeypatch, error, reason)
     assert "synthetic-test-key" not in json.dumps(report)
 
 
-def test_missing_credentials_does_not_attempt_request(monkeypatch):
+def test_missing_credentials_does_not_attempt_request(tmp_path, monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(jev.Path, "home", lambda: tmp_path)
     report = jev.evaluate(CONFIG, "prd_review", "source", QUESTIONS, allow_api=True)
     assert report["reason"] == "missing_credentials"
     assert report["requested"] is True and report["request_started"] is False
+
+
+def test_default_key_resolution_prefers_environment_then_project_then_home(tmp_path, monkeypatch):
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir()
+    home.mkdir(exist_ok=True)
+    (project / ".env").write_text('export TYPESAFE_API_KEY = "project-key"\n')
+    (home / ".env").write_text("TYPESAFE_API_KEY=home-key\n")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    assert jev.resolve_api_key(CONFIG, project) == "project-key"
+    (project / ".env").unlink()
+    assert jev.resolve_api_key(CONFIG, project) == "home-key"
+    monkeypatch.setenv("TYPESAFE_API_KEY", "process-key")
+    assert jev.resolve_api_key(CONFIG, project) == "process-key"
+
+
+def test_default_key_resolution_accepts_literal_values_without_evaluation(tmp_path, monkeypatch):
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir()
+    home.mkdir(exist_ok=True)
+    (project / ".env").write_text("TYPESAFE_API_KEY='$NOT_EXPANDED'\n")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    assert jev.resolve_api_key(CONFIG, project) == "$NOT_EXPANDED"
+
+
+def test_default_key_resolution_accepts_tab_delimited_comment(tmp_path, monkeypatch):
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir()
+    home.mkdir(exist_ok=True)
+    (project / ".env").write_text("TYPESAFE_API_KEY=project-key\t# comment\n")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    assert jev.resolve_api_key(CONFIG, project) == "project-key"
+
+
+def test_default_key_resolution_ignores_other_names(tmp_path, monkeypatch):
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir()
+    home.mkdir(exist_ok=True)
+    (project / ".env").write_text("TYPESAFE_API_KEY_ALT=other-key\n")
+    (home / ".env").write_text("TYPESAFE_API_KEY=home-key\n")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    assert jev.resolve_api_key(CONFIG, project) == "home-key"
+
+
+@pytest.mark.parametrize("content", ["TYPESAFE_API_KEY\n", "TYPESAFE_API_KEY=one\nTYPESAFE_API_KEY=two\n"])
+def test_invalid_selected_credential_source_fails_closed(tmp_path, monkeypatch, content):
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir()
+    home.mkdir(exist_ok=True)
+    (project / ".env").write_text(content)
+    (home / ".env").write_text("TYPESAFE_API_KEY=home-key\n")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    report = jev.evaluate(CONFIG, "prd_review", "source", QUESTIONS, allow_api=True, project_root=project)
+    assert report["reason"] == "credential_source_invalid"
+    assert content not in json.dumps(report)
+    assert "one" not in repr(report) and "two" not in repr(report) and "home-key" not in repr(report)
+
+
+def test_custom_credential_names_remain_environment_only(tmp_path, monkeypatch):
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir()
+    home.mkdir(exist_ok=True)
+    (project / ".env").write_text("TYPESAFE_API_KEY=project-key\n")
+    monkeypatch.delenv("CUSTOM_KEY", raising=False)
+    monkeypatch.setattr(jev.Path, "home", lambda: home)
+    custom = replace(CONFIG, api_key_env="CUSTOM_KEY")
+    assert jev.resolve_api_key(custom, project) is None
+    monkeypatch.setenv("CUSTOM_KEY", "process-key")
+    assert jev.resolve_api_key(custom, project) == "process-key"
 
 
 def test_unexpected_transport_error_is_sanitized(monkeypatch):
