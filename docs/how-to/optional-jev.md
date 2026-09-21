@@ -21,10 +21,16 @@ Each evaluation separately requires permission to export that selected input.
 name stops all new Jev requests. `--no-jev` disables a single evaluation/audit.
 
 Provide `TYPESAFE_API_KEY` through the trusted CLI/service process environment
-or its protected environment-file mechanism. The configuration stores only its
-environment-variable name. Anvil does not search, source, or load a shared home
-env file. Never put a key in a request JSON, command argument, PRD, or tracked
-config. With Jev disabled, no key lookup or provider request occurs.
+or a protected `.env` file. When an enabled, export-authorized Jev call needs
+the default key, Anvil uses a non-empty process value first, then exactly the
+selected project's `.env`, then `~/.env`; it never searches parent directories
+or sources/evaluates either file. It accepts one literal `TYPESAFE_API_KEY=` or
+`export TYPESAFE_API_KEY=` assignment with an ordinary quoted or unquoted value.
+Duplicate or malformed selected assignments, symlinks, non-regular files, and
+invalid UTF-8 fail closed without reporting file contents. Custom `api_key_env`
+names remain process-environment only. Never put a key in a request JSON,
+command argument, PRD, or tracked config. With Jev disabled, no key-file lookup
+or provider request occurs.
 
 The `jev` settings block is loaded with normal project-over-global precedence;
 the project block replaces the global block, rather than merging capability

@@ -8,6 +8,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [0.6.13] - 2026-09-21
 
+### Changed
+
+- Enabled, export-authorized Jev calls can resolve only `TYPESAFE_API_KEY`
+  from the selected project's `.env` or `~/.env` after a non-empty process
+  environment value; malformed sources fail closed and custom key names remain
+  process-environment only.
+
 ### Added
 
 - Preview-first local recovery of one audited historical event omission,
