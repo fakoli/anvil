@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.13] - 2026-09-21
+
 ### Added
 
 - Preview-first local recovery of one audited historical event omission,
