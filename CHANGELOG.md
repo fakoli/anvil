@@ -6,6 +6,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- Preview-first local recovery of one audited historical event omission,
+  with replay-equivalence checks, retained recovery copies, in-place publication,
+  and explicit resumption after interruption. Pending recovery blocks normal
+  state access; existing strict provider-read checks remain intact.
+
 ## [0.6.12] - 2026-09-20
 
 ### Added
