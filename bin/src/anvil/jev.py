@@ -24,7 +24,7 @@ import httpx
 
 CAPABILITIES = (
     "prd_review", "evidence_triage", "proof_contracts", "skill_suggestion",
-    "context_ranking", "incident_triage", "voice_intent",
+    "context_ranking", "incident_triage", "voice_intent", "browser_element_resolution",
 )
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MAX_INPUT_BYTES = 32 * 1024

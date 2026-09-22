@@ -49,7 +49,8 @@ def payload():
     }, "usage": {"input_tokens": 10, "output_tokens": 5}}
 
 
-def run(monkeypatch, response=None, *, status=200, state="private source", questions=None, handler=None):
+def run(monkeypatch, response=None, *, status=200, state="private source", questions=None, handler=None,
+        config=CONFIG, capability="prd_review"):
     monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-test-key")
     requests = []
 
@@ -68,7 +69,7 @@ def run(monkeypatch, response=None, *, status=200, state="private source", quest
 
     monkeypatch.setattr(jev, "_bounded_request", inline_request)
     report = jev.evaluate(
-        CONFIG, "prd_review", state, QUESTIONS if questions is None else questions,
+        config, capability, state, QUESTIONS if questions is None else questions,
         allow_api=True, transport=httpx.MockTransport(send),
     )
     return report, requests
@@ -115,6 +116,21 @@ def test_config_defaults_and_strict_controls():
                   {"api_key_env": "KEY\nINJECTED"}):
         with pytest.raises(ValueError):
             jev.JevConfig.from_mapping(value)
+
+
+def test_browser_choice_refuses_unoffered_provider_answer(monkeypatch):
+    questions = {"selection": {"type": "choice", "instructions": "Choose only offered IDs.",
+        "criteria": {"capture": "Offered entity.", "NO_MATCH_IN_CANDIDATES": "No match.",
+                     "AMBIGUOUS": "Ambiguous.", "NEEDS_VISUAL_EVIDENCE": "Need visual."}}}
+    response = {"model": CONFIG.model, "answers": {"selection": {
+        "type": "choice", "choice": "unoffered", "confidence": 1,
+        "probabilities": {"capture": 0.25, "NO_MATCH_IN_CANDIDATES": 0.25,
+                          "AMBIGUOUS": 0.25, "NEEDS_VISUAL_EVIDENCE": 0.25},
+    }}, "usage": {"input_tokens": 1, "output_tokens": 1}}
+    config = replace(CONFIG, capabilities=("browser_element_resolution",))
+    report, requests = run(monkeypatch, response, state={}, questions=questions,
+                           config=config, capability="browser_element_resolution")
+    assert report["status"] == "invalid_response" and len(requests) == 1
 
 
 def test_completed_wire_contract_and_safe_provenance(monkeypatch):
