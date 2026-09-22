@@ -365,6 +365,19 @@ def test_browser_bridge_guards_withhold_projection_before_call(
         },
         {
             **browser_projection(),
+            "entities": [
+                {
+                    **browser_projection()["entities"][0],
+                    "id": "https:example.test",
+                }
+            ],
+        },
+        {
+            **browser_projection(),
+            "scope": {"kind": "document", "root": " opaque-root"},
+        },
+        {
+            **browser_projection(),
             "target": {
                 "description": "password: synthetic-browser-only",
                 "qualifiers": [],
@@ -372,7 +385,10 @@ def test_browser_bridge_guards_withhold_projection_before_call(
         },
         oversized_browser_projection(),
     ],
-    ids=["unknown_field", "reserved_identifier", "recognized_credential", "request_limit"],
+    ids=[
+        "unknown_field", "reserved_identifier", "url_entity_identifier",
+        "whitespace_scope_root", "recognized_credential", "request_limit",
+    ],
 )
 def test_browser_bridge_refuses_invalid_input_before_adapter_boundaries(
     monkeypatch, input_value

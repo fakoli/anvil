@@ -67,6 +67,19 @@ def _bytes_text(value: object, maximum: int, *, empty: bool = False) -> str:
     return value
 
 
+def _opaque_reference(value: object, maximum: int) -> str:
+    """Keep owner references opaque without converting or trimming them."""
+    reference = _bytes_text(value, maximum)
+    if (
+        reference != reference.strip()
+        or (_URI_SCHEME.match(reference) and not _OWNER_SUBTREE_ROOT.fullmatch(reference))
+        or "://" in reference
+        or reference.startswith("//")
+    ):
+        raise ValueError("invalid browser projection")
+    return reference
+
+
 def _browser_state(value: object) -> dict[str, Any]:
     data = _fields(value, {
         "schema", "request_id", "observation_id", "source", "target", "scope", "coverage",
@@ -88,14 +101,10 @@ def _browser_state(value: object) -> dict[str, Any]:
         "qualifiers": [_bytes_text(item, 128) for item in target["qualifiers"]],
     }
     scope = _fields(data["scope"], {"kind", "root"})
-    root = _bytes_text(scope["root"], 64)
-    stripped_root = root.lstrip()
+    root = _opaque_reference(scope["root"], 64)
     if (
         not isinstance(scope["kind"], str)
         or scope["kind"] not in {"document", "subtree", "viewport"}
-        or (_URI_SCHEME.match(stripped_root) and not _OWNER_SUBTREE_ROOT.fullmatch(root))
-        or "://" in root
-        or stripped_root.startswith("//")
     ):
         raise ValueError("invalid browser projection")
     state["scope"] = {"kind": scope["kind"], "root": root}
@@ -118,7 +127,7 @@ def _browser_state(value: object) -> dict[str, Any]:
     clean = []
     for item in entities:
         entity = _fields(item, {"id", "role", "text", "nearby", "state", "predicate_reasons"})
-        identity = _bytes_text(entity["id"], 64)
+        identity = _opaque_reference(entity["id"], 64)
         if identity in seen or identity.upper() in _ABSTENTIONS:
             raise ValueError("invalid browser projection")
         seen.add(identity)

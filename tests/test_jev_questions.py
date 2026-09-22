@@ -213,21 +213,46 @@ def test_browser_projection_uses_utf8_byte_limits(field, value):
         build_questions("browser_element_resolution", projection)
 
 
-@pytest.mark.parametrize("root", [
-    "https:example.test", "data:text/plain,x", "javascript:alert(1)",
-    "mailto:user@example.test", "//example.test", " https://example.test", " //example.test",
+@pytest.mark.parametrize("reference", [
+    "", " ", " reference", "reference ", "https:example.test",
+    "data:text/plain,x", "javascript:alert(1)", "mailto:user@example.test",
+    "//example.test", "opaque://reference",
 ])
-def test_browser_projection_rejects_uri_scope_roots(root):
+def test_browser_projection_rejects_blank_and_url_shaped_scope_roots(reference):
     projection = copy.deepcopy(CASES["browser_element_resolution"])
-    projection["scope"]["root"] = root
+    projection["scope"]["root"] = reference
     with pytest.raises(ValueError):
         build_questions("browser_element_resolution", projection)
 
 
-def test_browser_projection_accepts_owner_subtree_reference():
+@pytest.mark.parametrize("reference", [
+    "owner-entity", "é" * 32,
+    "01234567-89ab-cdef-0123-456789abcdef:e-1",
+])
+def test_browser_projection_accepts_ordinary_and_owner_opaque_references(reference):
     projection = copy.deepcopy(CASES["browser_element_resolution"])
-    projection["scope"] = {"kind": "subtree", "root": "01234567-89ab-cdef-0123-456789abcdef:e-1"}
-    assert build_questions("browser_element_resolution", projection)[0]["scope"] == projection["scope"]
+    projection["scope"] = {"kind": "subtree", "root": reference}
+    projection["entities"][0]["id"] = reference
+    state, questions = build_questions("browser_element_resolution", projection)
+    assert state["scope"]["root"] == reference
+    assert state["entities"][0]["id"] == reference
+    assert reference in questions["selection"]["criteria"]
+
+
+@pytest.mark.parametrize("reference", [
+    "", " ", " entity", "entity ", "https:example.test", "data:text/plain,x",
+    "javascript:alert(1)", "mailto:user@example.test", "//example.test", "opaque://entity",
+])
+def test_browser_projection_rejects_blank_and_url_shaped_entity_ids_before_choices(reference, monkeypatch):
+    projection = copy.deepcopy(CASES["browser_element_resolution"])
+    projection["entities"][0]["id"] = reference
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid identifier reached request serialization")
+
+    monkeypatch.setattr("anvil.jev_questions._json_bytes", forbidden)
+    with pytest.raises(ValueError, match="invalid browser projection"):
+        build_questions("browser_element_resolution", projection)
 
 
 @pytest.mark.parametrize("coverage,state,reason", [
