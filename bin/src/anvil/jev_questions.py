@@ -28,6 +28,10 @@ _BROWSER_SCHEMA = "browser-element-resolution-projection/v1"
 _ABSTENTIONS = ("NO_MATCH_IN_CANDIDATES", "AMBIGUOUS", "NEEDS_VISUAL_EVIDENCE")
 _PREDICATES = ("exists", "in_viewport", "occluded", "enabled")
 _NULL_REASONS = {"not_applicable", "unknown", "unsupported"}
+_URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_OWNER_SUBTREE_ROOT = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}:e-[1-9][0-9]*$"
+)
 
 
 def reject_secrets(text: str) -> None:
@@ -52,15 +56,21 @@ def _text(value: object) -> str:
 def _bytes_text(value: object, maximum: int, *, empty: bool = False) -> str:
     if not isinstance(value, str) or (not empty and not value):
         raise ValueError("invalid browser projection text")
-    if len(value.encode("utf-8")) > maximum:
+    if len(value) > maximum:
         raise ValueError("input_limit")
+    try:
+        if len(value.encode("utf-8")) > maximum:
+            raise ValueError("input_limit")
+    except UnicodeEncodeError:
+        raise ValueError("invalid browser projection text") from None
     reject_secrets(value)
     return value
 
 
 def _browser_state(value: object) -> dict[str, Any]:
     data = _fields(value, {
-        "schema", "request_id", "observation_id", "source", "target", "scope", "coverage", "entities",
+        "schema", "request_id", "observation_id", "source", "target", "scope", "coverage",
+        "entities",
     })
     if data["schema"] != _BROWSER_SCHEMA or data["source"] != "dom":
         raise ValueError("invalid browser projection")
@@ -79,11 +89,19 @@ def _browser_state(value: object) -> dict[str, Any]:
     }
     scope = _fields(data["scope"], {"kind", "root"})
     root = _bytes_text(scope["root"], 64)
-    if not isinstance(scope["kind"], str) or scope["kind"] not in {"document", "subtree", "viewport"} or "://" in root or root.startswith("//"):
+    if (
+        not isinstance(scope["kind"], str)
+        or scope["kind"] not in {"document", "subtree", "viewport"}
+        or (_URI_SCHEME.match(root) and not _OWNER_SUBTREE_ROOT.fullmatch(root))
+        or root.startswith("//")
+    ):
         raise ValueError("invalid browser projection")
     state["scope"] = {"kind": scope["kind"], "root": root}
     coverage = _fields(data["coverage"], {"state", "reason"})
-    if not isinstance(coverage["state"], str) or coverage["state"] not in {"complete", "partial", "unknown"}:
+    if (
+        not isinstance(coverage["state"], str)
+        or coverage["state"] not in {"complete", "partial", "unknown"}
+    ):
         raise ValueError("invalid browser projection")
     if coverage["state"] == "complete":
         if coverage["reason"] is not None:
@@ -216,16 +234,25 @@ def build_questions(capability: str, value: object) -> tuple[dict[str, Any], dic
         }
     elif capability == "browser_element_resolution":
         state = _browser_state(value)
-        options = {item["id"]: "One owner-offered DOM entity." for item in state["entities"]}
+        options = {
+            item["id"]: f"The owner-offered entity at `state.entities[{index}]`."
+            for index, item in enumerate(state["entities"])
+        }
         options.update({
-            "NO_MATCH_IN_CANDIDATES": "No offered entity matches the authorized target.",
-            "AMBIGUOUS": "The offered entities do not establish one unambiguous selection.",
-            "NEEDS_VISUAL_EVIDENCE": "The DOM projection is insufficient; no visual evidence is exported here.",
+            "NO_MATCH_IN_CANDIDATES": "No offered entity matches the owner-authorized target.",
+            "AMBIGUOUS": "The bounded projection does not establish one unambiguous match.",
+            "NEEDS_VISUAL_EVIDENCE": (
+                "The owner-authorized DOM projection lacks needed visual evidence."
+            ),
         })
         questions["selection"] = {
             "type": "choice",
-            "instructions": _UNTRUSTED + "Select only an offered entity in `state.entities` or an abstention. This is advice only: "
-            "the trusted owner must deterministically check freshness, coverage, predicates, target authorization, and every action.",
+            "instructions": _UNTRUSTED + "Compare `state.entities` to the owner-authorized "
+            "`state.target.description` and `state.target.qualifiers`, within `state.scope` and "
+            "`state.coverage`. Consider existence, viewport, occlusion, enabled, disabled, and "
+            "noninteractive facts only as owner-supplied state. Select an offered entity or an "
+            "abstention. This is advice only: the trusted owner must deterministically check "
+            "freshness, coverage, predicates, target authorization, and every action.",
             "criteria": options,
         }
     elif capability in ("skill_suggestion", "context_ranking"):

@@ -183,6 +183,9 @@ def test_browser_projection_has_one_closed_selection_without_label_interpolation
     }
     assert value["entities"][0]["text"] not in json.dumps(questions)
     assert "freshness" in questions["selection"]["instructions"]
+    for path in ("`state.target.description`", "`state.target.qualifiers`", "`state.scope`", "`state.coverage`"):
+        assert path in questions["selection"]["instructions"]
+    assert questions["selection"]["criteria"]["capture"] == "The owner-offered entity at `state.entities[0]`."
 
 
 @pytest.mark.parametrize("change", [
@@ -201,13 +204,27 @@ def test_browser_projection_schema_and_null_pairs_fail_closed(change):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("request_id", "é" * 33), ("observation_id", "x" * 65),
+    ("request_id", "é" * 33), ("observation_id", "x" * 65), ("request_id", "\ud800"),
 ])
 def test_browser_projection_uses_utf8_byte_limits(field, value):
     projection = copy.deepcopy(CASES["browser_element_resolution"])
     projection[field] = value
     with pytest.raises(ValueError):
         build_questions("browser_element_resolution", projection)
+
+
+@pytest.mark.parametrize("root", ["https:example.test", "data:text/plain,x", "javascript:alert(1)", "mailto:user@example.test", "//example.test"])
+def test_browser_projection_rejects_uri_scope_roots(root):
+    projection = copy.deepcopy(CASES["browser_element_resolution"])
+    projection["scope"]["root"] = root
+    with pytest.raises(ValueError):
+        build_questions("browser_element_resolution", projection)
+
+
+def test_browser_projection_accepts_owner_subtree_reference():
+    projection = copy.deepcopy(CASES["browser_element_resolution"])
+    projection["scope"] = {"kind": "subtree", "root": "01234567-89ab-cdef-0123-456789abcdef:e-1"}
+    assert build_questions("browser_element_resolution", projection)[0]["scope"] == projection["scope"]
 
 
 @pytest.mark.parametrize("coverage,state,reason", [
