@@ -57,8 +57,8 @@ def test_corpus_identity_and_coverage():
 def test_browser_corpus_is_synthetic_projection_data_with_required_edge_coverage():
     assert len(BROWSER_CASES) == 8
     assert {case["expected"]["selection"]["equals"] for case in BROWSER_CASES} >= {
-        "alpha",
-        "signal",
+        "e-101",
+        "e-106",
         "NO_MATCH_IN_CANDIDATES",
         "AMBIGUOUS",
         "NEEDS_VISUAL_EVIDENCE",
@@ -68,6 +68,8 @@ def test_browser_corpus_is_synthetic_projection_data_with_required_edge_coverage
         for case in BROWSER_CASES
         for entity in case["input"]["entities"]
     )
+    disabled_case = next(case for case in BROWSER_CASES if case["id"] == "browser_direct_selection")
+    assert disabled_case["input"]["entities"][0]["state"]["enabled"] is False
     assert {case["input"]["coverage"]["state"] for case in BROWSER_CASES} == {
         "complete",
         "partial",

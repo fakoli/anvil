@@ -69,7 +69,7 @@ def browser_projection(*, coverage="complete"):
         "coverage": {"state": coverage, "reason": reason},
         "entities": [
             {
-                "id": "alpha",
+                "id": "e-101",
                 "role": "img",
                 "text": "Alpha",
                 "nearby": "main panel",
@@ -334,6 +334,7 @@ def test_browser_bridge_guards_withhold_projection_before_call(
     marker = f"owner-material-{name}"
     envelope["input"]["target"]["description"] = marker
     monkeypatch.setattr(cli, "call_jev", tracked)
+    monkeypatch.setattr("anvil.jev_questions.build_questions", forbidden)
     monkeypatch.setattr(jev, "_json_bytes", forbidden)
     monkeypatch.setattr(jev, "resolve_api_key", forbidden)
     monkeypatch.setattr(jev, "_bounded_request", forbidden)
@@ -405,7 +406,7 @@ def test_browser_bridge_refuses_invalid_input_before_adapter_boundaries(
 
 def _browser_response(choice):
     options = {
-        "alpha": 0.25,
+        "e-101": 0.25,
         "NO_MATCH_IN_CANDIDATES": 0.25,
         "AMBIGUOUS": 0.25,
         "NEEDS_VISUAL_EVIDENCE": 0.25,
@@ -426,7 +427,7 @@ def _browser_response(choice):
 
 @pytest.mark.parametrize(
     "choice",
-    ["alpha", "NO_MATCH_IN_CANDIDATES", "AMBIGUOUS", "NEEDS_VISUAL_EVIDENCE"],
+    ["e-101", "NO_MATCH_IN_CANDIDATES", "AMBIGUOUS", "NEEDS_VISUAL_EVIDENCE"],
 )
 def test_browser_bridge_accepts_only_the_offered_selection_and_abstentions(
     monkeypatch, choice
@@ -450,7 +451,7 @@ def test_browser_bridge_accepts_only_the_offered_selection_and_abstentions(
     assert report["answers"] == _browser_response(choice)["answers"]
     assert len(bodies) == 1
     assert set(bodies[0]["questions"]["selection"]["criteria"]) == {
-        "alpha",
+        "e-101",
         "NO_MATCH_IN_CANDIDATES",
         "AMBIGUOUS",
         "NEEDS_VISUAL_EVIDENCE",
@@ -466,11 +467,11 @@ def test_browser_bridge_accepts_only_the_offered_selection_and_abstentions(
             b'"answers":{},"usage":{"input_tokens":1,"output_tokens":1}}'
         ),
         json.dumps({
-            **_browser_response("alpha"),
+            **_browser_response("e-101"),
             "answers": {
                 "selection": {
-                    **_browser_response("alpha")["answers"]["selection"],
-                    "choice": ["alpha"],
+                    **_browser_response("e-101")["answers"]["selection"],
+                    "choice": ["e-101"],
                 }
             },
         }).encode(),
@@ -515,7 +516,7 @@ def test_completed_browser_selection_is_stateless_advice(project, monkeypatch):
             "reason": "validated",
             "request_started": True,
             "used": True,
-            "answers": {"selection": {"type": "choice", "choice": "alpha"}},
+            "answers": {"selection": {"type": "choice", "choice": "e-101"}},
         }
 
     monkeypatch.setattr(cli, "_resolve_state_dir", forbidden)
@@ -529,7 +530,7 @@ def test_completed_browser_selection_is_stateless_advice(project, monkeypatch):
         )
     )
 
-    assert report["answers"]["selection"]["choice"] == "alpha"
+    assert report["answers"]["selection"]["choice"] == "e-101"
     assert events.read_bytes() == before
 
 
