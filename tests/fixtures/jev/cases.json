@@ -318,5 +318,69 @@
     "input": {"claim": "Make it appropriate. No product, user, behavior, input, output, or meaning of appropriate has been selected; stakeholders disagree about all of them."},
     "expected": {"category": {"field": "choice", "equals": "needs_human_specification"}},
     "label_rationale": "The missing product intent cannot be safely inferred as a concrete experiment."
+  },
+  {
+    "id": "browser_direct_selection",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-direct", "observation_id": "observation-direct", "source": "dom", "target": {"description": "alpha marker", "qualifiers": ["main panel"]}, "scope": {"kind": "document", "root": "document"}, "coverage": {"state": "complete", "reason": null}, "entities": [{"id": "e-101", "role": "button", "text": "Alpha", "nearby": "main panel", "state": {"exists": true, "in_viewport": true, "occluded": false, "enabled": false}, "predicate_reasons": {"exists": null, "in_viewport": null, "occluded": null, "enabled": null}}]},
+    "expected": {"selection": {"field": "choice", "equals": "e-101"}},
+    "label_rationale": "The offered opaque identifier has the only bounded textual match; its disabled state remains advisory evidence."
+  },
+  {
+    "id": "browser_no_match_abstention",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-none", "observation_id": "observation-none", "source": "dom", "target": {"description": "gamma marker", "qualifiers": []}, "scope": {"kind": "document", "root": "document"}, "coverage": {"state": "complete", "reason": null}, "entities": [{"id": "e-102", "role": "img", "text": "Alpha", "nearby": null, "state": {"exists": true, "in_viewport": true, "occluded": false, "enabled": null}, "predicate_reasons": {"exists": null, "in_viewport": null, "occluded": null, "enabled": "not_applicable"}}]},
+    "expected": {"selection": {"field": "choice", "equals": "NO_MATCH_IN_CANDIDATES"}},
+    "label_rationale": "No offered identifier corresponds to the bounded target description."
+  },
+  {
+    "id": "browser_ambiguous_abstention",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-ambiguous", "observation_id": "observation-ambiguous", "source": "dom", "target": {"description": "amber marker", "qualifiers": []}, "scope": {"kind": "subtree", "root": "01234567-89ab-cdef-0123-456789abcdef:e-1"}, "coverage": {"state": "complete", "reason": null}, "entities": [{"id": "e-103", "role": "img", "text": "Amber", "nearby": null, "state": {"exists": true, "in_viewport": true, "occluded": false, "enabled": null}, "predicate_reasons": {"exists": null, "in_viewport": null, "occluded": null, "enabled": "not_applicable"}}, {"id": "e-104", "role": "img", "text": "Amber", "nearby": null, "state": {"exists": true, "in_viewport": true, "occluded": false, "enabled": null}, "predicate_reasons": {"exists": null, "in_viewport": null, "occluded": null, "enabled": "not_applicable"}}]},
+    "expected": {"selection": {"field": "choice", "equals": "AMBIGUOUS"}},
+    "label_rationale": "The two offered identifiers have the same bounded descriptive evidence."
+  },
+  {
+    "id": "browser_visual_evidence_abstention",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-detail", "observation_id": "observation-detail", "source": "dom", "target": {"description": "shape marker", "qualifiers": []}, "scope": {"kind": "viewport", "root": "viewport"}, "coverage": {"state": "partial", "reason": "bounded collection"}, "entities": [{"id": "e-105", "role": "img", "text": "", "nearby": "status group", "state": {"exists": true, "in_viewport": true, "occluded": null, "enabled": null}, "predicate_reasons": {"exists": null, "in_viewport": null, "occluded": "unsupported", "enabled": "not_applicable"}}]},
+    "expected": {"selection": {"field": "choice", "equals": "NEEDS_VISUAL_EVIDENCE"}},
+    "label_rationale": "The bounded projection explicitly lacks the detail needed for the target."
+  },
+  {
+    "id": "browser_icon_only_selection",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-icon", "observation_id": "observation-icon", "source": "dom", "target": {"description": "signal icon", "qualifiers": ["status group"]}, "scope": {"kind": "document", "root": "document"}, "coverage": {"state": "complete", "reason": null}, "entities": [{"id": "e-106", "role": "img", "text": "", "nearby": "signal status group", "state": {"exists": true, "in_viewport": true, "occluded": false, "enabled": null}, "predicate_reasons": {"exists": null, "in_viewport": null, "occluded": null, "enabled": "not_applicable"}}]},
+    "expected": {"selection": {"field": "choice", "equals": "e-106"}},
+    "label_rationale": "The opaque identifier is supported by the nearby signal label."
+  },
+  {
+    "id": "browser_partial_coverage_selection",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-partial", "observation_id": "observation-partial", "source": "dom", "target": {"description": "beta marker", "qualifiers": []}, "scope": {"kind": "viewport", "root": "viewport"}, "coverage": {"state": "partial", "reason": "bounded collection"}, "entities": [{"id": "e-107", "role": "img", "text": "Beta", "nearby": null, "state": {"exists": true, "in_viewport": null, "occluded": false, "enabled": null}, "predicate_reasons": {"exists": null, "in_viewport": "unknown", "occluded": null, "enabled": "not_applicable"}}]},
+    "expected": {"selection": {"field": "choice", "equals": "e-107"}},
+    "label_rationale": "The offered identifier remains the only bounded textual match despite partial coverage."
+  },
+  {
+    "id": "browser_unknown_coverage_abstention",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-unknown", "observation_id": "observation-unknown", "source": "dom", "target": {"description": "delta marker", "qualifiers": []}, "scope": {"kind": "document", "root": "document"}, "coverage": {"state": "unknown", "reason": "owner uncertainty"}, "entities": [{"id": "e-108", "role": "img", "text": "Alpha", "nearby": null, "state": {"exists": null, "in_viewport": null, "occluded": null, "enabled": null}, "predicate_reasons": {"exists": "unknown", "in_viewport": "unknown", "occluded": "unknown", "enabled": "not_applicable"}}]},
+    "expected": {"selection": {"field": "choice", "equals": "NO_MATCH_IN_CANDIDATES"}},
+    "label_rationale": "No offered identifier matches the target in the bounded text."
+  },
+  {
+    "id": "browser_null_predicate_pairs",
+    "group": "browser_element_resolution",
+    "capability": "browser_element_resolution",
+    "input": {"schema": "browser-element-resolution-projection/v1", "request_id": "request-reasons", "observation_id": "observation-reasons", "source": "dom", "target": {"description": "status marker", "qualifiers": []}, "scope": {"kind": "subtree", "root": "01234567-89ab-cdef-0123-456789abcdef:e-2"}, "coverage": {"state": "partial", "reason": "owner uncertainty"}, "entities": [{"id": "e-109", "role": "img", "text": "Status", "nearby": null, "state": {"exists": null, "in_viewport": null, "occluded": null, "enabled": null}, "predicate_reasons": {"exists": "not_applicable", "in_viewport": "unknown", "occluded": "unsupported", "enabled": "unknown"}}]},
+    "expected": {"selection": {"field": "choice", "equals": "e-109"}},
+    "label_rationale": "The offered identifier is the only bounded textual match and retains each null reason."
   }
 ]

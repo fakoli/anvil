@@ -56,6 +56,68 @@ def payload(result):
     return envelope["data"]
 
 
+def browser_projection(*, coverage="complete"):
+    """Return a bounded synthetic owner-authorized projection."""
+    reason = None if coverage == "complete" else "bounded collection"
+    return {
+        "schema": "browser-element-resolution-projection/v1",
+        "request_id": "request-bridge",
+        "observation_id": "observation-bridge",
+        "source": "dom",
+        "target": {"description": "alpha marker", "qualifiers": ["main panel"]},
+        "scope": {"kind": "document", "root": "document"},
+        "coverage": {"state": coverage, "reason": reason},
+        "entities": [
+            {
+                "id": "e-101",
+                "role": "img",
+                "text": "Alpha",
+                "nearby": "main panel",
+                "state": {
+                    "exists": True,
+                    "in_viewport": True,
+                    "occluded": False,
+                    "enabled": None,
+                },
+                "predicate_reasons": {
+                    "exists": None,
+                    "in_viewport": None,
+                    "occluded": None,
+                    "enabled": "not_applicable",
+                },
+            }
+        ],
+    }
+
+
+def browser_bridge_envelope(
+    *,
+    enabled=True,
+    capability=True,
+    allow_api=True,
+    allow_export=True,
+    input_value=None,
+):
+    capabilities = ("browser_element_resolution",) if capability else ()
+    return {
+        "jev": asdict(JevConfig(enabled=enabled, capabilities=capabilities)),
+        "allow_api": allow_api,
+        "allow_export": allow_export,
+        "capability": "browser_element_resolution",
+        "input": browser_projection() if input_value is None else input_value,
+    }
+
+
+def oversized_browser_projection():
+    projection = browser_projection()
+    entity = projection["entities"][0]
+    projection["entities"] = [
+        {**entity, "id": f"entity-{index}", "text": "x" * 800}
+        for index in range(42)
+    ]
+    return projection
+
+
 def test_default_off_skips_missing_input_and_key(project, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("disabled code attempted a key or network lookup")
@@ -245,6 +307,247 @@ def test_bridge_uses_closed_rubric_and_does_not_echo_input(monkeypatch):
     assert payload(result)["used"] is True
     assert "private selected utterance" not in result.output
     assert "intent" in seen[0][1]
+
+
+@pytest.mark.parametrize(
+    ("name", "envelope", "reason"),
+    [
+        ("disabled", browser_bridge_envelope(enabled=False), "disabled"),
+        ("capability", browser_bridge_envelope(capability=False), "capability_disabled"),
+        ("api", browser_bridge_envelope(allow_api=False), "api_permission_required"),
+        ("export", browser_bridge_envelope(allow_export=False), "export_permission_required"),
+    ],
+)
+def test_browser_bridge_guards_withhold_projection_before_call(
+    monkeypatch, name, envelope, reason
+):
+    original = cli.call_jev
+    calls = []
+
+    def tracked(config, capability, state, questions, **kwargs):
+        calls.append((capability, state, questions, kwargs))
+        return original(config, capability, state, questions, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("guarded input reached serialization, credentials, or transport")
+
+    marker = f"owner-material-{name}"
+    envelope["input"]["target"]["description"] = marker
+    monkeypatch.setattr(cli, "call_jev", tracked)
+    monkeypatch.setattr("anvil.jev_questions.build_questions", forbidden)
+    monkeypatch.setattr(jev, "_json_bytes", forbidden)
+    monkeypatch.setattr(jev, "resolve_api_key", forbidden)
+    monkeypatch.setattr(jev, "_bounded_request", forbidden)
+
+    result = runner.invoke(app, ["jev", "bridge", "--json"], input=json.dumps(envelope))
+    report = payload(result)
+
+    assert report["reason"] == reason
+    assert marker not in result.output
+    assert len(calls) == 1
+    capability, state, questions, _ = calls[0]
+    assert capability == "browser_element_resolution"
+    assert state == questions == {}
+
+
+@pytest.mark.parametrize(
+    "input_value",
+    [
+        {**browser_projection(), "origin": "outside the projection"},
+        {
+            **browser_projection(),
+            "entities": [
+                {
+                    **browser_projection()["entities"][0],
+                    "id": "NO_MATCH_IN_CANDIDATES",
+                }
+            ],
+        },
+        {
+            **browser_projection(),
+            "entities": [
+                {
+                    **browser_projection()["entities"][0],
+                    "id": "https:example.test",
+                }
+            ],
+        },
+        {
+            **browser_projection(),
+            "scope": {"kind": "document", "root": " opaque-root"},
+        },
+        {
+            **browser_projection(),
+            "target": {
+                "description": "password: synthetic-browser-only",
+                "qualifiers": [],
+            },
+        },
+        oversized_browser_projection(),
+    ],
+    ids=[
+        "unknown_field", "reserved_identifier", "url_entity_identifier",
+        "whitespace_scope_root", "recognized_credential", "request_limit",
+    ],
+)
+def test_browser_bridge_refuses_invalid_input_before_adapter_boundaries(
+    monkeypatch, input_value
+):
+    original = cli.call_jev
+    calls = []
+
+    def tracked(config, capability, state, questions, **kwargs):
+        calls.append((state, questions, kwargs))
+        return original(config, capability, state, questions, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("refused input reached a credential or transport boundary")
+
+    monkeypatch.setattr(cli, "call_jev", tracked)
+    monkeypatch.setattr(jev, "resolve_api_key", forbidden)
+    monkeypatch.setattr(jev, "_bounded_request", forbidden)
+    result = runner.invoke(
+        app,
+        ["jev", "bridge", "--json"],
+        input=json.dumps(browser_bridge_envelope(input_value=input_value)),
+    )
+
+    report = payload(result)
+    assert report["reason"] == "invalid_or_sensitive_input"
+    assert report["request_started"] is False
+    assert calls == [({}, {}, {"allow_api": False, "project_root": None})]
+    assert "synthetic-browser-only" not in result.output
+    assert "x" * 64 not in result.output
+
+
+def _browser_response(choice):
+    options = {
+        "e-101": 0.25,
+        "NO_MATCH_IN_CANDIDATES": 0.25,
+        "AMBIGUOUS": 0.25,
+        "NEEDS_VISUAL_EVIDENCE": 0.25,
+    }
+    return {
+        "model": "jev-1.13.0",
+        "answers": {
+            "selection": {
+                "type": "choice",
+                "choice": choice,
+                "confidence": 1,
+                "probabilities": options,
+            }
+        },
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+
+@pytest.mark.parametrize(
+    "choice",
+    ["e-101", "NO_MATCH_IN_CANDIDATES", "AMBIGUOUS", "NEEDS_VISUAL_EVIDENCE"],
+)
+def test_browser_bridge_accepts_only_the_offered_selection_and_abstentions(
+    monkeypatch, choice
+):
+    bodies = []
+
+    def response(config, key, body, transport, deadline):
+        bodies.append(json.loads(body))
+        return True, "completed", "received", json.dumps(_browser_response(choice)).encode()
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-test-key")
+    monkeypatch.setattr(jev, "_bounded_request", response)
+    result = runner.invoke(
+        app,
+        ["jev", "bridge", "--json"],
+        input=json.dumps(browser_bridge_envelope()),
+    )
+
+    report = payload(result)
+    assert report["status"] == "completed"
+    assert report["answers"] == _browser_response(choice)["answers"]
+    assert len(bodies) == 1
+    assert set(bodies[0]["questions"]["selection"]["criteria"]) == {
+        "e-101",
+        "NO_MATCH_IN_CANDIDATES",
+        "AMBIGUOUS",
+        "NEEDS_VISUAL_EVIDENCE",
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps(_browser_response("unoffered")).encode(),
+        (
+            b'{"model":"jev-1.13.0","model":"jev-1.13.0",'
+            b'"answers":{},"usage":{"input_tokens":1,"output_tokens":1}}'
+        ),
+        json.dumps({
+            **_browser_response("e-101"),
+            "answers": {
+                "selection": {
+                    **_browser_response("e-101")["answers"]["selection"],
+                    "choice": ["e-101"],
+                }
+            },
+        }).encode(),
+    ],
+    ids=["unoffered", "duplicate", "malformed"],
+)
+def test_browser_bridge_refuses_unoffered_duplicate_and_malformed_responses(monkeypatch, content):
+    def response(config, key, body, transport, deadline):
+        return True, "completed", "received", content
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-test-key")
+    monkeypatch.setattr(jev, "_bounded_request", response)
+    report = payload(
+        runner.invoke(
+            app,
+            ["jev", "bridge", "--json"],
+            input=json.dumps(browser_bridge_envelope()),
+        )
+    )
+
+    assert report["status"] == "invalid_response"
+    assert report["request_started"] is True
+    assert report["used"] is False
+    assert report["answers"] == {}
+
+
+def test_completed_browser_selection_is_stateless_advice(project, monkeypatch):
+    events = project / ".anvil/events.jsonl"
+    before = events.read_bytes()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("bridge must not resolve or mutate Anvil state")
+
+    def completed(config, capability, state, questions, **kwargs):
+        assert capability == "browser_element_resolution"
+        assert "selection" in questions
+        return {
+            "schema": "anvil.jev.annotation.v1",
+            "provider": "typesafe",
+            "model": config.model,
+            "status": "completed",
+            "reason": "validated",
+            "request_started": True,
+            "used": True,
+            "answers": {"selection": {"type": "choice", "choice": "e-101"}},
+        }
+
+    monkeypatch.setattr(cli, "_resolve_state_dir", forbidden)
+    monkeypatch.setattr(cli, "_resolve_project_dir", forbidden)
+    monkeypatch.setattr(cli, "call_jev", completed)
+    report = payload(
+        runner.invoke(
+            app,
+            ["jev", "bridge", "--json"],
+            input=json.dumps(browser_bridge_envelope()),
+        )
+    )
+
+    assert report["answers"]["selection"]["choice"] == "e-101"
+    assert events.read_bytes() == before
 
 
 def test_evaluate_advice_never_writes_events(project, monkeypatch):
