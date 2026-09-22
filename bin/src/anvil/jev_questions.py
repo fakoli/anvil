@@ -89,11 +89,13 @@ def _browser_state(value: object) -> dict[str, Any]:
     }
     scope = _fields(data["scope"], {"kind", "root"})
     root = _bytes_text(scope["root"], 64)
+    stripped_root = root.lstrip()
     if (
         not isinstance(scope["kind"], str)
         or scope["kind"] not in {"document", "subtree", "viewport"}
-        or (_URI_SCHEME.match(root) and not _OWNER_SUBTREE_ROOT.fullmatch(root))
-        or root.startswith("//")
+        or (_URI_SCHEME.match(stripped_root) and not _OWNER_SUBTREE_ROOT.fullmatch(root))
+        or "://" in root
+        or stripped_root.startswith("//")
     ):
         raise ValueError("invalid browser projection")
     state["scope"] = {"kind": scope["kind"], "root": root}

@@ -213,7 +213,10 @@ def test_browser_projection_uses_utf8_byte_limits(field, value):
         build_questions("browser_element_resolution", projection)
 
 
-@pytest.mark.parametrize("root", ["https:example.test", "data:text/plain,x", "javascript:alert(1)", "mailto:user@example.test", "//example.test"])
+@pytest.mark.parametrize("root", [
+    "https:example.test", "data:text/plain,x", "javascript:alert(1)",
+    "mailto:user@example.test", "//example.test", " https://example.test", " //example.test",
+])
 def test_browser_projection_rejects_uri_scope_roots(root):
     projection = copy.deepcopy(CASES["browser_element_resolution"])
     projection["scope"]["root"] = root
