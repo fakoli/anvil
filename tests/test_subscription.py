@@ -175,14 +175,15 @@ def test_runner_nonzero_preserves_bounded_stdout_without_stderr(monkeypatch, tmp
 
 def test_runner_rejects_truncated_stdout_even_when_the_prefix_completes(monkeypatch, tmp_path):
     monkeypatch.setattr(sub, "require_subscription", lambda *a, **k: "/fake/codex")
-    monkeypatch.setattr(sub, "MAX_DIAGNOSTIC_STDOUT", 1)
+    completed_prefix = events(FINAL, DONE)
+    monkeypatch.setattr(sub, "MAX_DIAGNOSTIC_STDOUT", len(completed_prefix))
 
     class Process:
         returncode = 0
         def __init__(self, argv, **kwargs):
             self.stdout = kwargs["stdout"]
         def wait(self, timeout):
-            self.stdout.write(events(FINAL, DONE) + '{"type":"error"}\n')
+            self.stdout.write(completed_prefix + '{"type":"error"}\n')
     monkeypatch.setattr(sub.subprocess, "Popen", Process)
     with pytest.raises(sub.SubscriptionError, match="stdout was truncated") as caught:
         sub.run_codex("input", cwd=tmp_path)
