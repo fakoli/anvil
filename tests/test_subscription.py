@@ -102,6 +102,18 @@ def test_tool_rejection_preserves_bounded_events_and_completed_usage():
             error.parsed_result.output_tokens) == (60, 40, 20)
 
 
+def test_exact_skills_context_notice_is_retained_but_not_treated_as_a_tool():
+    notice = {"type": "item.completed", "item": {
+        "id": "item_0", "type": "error", "message": sub._SKILLS_CONTEXT_NOTICE,
+    }}
+    result = sub.parse_codex_events(events(notice, FINAL, DONE))
+    assert result.text == "complete"
+    assert result.events[1] == notice
+    changed_notice = {**notice, "item": {**notice["item"], "message": "different"}}
+    with pytest.raises(sub.SubscriptionError, match="error"):
+        sub.parse_codex_events(events(changed_notice, FINAL, DONE))
+
+
 def test_parser_bounds_diagnostic_event_text():
     stream = "x" * (sub.MAX_DIAGNOSTIC_STDOUT + 1)
     with pytest.raises(sub.SubscriptionError) as caught:

@@ -23,6 +23,11 @@ ASTRA_MODEL = "gpt-6-astra"
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MAX_DIAGNOSTIC_STDOUT = 256 * 1024
+_SKILLS_CONTEXT_NOTICE = (
+    "Skill descriptions were shortened to fit the skills context budget. Codex can still see "
+    "every skill, but some descriptions are shorter. Disable unused skills or plugins to leave "
+    "more room for the rest."
+)
 
 # Provider/transport overrides can bypass subscription login even without a key.
 _API_ENV_VARS = (
@@ -127,6 +132,16 @@ def _bounded_events(raw: str) -> tuple[str, bool]:
     return raw[:MAX_DIAGNOSTIC_STDOUT], len(raw) > MAX_DIAGNOSTIC_STDOUT
 
 
+def _is_skills_context_notice(item: dict[str, Any]) -> bool:
+    """Accept only Codex's observed non-executing skills-budget notification."""
+    return (
+        set(item) == {"id", "type", "message"}
+        and isinstance(item["id"], str)
+        and item["type"] == "error"
+        and item["message"] == _SKILLS_CONTEXT_NOTICE
+    )
+
+
 def parse_codex_events(output: str, *, allow_tools: bool = False) -> CodexResult:
     """Only a completed turn with a final message is a usable completion."""
     result = CodexResult(text="")
@@ -166,6 +181,8 @@ def parse_codex_events(output: str, *, allow_tools: bool = False) -> CodexResult
                         if not isinstance(item["text"], str):
                             raise ValueError("message must be text")
                         result.text = item["text"]
+                elif _is_skills_context_notice(item):
+                    pass
                 elif not allow_tools and item["type"] != "reasoning":
                     rejected_item_type = item["type"]
             elif kind == "turn.completed":
