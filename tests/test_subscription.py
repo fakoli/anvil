@@ -86,6 +86,30 @@ def test_rejects_partial_failed_malformed_and_tool_output(stream):
         sub.parse_codex_events(stream)
 
 
+def test_tool_rejection_preserves_bounded_events_and_completed_usage():
+    stream = events(
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "pwd"}},
+        FINAL, DONE,
+    )
+    with pytest.raises(sub.SubscriptionError, match="command_execution") as caught:
+        sub.parse_codex_events(stream)
+    error = caught.value
+    assert error.raw_events == stream
+    assert error.raw_events_truncated is False
+    assert error.parsed_result is not None
+    assert error.parsed_result.events[1]["item"]["type"] == "command_execution"
+    assert (error.parsed_result.input_tokens, error.parsed_result.cached_input_tokens,
+            error.parsed_result.output_tokens) == (60, 40, 20)
+
+
+def test_parser_bounds_diagnostic_event_text():
+    stream = "x" * (sub.MAX_DIAGNOSTIC_STDOUT + 1)
+    with pytest.raises(sub.SubscriptionError) as caught:
+        sub.parse_codex_events(stream)
+    assert len(caught.value.raw_events) == sub.MAX_DIAGNOSTIC_STDOUT
+    assert caught.value.raw_events_truncated is True
+
+
 def test_runner_pins_subscription_model_and_scrubs_child_environment(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setenv("CODEX_API_KEY", "synthetic-key")
@@ -118,6 +142,23 @@ def test_runner_pins_subscription_model_and_scrubs_child_environment(monkeypatch
     assert captured["prompt"] == "input"
     assert argv[-1] == "-"
     assert captured["cwd"] == Path(tmp_path)
+
+
+def test_runner_nonzero_preserves_bounded_stdout_without_stderr(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(sub, "require_subscription", lambda *a, **k: "/fake/codex")
+
+    class Process:
+        returncode = 9
+        def __init__(self, argv, **kwargs):
+            captured.update(kwargs)
+        def wait(self, timeout):
+            captured["stdout"].write('{"type":"error","message":"safe diagnostic"}\n')
+    monkeypatch.setattr(sub.subprocess, "Popen", Process)
+    with pytest.raises(sub.SubscriptionError, match="exit 9") as caught:
+        sub.run_codex("input", cwd=tmp_path)
+    assert caught.value.raw_events == '{"type":"error","message":"safe diagnostic"}\n'
+    assert caught.value.parsed_result is None
 
 
 @pytest.mark.parametrize("windows", [False, True])
