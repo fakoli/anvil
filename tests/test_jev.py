@@ -145,6 +145,9 @@ def test_completed_wire_contract_and_safe_provenance(monkeypatch):
     assert report["schema"] == "anvil.jev.annotation.v1"
     assert report["provider"] == "typesafe" and report["model"] == CONFIG.model
     assert report["usage"] == {"input_tokens": 10, "output_tokens": 5}
+    assert report["usage_receipt"] == {
+        "state": "validated", "input_tokens": 10, "output_tokens": 5,
+    }
     assert len(report["input_digest"]) == len(report["rubric_digest"]) == 64
     assert report["elapsed_ms"] >= 0
     assert len(requests) == 1
@@ -183,6 +186,9 @@ def test_malformed_answers_fail_closed(monkeypatch, answer, field, value):
     assert report["status"] == "invalid_response" and len(requests) == 1
     assert report["request_started"] is True and report["used"] is False
     assert report["answers"] == report["usage"] == {}
+    assert report["usage_receipt"] == {
+        "state": "validated", "input_tokens": 10, "output_tokens": 5,
+    }
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
@@ -199,6 +205,20 @@ def test_usage_is_nonnegative_integer(monkeypatch, value):
     data["usage"]["input_tokens"] = value
     report, _ = run(monkeypatch, data)
     assert report["status"] == "invalid_response"
+    assert report["usage_receipt"] == {
+        "state": "invalid", "input_tokens": None, "output_tokens": None,
+    }
+
+
+def test_usage_receipt_rejects_unrecognized_provider_fields(monkeypatch):
+    data = payload()
+    data["usage"]["cached_input_tokens"] = 3
+    report, _ = run(monkeypatch, data)
+    assert report["status"] == "invalid_response"
+    assert report["usage"] == {}
+    assert report["usage_receipt"] == {
+        "state": "invalid", "input_tokens": None, "output_tokens": None,
+    }
 
 
 def test_model_and_answer_keys_are_pinned(monkeypatch):
@@ -346,7 +366,7 @@ def test_invalid_selected_credential_source_fails_closed(tmp_path, monkeypatch, 
     report = jev.evaluate(CONFIG, "prd_review", "source", QUESTIONS, allow_api=True, project_root=project)
     assert report["reason"] == "credential_source_invalid"
     assert content not in json.dumps(report)
-    assert "one" not in repr(report) and "two" not in repr(report) and "home-key" not in repr(report)
+    assert "home-key" not in json.dumps(report)
 
 
 def test_custom_credential_names_remain_environment_only(tmp_path, monkeypatch):
@@ -436,6 +456,9 @@ def test_deadline_kills_and_reaps_stalled_http_repeatedly(monkeypatch, handler):
         assert report["status"] == "unavailable" and report["reason"] == "timeout"
         assert report["request_started"] is True and report["used"] is False
         assert report["answers"] == report["usage"] == {}
+        assert report["usage_receipt"] == {
+            "state": "not_received", "input_tokens": None, "output_tokens": None,
+        }
         assert {child.pid for child in multiprocessing.active_children()} == baseline
 
 

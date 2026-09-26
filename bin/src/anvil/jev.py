@@ -202,9 +202,21 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _answers(
-    payload: object, questions: dict[str, Any], model: str,
-) -> tuple[dict[str, Any], dict[str, int]]:
+def _usage_receipt(payload: object) -> tuple[dict[str, object], dict[str, int] | None]:
+    """Keep a provider receipt separate from whether its advice is usable."""
+    empty = {"state": "not_received", "input_tokens": None, "output_tokens": None}
+    if not isinstance(payload, dict):
+        return empty, None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict) or usage.keys() != {"input_tokens", "output_tokens"}:
+        return {**empty, "state": "invalid"}, None
+    if any(type(usage[key]) is not int or usage[key] < 0 for key in usage):
+        return {**empty, "state": "invalid"}, None
+    values = {key: usage[key] for key in ("input_tokens", "output_tokens")}
+    return {"state": "validated", **values}, values
+
+
+def _answers(payload: object, questions: dict[str, Any], model: str) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("model") != model:
         raise ValueError("model_mismatch")
     raw = payload.get("answers")
@@ -236,13 +248,7 @@ def _answers(
             else:
                 clean["score"] = _number(answer.get("score"), len(criteria) - 1)
         answers[name] = clean
-    usage = payload.get("usage")
-    if not isinstance(usage, dict) or any(
-        type(usage.get(key)) is not int or usage[key] < 0
-        for key in ("input_tokens", "output_tokens")
-    ):
-        raise ValueError("invalid_usage")
-    return answers, {key: usage[key] for key in ("input_tokens", "output_tokens")}
+    return answers
 
 
 def _request(
@@ -370,6 +376,9 @@ def evaluate(
         "status": "disabled", "reason": "disabled", "requested": False, "used": False,
         "request_started": False, "elapsed_ms": 0, "rubric_digest": None,
         "input_digest": None, "answers": {}, "usage": {},
+        "usage_receipt": {
+            "state": "not_received", "input_tokens": None, "output_tokens": None,
+        },
     }
 
     def finish(status: str, reason: str) -> dict[str, Any]:
@@ -414,7 +423,11 @@ def evaluate(
         return finish(status, reason)
     try:
         payload = json.loads(content, object_pairs_hook=_unique_object)
-        answers, usage = _answers(payload, questions, config.model)
+        receipt, usage = _usage_receipt(payload)
+        report["usage_receipt"] = receipt
+        if usage is None:
+            return finish("invalid_response", "invalid_response")
+        answers = _answers(payload, questions, config.model)
     except (TypeError, ValueError, UnicodeError, RecursionError):
         return finish("invalid_response", "invalid_response")
     except Exception:
