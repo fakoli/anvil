@@ -173,6 +173,39 @@ def test_runner_nonzero_preserves_bounded_stdout_without_stderr(monkeypatch, tmp
     assert caught.value.parsed_result is None
 
 
+def test_runner_rejects_truncated_stdout_even_when_the_prefix_completes(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub, "require_subscription", lambda *a, **k: "/fake/codex")
+    monkeypatch.setattr(sub, "MAX_DIAGNOSTIC_STDOUT", 1)
+
+    class Process:
+        returncode = 0
+        def __init__(self, argv, **kwargs):
+            self.stdout = kwargs["stdout"]
+        def wait(self, timeout):
+            self.stdout.write(events(FINAL, DONE) + '{"type":"error"}\n')
+    monkeypatch.setattr(sub.subprocess, "Popen", Process)
+    with pytest.raises(sub.SubscriptionError, match="stdout was truncated") as caught:
+        sub.run_codex("input", cwd=tmp_path)
+    assert caught.value.raw_events_truncated is True
+    assert caught.value.parsed_result is None
+
+
+def test_runner_rejects_unreadable_stdout(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub, "require_subscription", lambda *a, **k: "/fake/codex")
+    monkeypatch.setattr(sub, "_bounded_stdout", lambda source: (None, False))
+
+    class Process:
+        returncode = 0
+        def __init__(self, argv, **kwargs):
+            pass
+        def wait(self, timeout):
+            return None
+    monkeypatch.setattr(sub.subprocess, "Popen", Process)
+    with pytest.raises(sub.SubscriptionError, match="stdout was unavailable") as caught:
+        sub.run_codex("input", cwd=tmp_path)
+    assert caught.value.raw_events is None
+
+
 @pytest.mark.parametrize("windows", [False, True])
 def test_timeout_terminates_tree_and_bounds_wait(monkeypatch, windows):
     from unittest.mock import Mock

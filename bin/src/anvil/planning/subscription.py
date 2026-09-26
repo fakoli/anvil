@@ -325,6 +325,12 @@ def run_codex(
                     "verify subscription access and model availability.", raw_events=stdout,
                     raw_events_truncated=truncated,
                 )
+            if stdout is None or truncated:
+                state = "unavailable" if stdout is None else "truncated"
+                raise SubscriptionError(
+                    f"Codex subscription stdout was {state}; no completion accepted.",
+                    raw_events=stdout, raw_events_truncated=truncated,
+                )
     except OSError as exc:
         raise SubscriptionError("Could not run the Codex subscription CLI.") from exc
     return parse_codex_events(stdout, allow_tools=allow_tools)
