@@ -98,8 +98,12 @@ missing optional tooling reports unavailable, never installs tools implicitly.
 
 Result `schema`: `anvil.jev.annotation.v1`, with `status`, `reason`,
 `requested`, `request_started`, `used`, `capability`, `model`, `input_digest`,
-`rubric_digest`, `elapsed_ms`, `usage`, and `answers`. Only `completed` sets
-`used=true`. An unavailable response after sending sets
+`rubric_digest`, `elapsed_ms`, `usage`, `usage_receipt`, and `answers`. Only
+`completed` sets `used=true`. `usage_receipt` is always a fixed
+`{state, input_tokens, output_tokens}` shape: only `validated` carries exact
+provider counters; `not_received` and `invalid` carry nulls rather than zeroes.
+It may be validated even when answer validation fails, so metering cannot turn
+an unusable answer into successful advice. An unavailable response after sending sets
 `request_started=true`, so privacy disclosures do not falsely claim no
 egress. Inputs need not be logged to establish an input digest.
 

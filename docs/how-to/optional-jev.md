@@ -112,6 +112,12 @@ standard Anvil envelope and `data.schema: anvil.jev.annotation.v1`:
   completed, with a bounded explanation code.
 - `provider`, `model`, `input_digest`, `rubric_digest`, `usage`, and
   `elapsed_ms`: provenance and local measurements, not proof of correctness.
+- `usage_receipt`: a fixed `{state, input_tokens, output_tokens}` provider
+  receipt. `validated` copies exactly the two nonnegative counters returned by
+  the provider, even when a later answer check fails. `not_received` and
+  `invalid` use `null` counters, never invented zeroes. `usage` remains the
+  legacy completed-annotation counters; consumers measuring failed calls use
+  `usage_receipt`.
 
 Choice answers contain `choice`, `probabilities`, and `confidence`; Score
 answers contain fractional `score`, `probabilities`, and `confidence`; Noul
@@ -130,9 +136,18 @@ permission. The caller must enforce its own effective policy, authorization,
 input selection, stale-result checks, and timeout. Never expose a web endpoint
 that forwards caller-supplied permission/configuration fields into this bridge.
 
-Serving owns its UI, transcript consent, resource access, and capability
-switches. Browser code never receives the TypeSafe credential. Classification
-cannot change the gateway route or invoke operational tools.
+Use the supported process boundary as `anvil jev bridge --json <
+owner-authorized-jev.json`. The owner supplies the already resolved non-secret
+configuration; `TYPESAFE_API_KEY` stays in the protected process environment
+or protected selected `.env` resolution described above.
+
+Serving owns its UI, transcript consent, resource access, mandatory-evidence
+pinning, and capability switches. It must accept advice only when `status` is
+`completed`, `used` is true, offered IDs are valid, and the configured model,
+input digest, and rubric digest still match its owner snapshot. Browser code
+never receives the TypeSafe credential. Classification cannot change the
+gateway route or invoke operational tools. Mandatory evidence stays owner-held
+and pinned; a ranking may order only owner-declared optional evidence.
 
 ## Limits that matter
 

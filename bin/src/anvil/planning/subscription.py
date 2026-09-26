@@ -22,6 +22,12 @@ from typing import Any, Literal
 ASTRA_MODEL = "gpt-6-astra"
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+MAX_DIAGNOSTIC_STDOUT = 256 * 1024
+_SKILLS_CONTEXT_NOTICE = (
+    "Skill descriptions were shortened to fit the skills context budget. Codex can still see "
+    "every skill, but some descriptions are shorter. Disable unused skills or plugins to leave "
+    "more room for the rest."
+)
 
 # Provider/transport overrides can bypass subscription login even without a key.
 _API_ENV_VARS = (
@@ -35,6 +41,15 @@ _API_ENV_VARS = (
 
 class SubscriptionError(RuntimeError):
     """The selected subscription CLI could not complete the request."""
+
+    def __init__(
+        self, message: str, *, raw_events: str | None = None,
+        raw_events_truncated: bool = False, parsed_result: CodexResult | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.raw_events = raw_events
+        self.raw_events_truncated = raw_events_truncated
+        self.parsed_result = parsed_result
 
 
 def subscription_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -103,11 +118,38 @@ class CodexResult:
     events: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _bounded_stdout(source) -> tuple[str | None, bool]:
+    """Read only bounded stdout; stderr can contain provider/account detail."""
+    try:
+        source.seek(0)
+        raw = source.read(MAX_DIAGNOSTIC_STDOUT + 1)
+    except (OSError, ValueError):
+        return None, False
+    return raw[:MAX_DIAGNOSTIC_STDOUT], len(raw) > MAX_DIAGNOSTIC_STDOUT
+
+
+def _bounded_events(raw: str) -> tuple[str, bool]:
+    return raw[:MAX_DIAGNOSTIC_STDOUT], len(raw) > MAX_DIAGNOSTIC_STDOUT
+
+
+def _is_skills_context_notice(item: dict[str, Any]) -> bool:
+    """Accept only Codex's observed non-executing skills-budget notification."""
+    return (
+        set(item) == {"id", "type", "message"}
+        and isinstance(item["id"], str)
+        and item["type"] == "error"
+        and item["message"] == _SKILLS_CONTEXT_NOTICE
+    )
+
+
 def parse_codex_events(output: str, *, allow_tools: bool = False) -> CodexResult:
     """Only a completed turn with a final message is a usable completion."""
     result = CodexResult(text="")
+    raw_events, raw_events_truncated = _bounded_events(output)
     completed = False
     active = False
+    rejected_item_type: str | None = None
+    reported_failure = False
     try:
         for line in output.splitlines():
             if not line.strip():
@@ -118,7 +160,7 @@ def parse_codex_events(output: str, *, allow_tools: bool = False) -> CodexResult
             kind = event["type"]
             result.events.append(event)
             if kind in ("error", "turn.failed"):
-                raise SubscriptionError("Codex reported an unsuccessful turn; no output accepted.")
+                reported_failure = True
             if kind == "thread.started":
                 result.session_id = event.get("thread_id")
             elif kind == "turn.started":
@@ -139,8 +181,10 @@ def parse_codex_events(output: str, *, allow_tools: bool = False) -> CodexResult
                         if not isinstance(item["text"], str):
                             raise ValueError("message must be text")
                         result.text = item["text"]
+                elif _is_skills_context_notice(item):
+                    pass
                 elif not allow_tools and item["type"] != "reasoning":
-                    raise SubscriptionError("Codex used a tool during a text-only completion.")
+                    rejected_item_type = item["type"]
             elif kind == "turn.completed":
                 if not active or not result.text.strip():
                     raise ValueError("completion without active turn and final text")
@@ -161,9 +205,26 @@ def parse_codex_events(output: str, *, allow_tools: bool = False) -> CodexResult
                 result.cached_input_tokens += cached
                 result.output_tokens += output_tokens
     except (ValueError, KeyError, TypeError) as exc:
-        raise SubscriptionError("Codex returned malformed completion events.") from exc
+        raise SubscriptionError(
+            "Codex returned malformed completion events.", raw_events=raw_events,
+            raw_events_truncated=raw_events_truncated, parsed_result=result,
+        ) from exc
+    if rejected_item_type is not None:
+        raise SubscriptionError(
+            f"Codex used a tool during a text-only completion ({rejected_item_type}).",
+            raw_events=raw_events, raw_events_truncated=raw_events_truncated,
+            parsed_result=result,
+        )
+    if reported_failure:
+        raise SubscriptionError(
+            "Codex reported an unsuccessful turn; no output accepted.", raw_events=raw_events,
+            raw_events_truncated=raw_events_truncated, parsed_result=result,
+        )
     if not completed or not result.text.strip():
-        raise SubscriptionError("Codex returned no completed final answer.")
+        raise SubscriptionError(
+            "Codex returned no completed final answer.", raw_events=raw_events,
+            raw_events_truncated=raw_events_truncated, parsed_result=result,
+        )
     return result
 
 
@@ -241,23 +302,35 @@ def run_codex(
                 try:
                     _terminate_process_tree(process, windows=os.name == "nt")
                 except Exception as cleanup_error:
+                    raw_events, truncated = _bounded_stdout(stdout_file)
                     raise SubscriptionError(
-                        "Codex subscription request timed out; process-tree cleanup also failed."
+                        "Codex subscription request timed out; process-tree cleanup also failed.",
+                        raw_events=raw_events, raw_events_truncated=truncated,
                     ) from cleanup_error
-                raise SubscriptionError("Codex subscription request timed out.") from None
+                raw_events, truncated = _bounded_stdout(stdout_file)
+                raise SubscriptionError(
+                    "Codex subscription request timed out.", raw_events=raw_events,
+                    raw_events_truncated=truncated,
+                ) from None
             except BaseException as error:
                 try:
                     _terminate_process_tree(process, windows=os.name == "nt")
                 except Exception as cleanup_error:
                     error.add_note(f"Codex process-tree cleanup also failed: {cleanup_error}")
                 raise
+            stdout, truncated = _bounded_stdout(stdout_file)
             if process.returncode != 0:
                 raise SubscriptionError(
                     f"Codex subscription request failed (exit {process.returncode}); "
-                    "verify subscription access and model availability."
+                    "verify subscription access and model availability.", raw_events=stdout,
+                    raw_events_truncated=truncated,
                 )
-            stdout_file.seek(0)
-            stdout = stdout_file.read()
+            if stdout is None or truncated:
+                state = "unavailable" if stdout is None else "truncated"
+                raise SubscriptionError(
+                    f"Codex subscription stdout was {state}; no completion accepted.",
+                    raw_events=stdout, raw_events_truncated=truncated,
+                )
     except OSError as exc:
         raise SubscriptionError("Could not run the Codex subscription CLI.") from exc
     return parse_codex_events(stdout, allow_tools=allow_tools)
