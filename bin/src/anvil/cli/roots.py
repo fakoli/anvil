@@ -618,6 +618,7 @@ def submit_evidence(
             if previous is not None:
                 data = previous
             else:
+                from anvil.cli.packet_apply import _read_command_proofs
                 from anvil.clock import SystemClock
                 from anvil.roots.registry import root_set_use_authorized
                 from anvil.state.models import EventDraft
@@ -631,6 +632,7 @@ def submit_evidence(
                     "commands_run": commands, "files_changed": files,
                     "output_excerpt": "Per-root isolated verification retained by owner manifest.",
                     "root_set_evidence": evidence,
+                    "proofs": [proof.model_dump(mode="json") for proof in _read_command_proofs(state_dir, claim.id)],
                 }
                 with root_set_use_authorized(claim.root_set, backend=backend):
                     backend.append(EventDraft(
