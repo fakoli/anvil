@@ -6,6 +6,12 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.14] - 2026-09-27
+
+### Added
+
+- Added an explicit idle-only replacement for an enrolled secondary root's complete verification command policy.
+
 ## [0.6.13] - 2026-09-21
 
 ### Changed

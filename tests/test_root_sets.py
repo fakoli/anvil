@@ -119,6 +119,7 @@ def test_verification_replacement_rejects_identity_and_policy_changes(idle_enrol
 @pytest.mark.parametrize("fault", ["active", "unreadable"])
 def test_verification_replacement_checks_all_alias_state_under_owner_lock(idle_enrollment, tmp_path, monkeypatch, fault):
     import fcntl
+
     from anvil.cli import roots as roots_cli
 
     repo, args, registry = idle_enrollment
