@@ -129,6 +129,36 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
     ], catch_exceptions=False))
     assert final["state"] == "released"
 
+    historical_events = (app_root / ".anvil" / "events.jsonl").read_bytes()
+    _json(runner.invoke(app, [
+        "roots", "enroll", "--repository-id", "library", "--path", str(library_root),
+        "--origin", "local:library", "--replace-verification-policy",
+        "--verification-command", "python -m pytest next.py -q", "--json",
+    ], catch_exceptions=False))
+    for command in ("evidence-status", "submit-evidence"):
+        after = _json(runner.invoke(app, [
+            "roots", command, task["id"], "--request-file", str(request_path),
+            "--manifest-file", str(manifest_path), "--actor", "root-evidence",
+            "--cwd", str(app_root), "--json",
+        ], catch_exceptions=False))
+        assert after["evidence_id"] == submitted["evidence_id"]
+    assert (app_root / ".anvil" / "events.jsonl").read_bytes() == historical_events
+    # Replay still derives the original evidence only from immutable events.
+    from anvil.roots.registry import RootSetRegistry
+    from anvil.state.sqlite import SqliteBackend
+
+    with monkeypatch.context() as replay_patch:
+        replay_patch.setattr(RootSetRegistry, "locked", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("replay read registry")))
+        replay = SqliteBackend(db_path=str(tmp_path / "replayed.db"),
+            events_path=str(app_root / ".anvil" / "events.jsonl"), clock=SystemClock())
+        try:
+            replay.initialize()
+            old_claim = replay.get_claim(claimed["claim_id"])
+            assert old_claim.root_set.root_facts[1].verification_commands == ("python -m pytest -q",)
+            assert replay.get_latest_evidence(task["id"]).id == submitted["evidence_id"]
+        finally:
+            replay.close()
+
 
 def test_root_set_evidence_refuses_changed_root_fact(tmp_path, monkeypatch):
     """The owner rejects a manifest that substitutes an immutable baseline."""

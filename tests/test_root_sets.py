@@ -47,6 +47,113 @@ def _json(result):
     return json.loads(result.output)
 
 
+@pytest.fixture
+def idle_enrollment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = _repo(tmp_path / "owner")
+    monkeypatch.chdir(repo)
+    args = ["roots", "enroll", "--repository-id", "owner", "--path", str(repo),
+            "--origin", "local:owner", "--verification-command", "pytest old.py", "--json"]
+    _json(runner.invoke(app, args, catch_exceptions=False))
+    return repo, args, RootSetRegistry()
+
+
+def test_explicit_idle_verification_replacement_is_exact_and_idempotent(idle_enrollment):
+    _repo_path, args, registry = idle_enrollment
+    original = registry.path.read_bytes()
+    replacement = ["pytest next.py", "python -m unittest tests.next"]
+    changed = args.copy()
+    changed[changed.index("pytest old.py")] = replacement[0]
+    refused = runner.invoke(app, changed, catch_exceptions=False)
+    assert refused.exit_code == 1 and registry.path.read_bytes() == original
+    changed += ["--verification-command", replacement[1], "--replace-verification-policy"]
+    _json(runner.invoke(app, changed, catch_exceptions=False))
+    updated = registry.path.read_bytes()
+    expected = json.loads(original)
+    expected["repositories"]["owner"]["verification_commands"] = replacement
+    assert json.loads(updated) == expected
+    _json(runner.invoke(app, changed, catch_exceptions=False))
+    assert registry.path.read_bytes() == updated
+    manifest = _json(runner.invoke(app, ["describe", "--json"], catch_exceptions=False))["data"]
+    assert "--replace-verification-policy" in manifest["cli"]["options"]["roots enroll"]
+
+
+@pytest.mark.parametrize("state", ["pending", "bound", "release_pending"])
+def test_verification_replacement_refuses_every_reservation(idle_enrollment, state):
+    repo, args, registry = idle_enrollment
+    with registry.locked() as data:
+        reservation = registry.reserve(data, request_id="old-use", digest="a" * 64,
+            actor="owner", state_identity=str(repo / ".anvil"),
+            roots=[{"root_id": "owner", "repository_id": "owner", "path": str(repo)}])
+        reservation.update(state=state, created_at=0, claim_id="COLD")
+    before = registry.path.read_bytes()
+    refused = runner.invoke(app, [*args, "--replace-verification-policy"], catch_exceptions=False)
+    assert refused.exit_code == 1
+    assert json.loads(refused.output)["error"]["code"] == "root_set_conflict"
+    assert registry.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["unknown", "origin", "new_alias", "empty", "oversize"])
+def test_verification_replacement_rejects_identity_and_policy_changes(idle_enrollment, tmp_path, fault):
+    repo, args, registry = idle_enrollment
+    changed = [*args, "--replace-verification-policy"]
+    if fault == "unknown":
+        changed[changed.index("owner")] = "unknown"
+    elif fault == "origin":
+        changed[changed.index("local:owner")] = "local:different"
+    elif fault == "new_alias":
+        alias = tmp_path / "alias"
+        _git(repo, "worktree", "add", "-qb", "alias", str(alias))
+        changed[changed.index(str(repo))] = str(alias)
+    elif fault == "empty":
+        index = changed.index("--verification-command")
+        del changed[index:index + 2]
+    else:
+        changed[changed.index("pytest old.py")] = "x" * 1025
+    before = registry.path.read_bytes()
+    refused = runner.invoke(app, changed, catch_exceptions=False)
+    assert refused.exit_code == 1
+    assert registry.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["active", "unreadable"])
+def test_verification_replacement_checks_all_alias_state_under_owner_lock(idle_enrollment, tmp_path, monkeypatch, fault):
+    import fcntl
+    from anvil.cli import roots as roots_cli
+
+    repo, args, registry = idle_enrollment
+    alias = tmp_path / "alias"
+    _git(repo, "worktree", "add", "-qb", "alias", str(alias))
+    alias_args = args.copy()
+    alias_args[alias_args.index(str(repo))] = str(alias)
+    _json(runner.invoke(app, alias_args, catch_exceptions=False))
+    states = {root: root / "state-for-test" for root in (repo, alias)}
+    for state in states.values():
+        state.mkdir()
+    monkeypatch.setattr(roots_cli, "_resolve_state_dir", lambda path: states[path])
+    visited = []
+
+    def open_backend(path):
+        visited.append(path)
+        # Another lock descriptor cannot enter while alias State is checked.
+        with registry.lock_path.open("a+b") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if path == states[alias] and fault == "unreadable":
+            raise OSError("private diagnostic must not escape")
+        return SimpleNamespace(
+            list_active_claims=lambda: [object()] if path == states[alias] else [],
+            close=lambda: None,
+        )
+
+    monkeypatch.setattr(roots_cli, "_open_backend", open_backend)
+    before = registry.path.read_bytes()
+    refused = runner.invoke(app, [*args, "--replace-verification-policy"], catch_exceptions=False)
+    assert refused.exit_code == 1 and visited == list(states.values())
+    assert "private diagnostic" not in refused.output
+    assert registry.path.read_bytes() == before
+
+
 def test_disposable_cli_root_claim_conflict_status_and_release(tmp_path, monkeypatch):
     """Two real Git roots receive one canonical State claim and reservation."""
     home = tmp_path / "home"
@@ -277,6 +384,32 @@ def test_disposable_cli_root_claim_conflict_status_and_release(tmp_path, monkeyp
         "--actor", "root-test", "--confirm-runner-stopped", "--cwd", str(app_root), "--json",
     ], catch_exceptions=False))["data"]
     assert confirmed["state"] == "released"
+
+    previous = json.loads(registry_path.read_text())["reservations"]["request-one"]
+    next_commands = ["python -m pytest next.py -q"]
+    _json(runner.invoke(app, [
+        "roots", "enroll", "--repository-id", "lib", "--path", str(lib_root),
+        "--origin", "local:lib", "--replace-verification-policy",
+        "--verification-command", next_commands[0], "--json",
+    ], catch_exceptions=False))
+    next_task = _json(runner.invoke(app, ["show", "T002", "--cwd", str(app_root), "--json"], catch_exceptions=False))["data"]["task"]
+    request["request_id"] = "request-two"
+    request["roots"][0]["verification_commands"] = next_task["verification"]["commands"]
+    request_path.write_text(json.dumps(request))
+    refused = runner.invoke(app, [
+        "roots", "claim", next_task["id"], "--request-file", str(request_path),
+        "--actor", "root-test", "--cwd", str(app_root), "--json",
+    ], catch_exceptions=False)
+    assert refused.exit_code == 1
+    assert json.loads(refused.output)["error"]["code"] == "root_set_authority_lost"
+    request["roots"][1]["verification_commands"] = next_commands
+    request_path.write_text(json.dumps(request))
+    second = _json(runner.invoke(app, [
+        "roots", "claim", next_task["id"], "--request-file", str(request_path),
+        "--actor", "root-test", "--cwd", str(app_root), "--json",
+    ], catch_exceptions=False))["data"]
+    assert second["roots"][1]["verification_commands"] == next_commands
+    assert json.loads(registry_path.read_text())["reservations"]["request-one"] == previous
 
 
 def test_activated_corrupt_registry_fails_closed_before_ordinary_claim(tmp_path, monkeypatch):
