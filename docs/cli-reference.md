@@ -1106,6 +1106,11 @@ anvil roots submit-evidence T001 --request-file root-set.json --manifest-file ev
 anvil roots evidence-status T001 --request-file root-set.json --manifest-file evidence.json --actor agent --json
 ```
 
+When a frozen command is outside hook capture, pass its canonical claim-bound
+artifact with `--command-proof-file proof.json` on `roots submit-evidence`.
+The artifact is validated with the same claim, command, time, and repository
+checks as ordinary `submit` before the single evidence event is appended.
+
 This records evidence for the one frozen coordinated claim and leaves acceptance
 to the existing independent review flow.
 

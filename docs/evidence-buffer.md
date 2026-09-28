@@ -159,6 +159,10 @@ clients base64-encode each entire canonical envelope and pass the resulting
 strings in `command_proof_artifacts_base64` together with `cwd`. Every artifact
 is prevalidated before the one durable `evidence.submitted` append, so one bad
 item imports nothing and leaves the claim active.
+Coordinated root-set claims use the same artifact with
+`anvil roots submit-evidence --command-proof-file`; import it before the root
+evidence submission. That submission moves the canonical task to review; the
+owner reservation remains held until runner-stop reconciliation releases it.
 
 ## `orphan.json` accumulation
 
