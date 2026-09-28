@@ -63,7 +63,7 @@ bedrock = [
 
 [[package]]
 name = "anvil-state"
-version = "0.6.13"
+version = "0.6.14"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

@@ -6,6 +6,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.14] - 2026-09-28
+
+### Added
+
+- Import claim-bound command proofs atomically with root-set evidence through
+  `anvil roots submit-evidence --command-proof-file`.
+
 ## [0.6.13] - 2026-09-21
 
 ### Changed
