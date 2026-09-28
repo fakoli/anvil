@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 import subprocess
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,11 +16,13 @@ from typer.testing import CliRunner
 from anvil.cli import app
 from anvil.cli._helpers import _open_backend
 from anvil.cli.roots import _load_evidence_manifest, _root_evidence_payload
+from anvil.claims.command_proof_artifact import claim_command_cwd_identity
 from anvil.clock import SystemClock
 from anvil.review.gates import evidence_complete
 from anvil.roots.registry import RootSetError, root_set_use_authorized
 from anvil.state.backend import EventRejected
 from anvil.state.models import EventDraft, HookCommandAttribution, hook_command_semantic_digest
+from anvil.state.hashing import canonical_json_bytes
 
 runner = CliRunner()
 
@@ -44,7 +49,7 @@ def _json(result):
     return json.loads(result.output)["data"]
 
 
-@pytest.mark.parametrize("proof_case", ["valid", "missing", "malformed", "failed", "wrong_owner"])
+@pytest.mark.parametrize("proof_case", ["valid", "missing", "malformed", "failed", "wrong_owner", "external", "external_symlink", "external_fifo"])
 def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tmp_path, monkeypatch, proof_case):
     """Same filenames remain separate and a terminal claim stays overheld."""
     home = tmp_path / "home"
@@ -105,7 +110,7 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
     monkeypatch.setenv("ANVIL_ACTOR", "root-evidence")
     monkeypatch.setenv("ANVIL_CLAIM_ID", claimed["claim_id"])
     buffer = app_root / ".anvil" / ".evidence-buffer" / f"{claimed['claim_id']}.json"
-    if proof_case != "missing":
+    if proof_case not in {"missing", "external", "external_symlink", "external_fifo"}:
         for command in primary_commands:
             captured = runner.invoke(app, [
                 "hook", "capture-evidence", "--command", command,
@@ -140,10 +145,58 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
         finally:
             backend.close()
         return
+    proof_options = []
+    if proof_case.startswith("external"):
+        backend = _open_backend(app_root / ".anvil")
+        try:
+            claim = backend.get_claim(claimed["claim_id"])
+            project = backend.get_project()
+        finally:
+            backend.close()
+        context = claim.attestation_context
+        output = b"synthetic checked result\n"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        payload = {
+            "schema_version": 1, "project_id": project.id, "claim_id": claim.id,
+            "generation": claim.generation, "claimed_by": claim.claimed_by,
+            "task_id": task["id"], "task_revision": context.task_revision,
+            "prd_id": context.prd_id, "prd_revision": context.prd_revision,
+            "repository_id": context.repository_id, "claim_start_sha": context.claim_start_sha,
+            "cwd_relative": ".", "cwd_identity": claim_command_cwd_identity(
+                app_root, context.repository_id, "."),
+            "command_base64": base64.b64encode(primary_commands[0].encode()).decode(),
+            "started_at": claim.created_at.isoformat().replace("+00:00", "Z"),
+            "ended_at": now, "exit_code": 0,
+            "output_base64": base64.b64encode(output).decode(),
+            "output_sha256": hashlib.sha256(output).hexdigest(),
+        }
+        proof_file = tmp_path / "proof.json"
+        proof_file.write_bytes(canonical_json_bytes({"envelope_id": "root-proof-1", "payload": payload}))
+        if proof_case == "external_symlink":
+            link = tmp_path / "proof-link.json"
+            link.symlink_to(proof_file)
+            proof_file = link
+        elif proof_case == "external_fifo":
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("FIFO requires POSIX")
+            fifo = tmp_path / "proof-pipe"
+            os.mkfifo(fifo)
+            proof_file = fifo
+        proof_options = ["--command-proof-file", str(proof_file)]
+    if proof_case in {"external_symlink", "external_fifo"}:
+        refused = runner.invoke(app, [
+            "roots", "submit-evidence", task["id"], "--request-file", str(request_path),
+            "--manifest-file", str(manifest_path), "--actor", "root-evidence",
+            *proof_options, "--cwd", str(app_root), "--json",
+        ], catch_exceptions=False)
+        assert refused.exit_code == 1
+        assert json.loads(refused.output)["error"]["code"] == "root_set_command_proof_invalid"
+        assert (app_root / ".anvil" / "events.jsonl").read_bytes() == before
+        return
     submitted = _json(runner.invoke(app, [
         "roots", "submit-evidence", task["id"], "--request-file", str(request_path),
         "--manifest-file", str(manifest_path), "--actor", "root-evidence",
-        "--cwd", str(app_root), "--json",
+        *proof_options, "--cwd", str(app_root), "--json",
     ], catch_exceptions=False))
     assert submitted["status"] == "submitted"
     backend = _open_backend(app_root / ".anvil")
@@ -152,8 +205,8 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
         submitted_evidence = backend.get_latest_evidence(task["id"])
         assert submitted_task.verification.required_proofs
         assert submitted_evidence is not None
-        assert len(submitted_evidence.proofs) == (len(primary_commands) if proof_case in {"valid", "failed"} else 0)
-        assert evidence_complete(submitted_task, submitted_evidence)[0] == (proof_case == "valid")
+        assert len(submitted_evidence.proofs) == (len(primary_commands) if proof_case in {"valid", "failed"} else 1 if proof_case == "external" else 0)
+        assert evidence_complete(submitted_task, submitted_evidence)[0] == (proof_case in {"valid", "external"})
     finally:
         backend.close()
     status = _json(runner.invoke(app, [

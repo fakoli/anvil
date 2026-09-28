@@ -653,6 +653,7 @@ def submit_evidence(
     task_id: str,
     request_file: Path = typer.Option(..., "--request-file"),  # noqa: B008
     manifest_file: Path = typer.Option(..., "--manifest-file"),  # noqa: B008
+    command_proof_file: list[Path] | None = typer.Option(None, "--command-proof-file"),  # noqa: B008
     actor: str = typer.Option(..., "--actor"),  # noqa: B008
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
@@ -682,6 +683,50 @@ def submit_evidence(
 
                 commands = [command for item in evidence["roots"] for command in item["commands"]]
                 files = [f"{item['root_id']}/{path}" for item in evidence["roots"] for path in item["files"]]
+                claim_bound_proofs = ()
+                if command_proof_file:
+                    from anvil import signing
+                    from anvil.claims.command_proof_artifact import (
+                        ClaimCommandProofError,
+                        load_claim_command_proof,
+                        verify_claim_command_proof_batch,
+                    )
+                    from anvil.cli.proof import _default_trust_path
+                    from anvil.state.models import (
+                        MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                        MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+                        MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
+                    )
+
+                    try:
+                        if not hasattr(os, "O_NOFOLLOW"):
+                            raise ClaimCommandProofError("platform_unsupported", "command proof import requires no-follow file open")
+                        if len(command_proof_file) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+                            raise ClaimCommandProofError("batch_too_large", "command proof batch exceeds limits")
+                        trusted = signing.load_trust_list(_default_trust_path())
+                        loaded = []
+                        total_bytes = 0
+                        for path in command_proof_file:
+                            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                            with os.fdopen(descriptor, "rb") as stream:
+                                info = os.fstat(stream.fileno())
+                                total_bytes += info.st_size
+                                if (not stat.S_ISREG(info.st_mode)
+                                        or info.st_size > MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
+                                        or total_bytes > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES):
+                                    raise ClaimCommandProofError("source_too_large", "command proof source is invalid")
+                                loaded.append(load_claim_command_proof(stream, trusted_issuers=trusted))
+                        task = backend.get_task(task_id)
+                        project = backend.get_project()
+                        if task is None or project is None:
+                            raise ClaimCommandProofError("context_missing", "command proof context is unavailable")
+                        claim_bound_proofs = verify_claim_command_proof_batch(
+                            loaded, claim=claim, task=task, project_id=project.id,
+                            project_root=_resolve_project_dir(cwd), actor=resolved_actor,
+                            declared_commands=commands, now=SystemClock().now(),
+                        )
+                    except (OSError, ClaimCommandProofError) as exc:
+                        raise RootSetError("root_set_command_proof_invalid", "claim-bound command proof is invalid") from exc
                 evidence_id = "EVROOT-" + evidence["owner_manifest_digest"][:24]
                 payload = {
                     "task_id": task_id, "claim_id": claim.id,
@@ -689,7 +734,8 @@ def submit_evidence(
                     "commands_run": commands, "files_changed": files,
                     "output_excerpt": "Per-root isolated verification retained by owner manifest.",
                     "root_set_evidence": evidence,
-                    "proofs": [proof.model_dump(mode="json") for proof in _read_command_proofs(state_dir, claim.id)],
+                    "proofs": [proof.model_dump(mode="json") for proof in (
+                        *_read_command_proofs(state_dir, claim.id), *claim_bound_proofs)],
                 }
                 with root_set_use_authorized(claim.root_set, backend=backend):
                     backend.append(EventDraft(
