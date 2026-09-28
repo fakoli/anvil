@@ -147,6 +147,8 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
         return
     proof_options = []
     if proof_case.startswith("external"):
+        if not hasattr(os, "O_NOFOLLOW"):
+            pytest.skip("external root proofs require no-follow file open")
         backend = _open_backend(app_root / ".anvil")
         try:
             claim = backend.get_claim(claimed["claim_id"])
