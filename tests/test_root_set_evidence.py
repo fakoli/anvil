@@ -2,27 +2,27 @@
 
 from __future__ import annotations
 
-import json
 import base64
 import hashlib
-import subprocess
+import json
 import os
-from datetime import datetime, timezone
+import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from anvil.claims.command_proof_artifact import claim_command_cwd_identity
 from anvil.cli import app
 from anvil.cli._helpers import _open_backend
 from anvil.cli.roots import _load_evidence_manifest, _root_evidence_payload
-from anvil.claims.command_proof_artifact import claim_command_cwd_identity
 from anvil.clock import SystemClock
 from anvil.review.gates import evidence_complete
 from anvil.roots.registry import RootSetError, root_set_use_authorized
 from anvil.state.backend import EventRejected
-from anvil.state.models import EventDraft, HookCommandAttribution, hook_command_semantic_digest
 from anvil.state.hashing import canonical_json_bytes
+from anvil.state.models import EventDraft, HookCommandAttribution, hook_command_semantic_digest
 
 runner = CliRunner()
 
@@ -155,7 +155,7 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
             backend.close()
         context = claim.attestation_context
         output = b"synthetic checked result\n"
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         payload = {
             "schema_version": 1, "project_id": project.id, "claim_id": claim.id,
             "generation": claim.generation, "claimed_by": claim.claimed_by,
