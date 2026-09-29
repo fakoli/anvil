@@ -181,6 +181,7 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
                 UnicodeDecodeError,
                 json.JSONDecodeError,
                 KeyError,
+                RecursionError,
                 ValueError,
                 TypeError,
             ):

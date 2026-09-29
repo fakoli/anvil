@@ -331,7 +331,12 @@ def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None
     _write_buffer(
         tmp_path,
         "C00000001",
-        [_command_record("uv run pytest -q", 0), partial, "{not json"],
+        [
+            _command_record("uv run pytest -q", 0),
+            partial,
+            "{not json",
+            "[" * 2_000 + "]" * 2_000,
+        ],
     )
     proofs = _read_command_proofs(tmp_path, "C00000001")
     assert len(proofs) == 1
