@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -101,12 +103,42 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     buffer_file = task_claim_buffer_path(state_dir / ".evidence-buffer", claim_id)
     if buffer_file is None:
         return []
-    if not buffer_file.exists():
-        return []
+    descriptor = -1
     try:
-        stream = buffer_file.open("rb")
+        before_open = os.stat(buffer_file, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before_open.st_mode)
+            or before_open.st_size < 0
+            or before_open.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
+        ):
+            return []
+        flags = os.O_RDONLY
+        for flag_name in (
+            "O_BINARY",
+            "O_CLOEXEC",
+            "O_NOINHERIT",
+            "O_NONBLOCK",
+            "O_NOFOLLOW",
+        ):
+            flags |= getattr(os, flag_name, 0)
+        descriptor = os.open(buffer_file, flags)
+        opened = os.fstat(descriptor)
+        after_open = os.stat(buffer_file, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(after_open.st_mode)
+            or not os.path.samestat(opened, after_open)
+            or opened.st_size < 0
+            or opened.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
+        ):
+            return []
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = -1
     except OSError:
         return []
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
     proofs: list[CommandProof] = []
     bytes_read = 0
@@ -149,6 +181,7 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
                 UnicodeDecodeError,
                 json.JSONDecodeError,
                 KeyError,
+                RecursionError,
                 ValueError,
                 TypeError,
             ):

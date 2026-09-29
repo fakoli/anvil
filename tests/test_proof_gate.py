@@ -16,6 +16,7 @@ import base64
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from anvil.cli.packet_apply import _read_command_proofs
@@ -330,7 +331,12 @@ def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None
     _write_buffer(
         tmp_path,
         "C00000001",
-        [_command_record("uv run pytest -q", 0), partial, "{not json"],
+        [
+            _command_record("uv run pytest -q", 0),
+            partial,
+            "{not json",
+            "[" * 2_000 + "]" * 2_000,
+        ],
     )
     proofs = _read_command_proofs(tmp_path, "C00000001")
     assert len(proofs) == 1
@@ -350,3 +356,17 @@ def test_read_command_proofs_skips_cross_claim_and_tampered_records(
 
 def test_read_command_proofs_missing_buffer_is_empty(tmp_path: Path) -> None:
     assert _read_command_proofs(tmp_path, "NOPE") == []
+
+
+def test_read_command_proofs_refuses_symlink_and_fifo_buffers(tmp_path: Path) -> None:
+    buffer_dir = tmp_path / ".evidence-buffer"
+    buffer_dir.mkdir()
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(_command_record("pytest", 0)) + "\n")
+    buffer = buffer_dir / "C00000001.json"
+    buffer.symlink_to(target)
+    assert _read_command_proofs(tmp_path, "C00000001") == []
+    buffer.unlink()
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(buffer)
+        assert _read_command_proofs(tmp_path, "C00000001") == []

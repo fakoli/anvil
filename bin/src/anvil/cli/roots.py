@@ -27,6 +27,8 @@ from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.roots.registry import (
     RootSetError,
     RootSetRegistry,
+    _entry_aliases,
+    _entry_has_live_identity,
     _require_id,
     _validate_commands,
     authorize_root_set_claim,
@@ -196,16 +198,71 @@ def _bound_claim_matches(backend, reservation: dict[str, Any], registry: dict[st
     return claim
 
 
+def _replace_verification_policy(repository_id: str, path: Path, origin: str, commands: list[str] | None) -> dict[str, str]:
+    """Replace only an idle owner's policy, under the claim coordinator lock."""
+    repository_id = _require_id(repository_id, "repository id")
+    policy = _validate_commands(commands or [])
+    if not policy:
+        raise RootSetError("root_set_identity_mismatch", "replacement verification policy must be nonempty.")
+    with RootSetRegistry().locked() as registry:
+        known = registry["repositories"].get(repository_id)
+        if known is None:
+            raise RootSetError("root_set_not_enrolled", "replacement requires an enrolled repository.")
+        live = live_repository_identity(str(path), declared_origin=origin)
+        if known["origin"] != live["origin"] or not _entry_has_live_identity(known, live):
+            raise RootSetError("root_set_identity_mismatch", "replacement requires an existing exact repository alias.")
+        if any(
+            item["state"] in {"pending", "bound", "release_pending"}
+            and repository_id in item["repository_ids"]
+            for item in registry["reservations"].values()
+        ):
+            raise RootSetError("root_set_conflict", "verification policy cannot change while the repository is reserved.")
+        checked_states: set[Path] = set()
+        try:
+            for alias in _entry_aliases(known):
+                current = live_repository_identity(alias["path"], declared_origin=known["origin"])
+                if current != alias:
+                    raise RootSetError("root_set_identity_mismatch", "an enrolled alias has changed identity.")
+                state_dir = _resolve_state_dir(Path(alias["path"]))
+                if state_dir in checked_states:
+                    continue
+                checked_states.add(state_dir)
+                try:
+                    state_dir.stat()
+                except FileNotFoundError:
+                    continue
+                backend = _open_backend(state_dir)
+                try:
+                    if backend.list_active_claims():
+                        raise RootSetError("root_set_preexisting_claim", "verification policy cannot change with active claims.")
+                finally:
+                    backend.close()
+        except RootSetError:
+            raise
+        except Exception:
+            raise RootSetError("root_set_authority_lost", "enrolled alias State could not be verified.") from None
+        known["verification_commands"] = policy
+    return {"repository_id": repository_id, **live}
+
+
 @roots_app.command("enroll")
 def enroll(
     repository_id: str = typer.Option(..., "--repository-id"),  # noqa: B008
     path: Path = typer.Option(..., "--path"),  # noqa: B008
     origin: str = typer.Option(..., "--origin"),  # noqa: B008
     verification_command: list[str] | None = typer.Option(None, "--verification-command"),  # noqa: B008
+    replace_verification_policy: bool = typer.Option(False, "--replace-verification-policy", help="Replace an existing exact owner's complete nonempty verification policy only while idle."),  # noqa: B008
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Enroll one exact live Git checkout under an owner repository identity."""
     try:
+        if replace_verification_policy:
+            data = _replace_verification_policy(repository_id, path, origin, verification_command)
+            if json_output:
+                emit_success("roots enroll", {"enrollment": data})
+            else:
+                typer.echo(f"Replaced verification policy for repository '{data['repository_id']}'.")
+            return
         # Do not activate owner-global exclusivity around a checkout that is
         # already carrying a legacy State lease.  The backend is the supported
         # reader; no State files are inspected directly.
@@ -596,6 +653,7 @@ def submit_evidence(
     task_id: str,
     request_file: Path = typer.Option(..., "--request-file"),  # noqa: B008
     manifest_file: Path = typer.Option(..., "--manifest-file"),  # noqa: B008
+    command_proof_file: list[Path] | None = typer.Option(None, "--command-proof-file"),  # noqa: B008
     actor: str = typer.Option(..., "--actor"),  # noqa: B008
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
@@ -618,12 +676,57 @@ def submit_evidence(
             if previous is not None:
                 data = previous
             else:
+                from anvil.cli.packet_apply import _read_command_proofs
                 from anvil.clock import SystemClock
                 from anvil.roots.registry import root_set_use_authorized
                 from anvil.state.models import EventDraft
 
                 commands = [command for item in evidence["roots"] for command in item["commands"]]
                 files = [f"{item['root_id']}/{path}" for item in evidence["roots"] for path in item["files"]]
+                claim_bound_proofs = ()
+                if command_proof_file:
+                    from anvil import signing
+                    from anvil.claims.command_proof_artifact import (
+                        ClaimCommandProofError,
+                        load_claim_command_proof,
+                        verify_claim_command_proof_batch,
+                    )
+                    from anvil.cli.proof import _default_trust_path
+                    from anvil.state.models import (
+                        MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                        MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+                        MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
+                    )
+
+                    try:
+                        if not hasattr(os, "O_NOFOLLOW"):
+                            raise ClaimCommandProofError("platform_unsupported", "command proof import requires no-follow file open")
+                        if len(command_proof_file) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+                            raise ClaimCommandProofError("batch_too_large", "command proof batch exceeds limits")
+                        trusted = signing.load_trust_list(_default_trust_path())
+                        loaded = []
+                        total_bytes = 0
+                        for path in command_proof_file:
+                            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                            with os.fdopen(descriptor, "rb") as stream:
+                                info = os.fstat(stream.fileno())
+                                total_bytes += info.st_size
+                                if (not stat.S_ISREG(info.st_mode)
+                                        or info.st_size > MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
+                                        or total_bytes > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES):
+                                    raise ClaimCommandProofError("source_too_large", "command proof source is invalid")
+                                loaded.append(load_claim_command_proof(stream, trusted_issuers=trusted))
+                        task = backend.get_task(task_id)
+                        project = backend.get_project()
+                        if task is None or project is None:
+                            raise ClaimCommandProofError("context_missing", "command proof context is unavailable")
+                        claim_bound_proofs = verify_claim_command_proof_batch(
+                            loaded, claim=claim, task=task, project_id=project.id,
+                            project_root=_resolve_project_dir(cwd), actor=resolved_actor,
+                            declared_commands=commands, now=SystemClock().now(),
+                        )
+                    except (OSError, ClaimCommandProofError) as exc:
+                        raise RootSetError("root_set_command_proof_invalid", "claim-bound command proof is invalid") from exc
                 evidence_id = "EVROOT-" + evidence["owner_manifest_digest"][:24]
                 payload = {
                     "task_id": task_id, "claim_id": claim.id,
@@ -631,6 +734,8 @@ def submit_evidence(
                     "commands_run": commands, "files_changed": files,
                     "output_excerpt": "Per-root isolated verification retained by owner manifest.",
                     "root_set_evidence": evidence,
+                    "proofs": [proof.model_dump(mode="json") for proof in (
+                        *_read_command_proofs(state_dir, claim.id), *claim_bound_proofs)],
                 }
                 with root_set_use_authorized(claim.root_set, backend=backend):
                     backend.append(EventDraft(

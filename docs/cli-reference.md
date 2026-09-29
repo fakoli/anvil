@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.13 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.14 (schema 22)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1080,6 +1080,27 @@ The request uses `anvil.root-set-request/v1` with a stable `request_id`, one
 `verification_commands`. The primary must be the State checkout and use the
 task's declared verification commands; secondary commands come from enrollment.
 
+Sequential tasks may need different secondary-root tests. After the previous
+claim is terminal **and** its reservation has been reconciled with the runner
+confirmed stopped, explicitly replace that owner's complete command list:
+
+```bash
+anvil roots enroll --repository-id library --path /work/library --origin https://example.test/org/library.git --replace-verification-policy --verification-command 'python -m unittest tests.test_next_change'
+```
+
+Replacement requires an existing exact alias and matching origin, a nonempty
+bounded command list, no pending/bound/release-pending reservation, and no active
+State claim across any enrolled alias. Expiration alone does not release those
+guards. Identity checks, State reads and the policy write share the owner lock;
+an unreadable alias refuses replacement. The flag never creates an enrollment or
+adds an alias. A same-policy retry while idle is a no-op. Ordinary enrollment
+still rejects a changed policy without the flag.
+
+Each new claim freezes its exact list; accepted evidence, historical requests
+and frozen facts remain unchanged. Do not enroll the union of future task tests
+or execute later operational checks before their authority gates. This option
+changes development verification policy, not live operational permission.
+
 If a claim response is lost, derive its lookup identity from the retained
 original inputs without reading the owner registry:
 
@@ -1105,6 +1126,11 @@ command after an interrupted response:
 anvil roots submit-evidence T001 --request-file root-set.json --manifest-file evidence.json --actor agent --json
 anvil roots evidence-status T001 --request-file root-set.json --manifest-file evidence.json --actor agent --json
 ```
+
+When a frozen command is outside hook capture, pass its canonical claim-bound
+artifact with `--command-proof-file proof.json` on `roots submit-evidence`.
+The artifact is validated with the same claim, command, time, and repository
+checks as ordinary `submit` before the single evidence event is appended.
 
 This records evidence for the one frozen coordinated claim and leaves acceptance
 to the existing independent review flow.

@@ -6,7 +6,7 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
-## [0.6.13] - 2026-09-21
+## [0.6.14] - 2026-09-29
 
 ### Changed
 
@@ -21,6 +21,9 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   with replay-equivalence checks, retained recovery copies, in-place publication,
   and explicit resumption after interruption. Pending recovery blocks normal
   state access; existing strict provider-read checks remain intact.
+- Added an explicit idle-only replacement for an enrolled secondary root's complete verification command policy.
+- Added claim-bound command proof import for coordinated root-set evidence and
+  retained hook-captured proofs in the submitted evidence event.
 
 ## [0.6.12] - 2026-09-20
 
