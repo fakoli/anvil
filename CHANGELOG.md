@@ -11,6 +11,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 ### Added
 
 - Added an explicit idle-only replacement for an enrolled secondary root's complete verification command policy.
+- Added claim-bound command proof import for coordinated root-set evidence and
+  retained hook-captured proofs in the submitted evidence event.
 
 ## [0.6.13] - 2026-09-21
 
