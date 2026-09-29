@@ -1533,7 +1533,7 @@ None.
 
 ```json
 {
-  "api_version": "17",
+  "api_version": "18",
   "engine_version": "0.6.14",
   "display_version": "0.6.14",
   "build_kind": "release_artifact",
@@ -1596,7 +1596,7 @@ this skill/release contract.
 
 For the v0.6.5 / Workbench provider-v1 compatibility profile, consumers must
 fail closed before reading state unless the manifest reports exact
-`api_version == "17"`, operation-catalog version 1, the required operation at
+`api_version == "18"`, operation-catalog version 1, the required operation at
 version 1, and the exact version-1 schema resource paths. Do not infer
 compatibility from the engine version. The provider reads use their cataloged
 CLI transports; an MCP-only host can still discover and pin the same contract

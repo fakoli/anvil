@@ -1085,7 +1085,7 @@ claim is terminal **and** its reservation has been reconciled with the runner
 confirmed stopped, explicitly replace that owner's complete command list:
 
 ```bash
-anvil roots enroll --repository-id app --path /work/app --origin https://example.test/org/app.git --replace-verification-policy --verification-command 'python -m unittest tests.test_next_change'
+anvil roots enroll --repository-id library --path /work/library --origin https://example.test/org/library.git --replace-verification-policy --verification-command 'python -m unittest tests.test_next_change'
 ```
 
 Replacement requires an existing exact alias and matching origin, a nonempty
