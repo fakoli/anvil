@@ -7010,12 +7010,11 @@ class SqliteBackend:
             if previous_bindings is not None:
                 if payload.profile_bindings is None:
                     raise EventRejected("prd.revised: frozen profile bindings must be explicit.")
-                for task_id, binding in payload.profile_bindings.items():
-                    previous = previous_bindings.get(task_id)
-                    if (
-                        previous is not None
-                        and previous["reference"] == binding.reference.model_dump(mode="json")
+                for binding in payload.profile_bindings.values():
+                    if any(
+                        previous["reference"] == binding.reference.model_dump(mode="json")
                         and previous != binding.model_dump(mode="json")
+                        for previous in previous_bindings.values()
                     ):
                         raise EventRejected(
                             "prd.revised: unchanged profile reference cannot rebind."

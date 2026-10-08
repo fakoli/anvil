@@ -100,7 +100,12 @@ def test_parse_revision_exact_event_and_replay(backend, state_dir, frozen_clock,
     assert "profile_bindings" not in prd.model_dump() and "profile_bindings" not in dict(prd)
     initial_log = (state_dir / "events.jsonl").read_bytes()
     (repository / "tools/verify.py").write_text("assert False\n")
-    for bindings, reason in ((None, "must be explicit"), ({"T001": _binding(repository)}, "cannot rebind")):
+    for bindings, reason in (
+        (None, "must be explicit"),
+        ({"T001": _binding(repository)}, "cannot rebind"),
+        ({"T002": _binding(repository)}, "cannot rebind"),
+        ({"T001": binding, "T002": _binding(repository)}, "cannot rebind"),
+    ):
         with pytest.raises(EventRejected, match=reason):
             _append(backend, frozen_clock, "prd.revised", "default", {
                 "project_id": "project", "prd_id": "default", "title": "Profiles",
