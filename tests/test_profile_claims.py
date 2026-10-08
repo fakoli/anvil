@@ -9,6 +9,7 @@ from anvil.clock import FrozenClock
 from anvil.review.gates import evaluate_claims, evidence_complete, evidence_missing_details
 from anvil.state.models import (
     ArtifactAssertion,
+    ClaimGitMetadata,
     CommandProof,
     Evidence,
     Predicate,
@@ -16,9 +17,10 @@ from anvil.state.models import (
     Verification,
 )
 from anvil.state.snapshot import serialize_state
+from anvil.state.sqlite import SqliteBackend
 from anvil.verification_profiles import MANIFEST, materialize_verification
-from tests.test_bundle_execution import _NOW, _backend, _event, _seed
-from tests.test_claims import _make_git_repo
+from tests.test_bundle_execution import _NOW, _event, _seed
+from tests.test_claims import _git, _make_git_repo
 from tests.test_verification_profiles import reference
 
 
@@ -28,12 +30,18 @@ def _profile(root: Path) -> Verification:
     return materialize_verification(Verification(profile=reference(root)), root)
 
 
-def _setup(tmp_path, monkeypatch, *, profiles=True):
+def _setup(tmp_path, monkeypatch, *, profiles=True, configured=True, events_storage="local"):
     root = _make_git_repo(tmp_path / "repo")
     verification = _profile(root) if profiles else Verification()
     state = tmp_path / "state"
     state.mkdir()
-    backend = _backend(state)
+    (state / "events.jsonl").touch()
+    backend = SqliteBackend(
+        db_path=str(state / "state.db"), events_path=str(state / "events.jsonl"),
+        clock=FrozenClock(_NOW), project_root=root if configured else None,
+        events_storage=events_storage,
+    )
+    backend.initialize()
     append = backend.append
 
     def seed_with_profile(draft, **kwargs):
@@ -56,6 +64,15 @@ def _setup(tmp_path, monkeypatch, *, profiles=True):
     return root, state, backend
 
 
+def _metadata(root):
+    head = _git(root, "rev-parse", "HEAD")
+    return ClaimGitMetadata(
+        mode="shared", canonical_root=str(root), selected_default_base_ref="HEAD",
+        selected_default_base_sha=head, claim_start_ref="HEAD", claim_start_sha=head,
+        branch=_git(root, "branch", "--show-current"), target_path=str(root),
+    )
+
+
 def _manager(backend, root, bundle):
     if bundle:
         return BundleManager(backend, FrozenClock(_NOW), actor="coordinator", project_root=root)
@@ -75,7 +92,10 @@ def _snapshot(backend, state):
 def test_valid_profile_claims(tmp_path, monkeypatch, bundle):
     root, state, backend = _setup(tmp_path, monkeypatch)
     before = _snapshot(backend, state)
-    _manager(backend, root, bundle).claim("B001" if bundle else "release:T003")
+    metadata = _metadata(root)
+    _manager(backend, root, bundle).claim(
+        "B001" if bundle else "release:T003", branch=metadata.branch, git_metadata=metadata,
+    )
     assert len(backend.list_active_claims()) == (2 if bundle else 1)
     assert backend.get_task("release:T001" if bundle else "release:T003").status is TaskStatus.claimed
     assert _snapshot(backend, state) != before

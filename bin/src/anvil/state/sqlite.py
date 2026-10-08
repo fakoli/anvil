@@ -895,6 +895,7 @@ class SqliteBackend:
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
         schema_probe_fn: Callable[[str | os.PathLike[str]], int] | None = None,
+        project_root: str | os.PathLike[str] | None = None,
     ) -> None:
         self._db_path = db_path
         self._events_path = events_path
@@ -904,6 +905,7 @@ class SqliteBackend:
         self._sleep_fn = sleep_fn
         self._monotonic_fn = monotonic_fn
         self._schema_probe_fn = schema_probe_fn
+        self._project_root = Path(project_root) if project_root is not None else None
         self._conn: sqlite3.Connection | None = None
         # In-memory monotonic counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
@@ -1361,6 +1363,13 @@ class SqliteBackend:
             if action == "progress.noted" and typed_payload.timing is not None:
                 try:
                     self._check_timing_noted(conn, typed_payload, materialized_draft)
+                except EventRejected as exc:
+                    self._append_audit_line("rejection", materialized_draft, str(exc))
+                    raise
+
+            if action in {"claim.created", "bundle.claimed", "evidence.submitted", "task.applied"}:
+                try:
+                    self._check_live_profiles(conn, action, typed_payload)
                 except EventRejected as exc:
                     self._append_audit_line("rejection", materialized_draft, str(exc))
                     raise
@@ -6210,6 +6219,93 @@ class SqliteBackend:
             raise EventRejected(
                 "progress.noted: only the exact active claim owner may record progress."
             )
+
+    def _check_live_profiles(self, conn: sqlite3.Connection, action: str, payload: Any) -> None:
+        """Inspect the exact execution checkout at final live append, never replay."""
+        if action == "task.applied" and payload.decision != "accepted":
+            return
+        task_ids = (
+            [member.task_id for member in payload.member_claims]
+            if action == "bundle.claimed" else [payload.task_id]
+        )
+        for task_id in task_ids:
+            task = self.get_task(task_id)
+            if task is None or task.verification.profile is None:
+                continue
+            refusal = "verification profile refused: identity_unavailable"
+            if self._project_root is None:
+                raise EventRejected(refusal)
+            if action in {"claim.created", "bundle.claimed"}:
+                origin = payload
+            else:
+                claim_id = payload.claim_id if action == "evidence.submitted" else None
+                if action == "task.applied":
+                    evidence = conn.execute(
+                        "SELECT claim_id FROM evidence WHERE id = ? AND task_id = ?",
+                        (payload.review_attempt_id, task_id),
+                    ).fetchone()
+                    if evidence is not None:
+                        claim_id = evidence[0]
+                origin = self.get_claim(claim_id) if claim_id is not None else None
+                if origin is None or origin.task_id != task_id:
+                    raise EventRejected(refusal)
+            metadata = origin.git_metadata
+            root_set = getattr(origin, "root_set", None)
+            context = getattr(origin, "attestation_context", None)
+            if root_set is not None:
+                from anvil.roots.registry import _LIVE_APPEND_AUTH, root_set_claim_authorized
+
+                if action == "claim.created":
+                    authorization = _LIVE_APPEND_AUTH.get()
+                    if (
+                        not isinstance(authorization, tuple)
+                        or not root_set_claim_authorized(root_set, authorization[1])
+                    ):
+                        raise EventRejected(refusal)
+                primary = next(fact for fact in root_set.root_facts
+                               if fact.root_id == root_set.primary_root_id)
+                target = Path(primary.claim_worktree)
+                baseline = primary.baseline_sha
+                canonical = Path(primary.canonical_root)
+                if primary.verification_commands != tuple(task.verification.commands):
+                    raise EventRejected(refusal)
+                if metadata is not None and (
+                    Path(metadata.target_path) != target or metadata.claim_start_sha != baseline
+                ):
+                    raise EventRejected(refusal)
+            elif metadata is not None:
+                target = Path(metadata.target_path)
+                canonical = Path(metadata.canonical_root)
+                baseline = metadata.claim_start_sha
+            else:
+                raise EventRejected(refusal)
+            from anvil.claims.progress_attestation import (
+                ProgressAttestationError,
+                inspect_local_repository,
+            )
+            from anvil.verification_profiles import ProfileError, require_profile_current
+
+            try:
+                project = self.get_project()
+                if project is None or not target.is_absolute() or not canonical.is_absolute():
+                    raise EventRejected(refusal)
+                selected = inspect_local_repository(self._project_root, project_id=project.id)
+                actual = inspect_local_repository(target, project_id=project.id)
+                recorded = inspect_local_repository(canonical, project_id=project.id)
+                if (
+                    actual.root != target.resolve(strict=True)
+                    or actual.common_dir != selected.common_dir
+                    or recorded.common_dir != selected.common_dir
+                    or (action in {"claim.created", "bundle.claimed"}
+                        and actual.head_oid != baseline)
+                    or (context is not None and actual.repository_id != context.repository_id)
+                ):
+                    raise EventRejected(refusal)
+                require_profile_current(task.verification, target)
+            except ProfileError as exc:
+                raise EventRejected(f"verification profile refused: {exc.code}") from None
+            except (ProgressAttestationError, OSError, RuntimeError, ValueError):
+                raise EventRejected(refusal) from None
 
     def _check_timing_noted(
         self,
