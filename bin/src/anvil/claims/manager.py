@@ -44,6 +44,7 @@ from anvil.state.models import (
     TaskPriority,
     TaskStatus,
 )
+from anvil.verification_profiles import ProfileError, require_profile_current
 
 if TYPE_CHECKING:
     from anvil.claims.metrics import AcceptRateMetrics
@@ -690,6 +691,28 @@ class ClaimManager:
         task = self._backend.get_task(task_id)
         if task is None:
             raise ClaimError(f"Task '{task_id}' not found.")
+
+        if task.verification.profile is not None:
+            if self._project_root is None:
+                raise ClaimError("verification profile refused: invalid_path")
+            try:
+                require_profile_current(task.verification, self._project_root)
+            except ProfileError as exc:
+                raise ClaimError(str(exc)) from None
+            caller_check = pre_log_check
+
+            def check_profile_before_log() -> None:
+                if caller_check is not None:
+                    caller_check()
+                current = self._backend.get_task(task_id)
+                if current != task:
+                    raise ClaimError("verification profile refused: binding_mismatch")
+                try:
+                    require_profile_current(current.verification, self._project_root)
+                except ProfileError as exc:
+                    raise ClaimError(str(exc)) from None
+
+            pre_log_check = check_profile_before_log
 
         # Gate 2: task must be ready.
         if task.status != TaskStatus.ready:
