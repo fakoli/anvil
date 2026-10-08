@@ -24,15 +24,29 @@ async def _claim(client, root, bundle, **kwargs):
 
 
 @pytest.mark.parametrize("bundle", [False, True])
-@pytest.mark.parametrize("write_error", [sqlite3.OperationalError, EventRejected])
+@pytest.mark.parametrize("write_error,audit_memory", [
+    (sqlite3.OperationalError, False), (EventRejected, False), (EventRejected, True),
+])
 def test_mcp_postlog_failure_retains_recoverable_git(
-    tmp_path, monkeypatch, bundle, write_error,
+    tmp_path, monkeypatch, bundle, write_error, audit_memory,
 ):
     root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
     before = (state / "events.jsonl").read_bytes()
     action = "bundle.claimed" if bundle else "claim.created"
     writer = "_write_bundle_claimed" if bundle else "_write_claim_created"
     observed = []
+    audit_failures = []
+    dumps = json.dumps
+    audit_path = state / "audit.jsonl"
+    before_audit = audit_path.read_bytes() if audit_path.exists() else b""
+
+    def fail_audit_serialization(value, *args, **kwargs):
+        if isinstance(value, dict) and value.get("kind") == "write_failed_after_log":
+            assert value["action"] == action
+            error = MemoryError("injected MCP audit serialization allocation failure")
+            audit_failures.append((value["event_id"], error))
+            raise error
+        return dumps(value, *args, **kwargs)
 
     def fail_after_log(backend, conn, payload, event):
         events = [json.loads(line) for line in
@@ -43,18 +57,28 @@ def test_mcp_postlog_failure_retains_recoverable_git(
         assert root.is_dir()
         assert _git(root, "symbolic-ref", "--short", "HEAD") == payload.branch
         assert _git(root, "rev-parse", payload.branch) == _git(root, "rev-parse", "HEAD")
-        observed.append((payload.id, payload.branch))
+        observed.append((payload.id, payload.branch, event.id))
         raise write_error("injected MCP post-log projection failure")
 
     async def exercise():
         async with Client(mcp) as client:
-            with pytest.raises(ToolError, match="log line remains"):
+            with pytest.raises(ToolError, match=("audit serialization allocation failure"
+                if audit_memory else "log line remains")):
                 await _claim(client, root, bundle)
 
     with monkeypatch.context() as patch:
         patch.setattr(SqliteBackend, writer, fail_after_log)
+        if audit_memory:
+            patch.setattr(json, "dumps", fail_audit_serialization)
         _run(exercise())
     assert len(observed) == 1
+    if audit_memory:
+        assert len(audit_failures) == 1
+        assert audit_failures[0][0] == observed[0][2]
+        assert isinstance(audit_failures[0][1].__context__, EventRejected)
+        assert (audit_path.read_bytes() if audit_path.exists() else b"") == before_audit
+    else:
+        assert audit_failures == []
     published_log = (state / "events.jsonl").read_bytes()
     backend = _open_backend(state, project_root=root)
     try:
@@ -134,7 +158,7 @@ def test_mcp_postcallback_failure_respects_publication_certainty(
         assert backend.get_task("T001").status.value == "ready"
     finally:
         backend.close()
-    if failure in {"profile", "rejected_context"}:
+    if failure == "profile":
         assert _git_identity(root) == identity
     else:
         assert _git(root, "symbolic-ref", "--short", "HEAD") == observed[0]
