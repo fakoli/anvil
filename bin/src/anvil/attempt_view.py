@@ -13,6 +13,7 @@ from typing import Any, BinaryIO, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from anvil.attempt_timing import project_attempt_timing
 from anvil.project_snapshot import (
     ProjectSnapshotError,
     _event_cursor,
@@ -207,6 +208,7 @@ def read_attempt_view(
     *,
     prd_id: str | None = None,
     limits: AttemptViewLimits | Mapping[str, Any] | None = None,
+    observation_at: str | None = None,
 ) -> dict[str, Any]:
     """Return complete current facts and labeled history, or a closed refusal.
 
@@ -241,7 +243,7 @@ def read_attempt_view(
                 preflight_only=True,
             )
             cursor, identity = _event_cursor(conn, bounded)
-            result = _compose(conn, stored, scope, applied)
+            result = _compose(conn, stored, scope, applied, observation_at)
             result.update(
                 schema_id=SCHEMA_ID,
                 operation_version=1,
@@ -281,6 +283,7 @@ def _compose(
     stored: str,
     scope: str,
     limits: AttemptViewLimits,
+    observation_at: str | None = None,
 ) -> dict[str, Any]:
     budget = [0, 0]  # cumulative transferred records and bytes, across every query
     response_bytes = 0
@@ -355,18 +358,18 @@ def _compose(
         reserve_response(dependency)
         dependencies.append(dependency)
 
-    claims = []
+    claims, timing_claims = [], []
     for raw in rows(
         "claims",
         "id, task_id, claimed_by, claim_type, status, generation, root_set, "
-        "bundle_claim_id, created_at, lease_expires_at, last_heartbeat_at, "
+        "bundle_claim_id, attestation_context, created_at, lease_expires_at, last_heartbeat_at, "
         "released_at, release_reason",
         "task_id = ?",
         (stored,),
         order="generation",
     ):
         claim = Claim.model_validate_json(
-            canonical_json_bytes(_json_columns(raw, "root_set")),
+            canonical_json_bytes(_json_columns(raw, "root_set attestation_context")),
             strict=True,
         ).model_dump(mode="json")
         safe = _pick(
@@ -386,12 +389,13 @@ def _compose(
             ]
         reserve_response(safe)
         claims.append(safe)
+        timing_claims.append(claim)
     by_claim = {claim["id"]: claim for claim in claims}
     active = [claim for claim in claims if claim["status"] == "active"]
     if len(active) > 1:
         _refuse(ReadErrorCode.invalid_hierarchy, field="claims")
 
-    events = []
+    events, timing_events = [], []
     event_rows = rows(
         "events",
         "rowid AS causal_order, id, timestamp, actor, action, target_kind, target_id, payload_json",
@@ -407,6 +411,7 @@ def _compose(
         payload = _json_columns(row, "payload_json").pop("payload_json")
         if type(payload) is not dict:
             _refuse(ReadErrorCode.invalid_hierarchy, field="events")
+        timing_events.append({**row, "payload": payload})
         event = _pick(row, "id causal_order timestamp actor action target_kind target_id")
         event["payload"] = _pick(
             payload,
@@ -563,6 +568,11 @@ def _compose(
         reserve_response(bundle)
         bundles.append(bundle)
     accepted = [review for review in reviews if review["decision"] == "accepted"]
+    timing = project_attempt_timing(
+        project_id=project["id"], claims=timing_claims, events=timing_events,
+        evidence=evidence, reviews=reviews, observation_at=observation_at,
+    )
+    reserve_response(timing)
     return {
         "identity": {
             "project_id": project["id"],
@@ -603,6 +613,7 @@ def _compose(
             "runner_stop": "unknown",
         },
         "source_delivery": "unknown",
+        "timing": timing,
         "mutation_authority": False,
         "events": events,
     }
