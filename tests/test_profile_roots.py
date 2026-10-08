@@ -1,6 +1,7 @@
 """Prepared root profiles and immutable proof import retain owner custody."""
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from anvil.cli._helpers import _open_backend
 from anvil.roots.registry import RootSetRegistry
 from anvil.state.sqlite import SqliteBackend
-from tests.test_profile_cli import _prepared
+from tests.test_profile_cli import _git, _prepared
 from tests.test_profile_planning_cli import _invoke
 from tests.test_root_set_evidence import _repo
 
@@ -101,6 +102,63 @@ def test_primary_target_drift_refuses_claim_and_preserves_prepared_custody(tmp_p
     with RootSetRegistry().locked() as registry:
         reservation = registry["reservations"]["profile-roots"]
         assert reservation["state"] != "released" and reservation["claim_id"] is None
+
+
+@pytest.mark.parametrize("workspace", [False, True])
+def test_root_postlog_failure_retains_recoverable_targets_and_uncertain_custody(
+    tmp_path, monkeypatch, workspace,
+):
+    primary, state, request, _ = _roots(tmp_path, monkeypatch, workspace=workspace)
+    original = (primary / "verify.py").read_bytes()
+    (primary / "verify.py").write_text("canonical drift survives recovery\n")
+    canonical = (primary / "verify.py").read_bytes()
+    log = state / "events.jsonl"
+    before = log.read_bytes()
+    published_claims = []
+
+    def refuse_projection(backend, conn, payload, event):
+        assert backend._append_lock_depth > 0
+        appended = [json.loads(line) for line in log.read_bytes()[len(before):].splitlines()]
+        assert len(appended) == 1 and appended[0]["id"] == event.id
+        assert appended[0]["action"] == "claim.created"
+        assert len(payload.root_set.root_facts) == 2
+        published_claims.append(payload.id)
+        raise sqlite3.OperationalError("actual post-log projection failure")
+
+    with monkeypatch.context() as injection:
+        injection.setattr(SqliteBackend, "_write_claim_created", refuse_projection)
+        failure = _claim(primary, request, expected=1)
+    assert failure["error"]["code"] == "root_set_provision_failed"
+    published = log.read_bytes()
+    assert published != before and published.startswith(before)
+    with RootSetRegistry().locked() as registry:
+        pending = dict(registry["reservations"]["profile-roots"])
+    assert pending["state"] == "pending" and pending["state_append_attempted"] is True
+    assert pending["claim_id"] is None
+    backend = _open_backend(state, project_root=primary)
+    try:
+        claim = backend.get_claim(published_claims[0])
+        assert claim.status.value == "active" and backend.get_task("T001").status.value == "claimed"
+        assert claim.root_set.reservation_id == pending["reservation_id"]
+        facts = claim.root_set.root_facts
+        for fact in facts:
+            assert Path(fact.claim_worktree).is_dir()
+            assert fact.claim_worktree != fact.canonical_root
+            assert _git(Path(fact.claim_worktree), "rev-parse", "HEAD") == fact.baseline_sha
+            assert _git(Path(fact.canonical_root), "rev-parse", "--verify", "refs/heads/" + fact.branch) == fact.baseline_sha
+        assert (Path(claim.git_metadata.target_path) / "verify.py").read_bytes() == original
+    finally:
+        backend.close()
+    assert log.read_bytes() == published
+    result = _invoke(primary, ["roots", "reconcile", "--request-id", "profile-roots",
+                              "--request-digest", pending["digest"], "--actor", "root-author",
+                              "--cancel-if-no-claim", "--json"], expected=1)
+    assert json.loads(result.output)["error"]["code"] == "root_set_reconciliation_required"
+    with RootSetRegistry().locked() as registry:
+        assert registry["reservations"]["profile-roots"] == pending
+    assert log.read_bytes() == published
+    assert (primary / "verify.py").read_bytes() == canonical
+    assert all(Path(fact.claim_worktree).is_dir() for fact in facts)
 
 
 @pytest.mark.parametrize("late_change", [False, True])
