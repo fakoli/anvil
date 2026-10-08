@@ -1396,7 +1396,13 @@ class AcceptedAttemptInvalidation(BaseModel):
     evidence_gap_reference: StrictStr = Field(min_length=1, max_length=4096)
     evidence_gap_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_gap_reviewed_by: StrictStr = Field(min_length=1, max_length=4096)
-    confirmed: Literal[True]
+    confirmed: StrictBool
+
+    @model_validator(mode="after")
+    def _require_confirmation(self) -> AcceptedAttemptInvalidation:
+        if not self.confirmed:
+            raise ValueError("invalidation requires explicit confirmation")
+        return self
 
     @field_validator("decision_id", "reason", "evidence_gap_reference", "evidence_gap_reviewed_by")
     @classmethod

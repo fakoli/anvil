@@ -113,10 +113,7 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     descriptor = -1
     try:
         before_open = os.stat(buffer_file, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(before_open.st_mode)
-            or before_open.st_size < 0
-        ):
+        if not stat.S_ISREG(before_open.st_mode) or before_open.st_size < 0:
             return []
         if before_open.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
             raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
@@ -145,7 +142,9 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
         descriptor = -1
     except FileNotFoundError:
         if "before_open" in locals():
-            raise CommandProofImportOverflow("command proof buffer changed before complete import") from None
+            raise CommandProofImportOverflow(
+                "command proof buffer changed before complete import"
+            ) from None
         return []
     except OSError as exc:
         raise CommandProofImportOverflow("command proof buffer cannot be read completely") from exc
@@ -196,13 +195,13 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
                 ):
                     continue  # malformed/pre-attribution records never block submit
                 if len(proofs) == MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
-                    raise CommandProofImportOverflow("command proof buffer exceeds its record limit")
+                    raise CommandProofImportOverflow(
+                        "command proof buffer exceeds its record limit"
+                    )
                 proofs.append(proof)
     except OSError as exc:
         raise CommandProofImportOverflow("command proof buffer cannot be read completely") from exc
     return proofs
-
-
 def _claim_command_proof_receipts(
     proofs: tuple[ClaimCommandProof, ...] | list[ClaimCommandProof],
 ) -> list[dict[str, object]]:
@@ -1344,10 +1343,14 @@ def apply(
         help="Reviewer identity; defaults to $USER or 'human'.",
     ),
     invalidate_accepted: Path | None = typer.Option(  # noqa: B008
-        None, "--invalidate-accepted", help="Explicit reviewed exact accepted-attempt invalidation JSON; requires --reviewer.",
+        None,
+        "--invalidate-accepted",
+        help="Reviewed exact accepted-attempt invalidation JSON; requires --reviewer.",
     ),
     invalidation_preview: bool = typer.Option(  # noqa: B008
-        False, "--invalidation-preview", help="Read the exact accepted-attempt CAS binding without mutation.",
+        False,
+        "--invalidation-preview",
+        help="Read the exact accepted-attempt CAS binding without mutation.",
     ),
     strict: bool | None = typer.Option(  # noqa: B008
         None,
@@ -1422,23 +1425,39 @@ def apply(
             from anvil.state.payloads import AcceptedAttemptInvalidation
 
             try:
-                if approve or reject or reason or reason_code or quality_finding or (invalidation_preview and invalidate_accepted is not None):
+                if (
+                    approve
+                    or reject
+                    or reason
+                    or reason_code
+                    or quality_finding
+                    or (invalidation_preview and invalidate_accepted is not None)
+                ):
                     raise EventRejected("invalidation mode cannot be combined with ordinary review flags")
                 if invalidation_preview:
                     data = backend.acceptance_invalidation_binding(task_id)
                 else:
                     if reviewer is None or not reviewer.strip():
                         raise EventRejected("invalidation requires an explicit --reviewer")
+                    assert invalidate_accepted is not None
                     reference = AcceptedAttemptInvalidation.model_validate(
                         RootSetRegistry()._read_json_regular(invalidate_accepted, limit=65_536)
                     )
                     applied = backend.invalidate_task_acceptance(
-                        task_id=task_id, reviewer=reviewer, reference=reference, timestamp=SystemClock().now(),
+                        task_id=task_id,
+                        reviewer=reviewer,
+                        reference=reference,
+                        timestamp=SystemClock().now(),
                     )
-                    data = {"task_id": task_id, "status": backend.get_task(task_id).status.value,
-                            "invalidation": reference.model_dump(mode="json"),
-                            "event_id": applied.id if applied is not None else None,
-                            "already_retained": applied is None}
+                    result = backend.get_task(task_id)
+                    assert result is not None
+                    data = {
+                        "task_id": task_id,
+                        "status": result.status.value,
+                        "invalidation": reference.model_dump(mode="json"),
+                        "event_id": applied.id if applied is not None else None,
+                        "already_retained": applied is None,
+                    }
             except (OSError, ValueError, RootSetError, EventRejected) as exc:
                 if json_output:
                     fail("apply", str(exc), code="acceptance_invalidation_refused")
@@ -1449,7 +1468,6 @@ def apply(
             else:
                 typer.echo(json.dumps(data, indent=2))
             return
-
         if task.status.value != "needs_review":
             if json_output:
                 fail(
