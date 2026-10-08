@@ -34,6 +34,9 @@ def isolated_native_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("HOME", str(test_home))
     if os.name == "nt":
         monkeypatch.setenv("USERPROFILE", str(test_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(test_home / ".config"))
+    for key in ("ANVIL_GLOBAL_CONFIG", "ANVIL_ROOT", "ANVIL_PRD", "ANVIL_ACTOR", "ANVIL_CLAIM_ID"):
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture(scope="session")
