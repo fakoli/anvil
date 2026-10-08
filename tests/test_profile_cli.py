@@ -69,6 +69,124 @@ def _git_identity(root):
 
 
 @pytest.mark.parametrize("bundle", [False, True])
+def test_existing_branch_shared_profile_refusal_restores_owned_checkout(
+    tmp_path, monkeypatch, bundle,
+):
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
+    caller = _git(root, "symbolic-ref", "--short", "HEAD")
+    runner = (root / "verify.py").read_bytes()
+    _git(root, "checkout", "-b", "existing-target")
+    (root / "verify.py").write_text("assert False\n")
+    _git(root, "add", "verify.py")
+    _git(root, "commit", "-m", "Change target profile")
+    _git(root, "checkout", caller)
+    before = (state / "events.jsonl").read_bytes()
+    identity = _git_identity(root)
+
+    result = _invoke(root, _claim_args(
+        bundle, "--shared-tree", "--branch", "existing-target",
+    ), expected=1)
+
+    assert "verification profile refused" in result.output
+    _no_claim(state, root, before)
+    assert _git_identity(root) == identity
+    assert (root / "verify.py").read_bytes() == runner
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+def test_existing_branch_new_target_append_refusal_removes_only_owned_worktree(
+    tmp_path, monkeypatch, bundle,
+):
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
+    _git(root, "branch", "existing-target")
+    target = root.parent / ("wt-b1" if bundle else "wt-t001")
+    assert not target.exists()
+    before = (state / "events.jsonl").read_bytes()
+    identity = _git_identity(root)
+    append = SqliteBackend.append
+
+    def refuse(backend, draft, **kwargs):
+        if draft.action in {"claim.created", "bundle.claimed"}:
+            assert target.is_dir()
+            raise EventRejected("injected native append refusal")
+        return append(backend, draft, **kwargs)
+
+    monkeypatch.setattr(SqliteBackend, "append", refuse)
+    result = _invoke(root, _claim_args(
+        bundle, "--worktree", "--branch", "existing-target",
+    ), expected=1)
+
+    assert "injected native append refusal" in result.output
+    _no_claim(state, root, before)
+    assert not target.exists()
+    assert _git_identity(root) == identity
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+@pytest.mark.parametrize("change", [
+    "shared_dirty", "shared_commit", "shared_checkout", "shared_original_ref",
+    "isolated_dirty", "isolated_commit", "isolated_checkout", "isolated_replacement",
+])
+def test_existing_branch_compensation_preserves_intervening_git_changes(
+    tmp_path, monkeypatch, bundle, change,
+):
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
+    caller = _git(root, "symbolic-ref", "--short", "HEAD")
+    _git(root, "checkout", "-b", "foreign-target")
+    _git(root, "commit", "--allow-empty", "-m", "Independent commit")
+    foreign_sha = _git(root, "rev-parse", "HEAD")
+    _git(root, "checkout", caller)
+    _git(root, "branch", "existing-target")
+    isolated = change.startswith("isolated_")
+    target = root.parent / ("wt-b1" if bundle else "wt-t001") if isolated else root
+    relocated = target.with_name(target.name + "-foreign")
+    before = (state / "events.jsonl").read_bytes()
+    append = SqliteBackend.append
+    observed = []
+
+    def refuse(backend, draft, **kwargs):
+        if draft.action in {"claim.created", "bundle.claimed"}:
+            assert _git(target, "symbolic-ref", "--short", "HEAD") == "existing-target"
+            if change.endswith("_dirty"):
+                (target / "foreign.txt").write_bytes(b"preserve concurrent work\n")
+            elif change.endswith("_commit"):
+                head_path = Path(_git(target, "rev-parse", "--absolute-git-dir")) / "HEAD"
+                identity = head_path.stat()
+                _git(target, "commit", "--allow-empty", "-m", "Concurrent commit")
+                after = head_path.stat()
+                assert (identity.st_dev, identity.st_ino, identity.st_ctime_ns) == (
+                    after.st_dev, after.st_ino, after.st_ctime_ns,
+                )
+            elif change.endswith("_checkout"):
+                _git(target, "checkout", "--no-guess", "foreign-target")
+            elif change.endswith("_original_ref"):
+                _git(root, "update-ref", f"refs/heads/{caller}", foreign_sha)
+            else:
+                original_admin = (target / ".git").read_bytes()
+                _git(root, "worktree", "move", str(target), str(relocated))
+                _git(root, "worktree", "add", "--detach", str(target), "existing-target")
+                assert (target / ".git").read_bytes() != original_admin
+            observed.append((_git_identity(root), _git_identity(target)))
+            raise EventRejected("injected native append refusal")
+        return append(backend, draft, **kwargs)
+
+    monkeypatch.setattr(SqliteBackend, "append", refuse)
+    result = _invoke(root, _claim_args(
+        bundle, "--worktree" if isolated else "--shared-tree", "--branch", "existing-target",
+    ), expected=1)
+
+    assert "injected native append refusal" in result.output
+    _no_claim(state, root, before)
+    assert len(observed) == 1 and target.is_dir()
+    assert (_git_identity(root), _git_identity(target)) == observed[0]
+    assert _git(root, "rev-parse", "--verify", "refs/heads/existing-target")
+    if change.endswith("_dirty"):
+        assert (target / "foreign.txt").read_bytes() == b"preserve concurrent work\n"
+    if change.endswith("_replacement"):
+        assert relocated.is_dir()
+
+
+@pytest.mark.parametrize("bundle", [False, True])
 @pytest.mark.parametrize("workspace", [False, True])
 @pytest.mark.parametrize("canonical_drift", [False, True])
 def test_profile_claim_prepares_actual_isolated_target(

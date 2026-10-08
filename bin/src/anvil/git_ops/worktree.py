@@ -1302,6 +1302,11 @@ def _compensate_values(
         owns_checkout = bool(
             checkout_identity is not None
             and _checkout_identity(plan, cwd) == checkout_identity
+            and _symbolic_head(caller) == branch_ref
+            and _ref_oid(branch_ref, cwd) == plan.claim_start_sha
+            and not _working_tree_dirty(caller, ignored_paths=plan.ignored_worktree_paths)
+            and (plan.caller_head_ref is None
+                 or _ref_oid(plan.caller_head_ref, cwd) == plan.caller_head_sha)
         )
         if caller_checkout_changed and owns_checkout:
             if plan.caller_head_ref is not None:
@@ -1331,7 +1336,9 @@ def _compensate_values(
             owner_check=owns_branch,
             on_locked=clean_owned_artifacts_while_locked,
         )
-    elif owns_branch():
+    elif owns_branch() or (plan.branch_exists and not branch_created):
+        # A preexisting ref is never ours to delete, but the independently
+        # witnessed checkout/worktree mutation can still belong to this call.
         restore_owned_checkout()
         clean_owned_artifacts_while_locked()
     if branch_marker_created and ownership_token is not None:
