@@ -1353,6 +1353,20 @@ class SqliteBackend:
                 self._append_audit_line("idempotent_no_op", materialized_draft, reason)
                 return None
 
+            prepared_profiles = None
+            if action in {"claim.created", "bundle.claimed", "evidence.submitted"} or (
+                action == "task.applied" and typed_payload.decision == "accepted"
+            ):
+                task_ids = (
+                    [member.task_id for member in typed_payload.member_claims]
+                    if action == "bundle.claimed" else [typed_payload.task_id]
+                )
+                prepared_profiles = {}
+                for task_id in task_ids:
+                    task = self.get_task(task_id)
+                    prd = self.get_prd(task.prd_id) if task and task.verification.profile else None
+                    prepared_profiles[task_id] = (task, prd.revision if prd else None)
+
             # Final caller-supplied invariant at the append linearization
             # point. This runs after authoritative state validation and before
             # id assignment or log mutation, so refusal cannot leave a usable
@@ -1367,9 +1381,20 @@ class SqliteBackend:
                     self._append_audit_line("rejection", materialized_draft, str(exc))
                     raise
 
-            if action in {"claim.created", "bundle.claimed", "evidence.submitted", "task.applied"}:
+            if prepared_profiles is not None:
                 try:
-                    self._check_live_profiles(conn, action, typed_payload)
+                    if pre_log_check is not None and any(
+                        task is not None and task.verification.profile is not None
+                        for task, _ in prepared_profiles.values()
+                    ):
+                        # A reentrant callback cannot change custody after its first check.
+                        try:
+                            spec.check(conn, typed_payload, materialized_draft)
+                        except IdempotentNoOp:
+                            raise EventRejected(
+                                "verification profile refused: binding_mismatch"
+                            ) from None
+                    self._check_live_profiles(conn, action, typed_payload, prepared_profiles)
                 except EventRejected as exc:
                     self._append_audit_line("rejection", materialized_draft, str(exc))
                     raise
@@ -6220,18 +6245,23 @@ class SqliteBackend:
                 "progress.noted: only the exact active claim owner may record progress."
             )
 
-    def _check_live_profiles(self, conn: sqlite3.Connection, action: str, payload: Any) -> None:
+    def _check_live_profiles(
+        self, conn: sqlite3.Connection, action: str, payload: Any,
+        prepared: dict[str, tuple[Task | None, int | None]],
+    ) -> None:
         """Inspect the exact execution checkout at final live append, never replay."""
-        if action == "task.applied" and payload.decision != "accepted":
-            return
-        task_ids = (
-            [member.task_id for member in payload.member_claims]
-            if action == "bundle.claimed" else [payload.task_id]
-        )
-        for task_id in task_ids:
+        for task_id, (original, revision) in prepared.items():
             task = self.get_task(task_id)
-            if task is None or task.verification.profile is None:
+            if (
+                (original is None or original.verification.profile is None)
+                and (task is None or task.verification.profile is None)
+            ):
                 continue
+            current_prd = conn.execute(
+                "SELECT revision FROM prds WHERE id = ?", (task.prd_id if task else None,),
+            ).fetchone()
+            if task != original or current_prd is None or current_prd[0] != revision:
+                raise EventRejected("verification profile refused: binding_mismatch")
             refusal = "verification profile refused: identity_unavailable"
             if self._project_root is None:
                 raise EventRejected(refusal)
@@ -6249,9 +6279,21 @@ class SqliteBackend:
                 origin = self.get_claim(claim_id) if claim_id is not None else None
                 if origin is None or origin.task_id != task_id:
                     raise EventRejected(refusal)
+                if action == "evidence.submitted" and (
+                    origin.status != ClaimStatus.active
+                    or origin.released_at is not None
+                    or origin.claimed_by != payload.submitted_by
+                    or origin.lease_expires_at <= self._clock.now()
+                ):
+                    raise EventRejected(refusal)
             metadata = origin.git_metadata
             root_set = getattr(origin, "root_set", None)
             context = getattr(origin, "attestation_context", None)
+            if (
+                action == "claim.created" and context is not None
+                and context.task_revision != task_snapshot_revision(task)
+            ):
+                raise EventRejected("verification profile refused: binding_mismatch")
             if root_set is not None:
                 from anvil.roots.registry import _LIVE_APPEND_AUTH, root_set_claim_authorized
 

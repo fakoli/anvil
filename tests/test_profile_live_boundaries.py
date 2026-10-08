@@ -249,3 +249,112 @@ def test_root_set_profile_requires_exact_prepared_capability(tmp_path, monkeypat
             backend.append(draft)
         assert len(backend.list_active_claims()) == 1
     backend.close()
+
+
+@pytest.mark.parametrize("action", ["claim", "bundle", "evidence", "accepted"])
+@pytest.mark.parametrize("change", ["remove", "replace", "title"])
+def test_raw_callback_cannot_change_prepared_profile_task(tmp_path, monkeypatch, action, change):
+    from anvil.state.models import Verification
+    from tests.test_profile_claims import _replace_verification
+
+    root, state, backend = _setup(tmp_path, monkeypatch)
+    draft = _claim_draft(backend, root, monkeypatch, bundle=action == "bundle")
+    if action in {"evidence", "accepted"}:
+        backend.append(draft)
+        claim = backend.list_active_claims()[0]
+        draft = _submit(backend, claim)
+        if action == "accepted":
+            backend.append(draft)
+            draft = _accept(claim.task_id)
+    task_ids = ["release:T001", "release:T002"] if action == "bundle" else ["release:T003"]
+    callback_state = []
+
+    def replace_contract():
+        for task_id in task_ids:
+            task = backend.get_task(task_id)
+            if change == "title":
+                backend.append(_event("task.created", "task", task_id, {
+                    **task.model_dump(mode="json"), "prd_id": task.prd_id,
+                    "title": "changed native task",
+                }))
+            else:
+                verification = Verification() if change == "remove" else task.verification.model_copy(
+                    update={"manual_steps": ["changed required verification"]},
+                )
+                _replace_verification(backend, task, verification)
+        (root / "tools/verify.py").write_text("changed after contract replacement")
+        callback_state.append(_snapshot(backend, state))
+
+    with pytest.raises(EventRejected):
+        backend.append(draft, pre_log_check=replace_contract)
+    assert _snapshot(backend, state) == callback_state[0]
+    backend.close()
+
+
+@pytest.mark.parametrize("change", ["forged", "stale"])
+def test_profile_creation_requires_current_frozen_task_context(tmp_path, monkeypatch, change):
+    from anvil.state.models import task_snapshot_revision
+
+    root, state, backend = _setup(tmp_path, monkeypatch)
+    draft = _claim_draft(backend, root, monkeypatch)
+    payload = dict(draft.payload_json)
+    context = dict(payload["attestation_context"])
+    if change == "forged":
+        context["task_revision"] = "c" * 64
+        payload["attestation_context"] = context
+        draft = draft.model_copy(update={"payload_json": payload})
+    else:
+        task = backend.get_task("release:T003")
+        backend.append(_event("task.created", "task", task.id, {
+            **task.model_dump(mode="json"), "prd_id": task.prd_id,
+            "title": "legitimate newer native task",
+        }))
+        assert task_snapshot_revision(backend.get_task(task.id)) != context["task_revision"]
+    before = _snapshot(backend, state)
+    with pytest.raises(EventRejected, match="verification profile refused"):
+        backend.append(draft)
+    assert _snapshot(backend, state) == before
+    backend.close()
+
+
+def test_profile_evidence_rechecks_exact_custody_after_callback(tmp_path, monkeypatch):
+    root, state, backend = _setup(tmp_path, monkeypatch)
+    backend.append(_claim_draft(backend, root, monkeypatch))
+    claim = backend.list_active_claims()[0]
+    draft = _submit(backend, claim)
+    callback_state = []
+
+    def change_generation():
+        backend.append(_event("claim.released", "claim", claim.id, {
+            "claim_id": claim.id, "released_by": claim.claimed_by, "release_reason": "runner stopped",
+        }))
+        metadata = _metadata(root)
+        _manager(backend, root, False).claim(
+            claim.task_id, branch=metadata.branch, git_metadata=metadata,
+        )
+        assert backend.list_active_claims()[0].generation == claim.generation + 1
+        callback_state.append(_snapshot(backend, state))
+
+    with pytest.raises(EventRejected):
+        backend.append(draft, pre_log_check=change_generation)
+    assert _snapshot(backend, state) == callback_state[0]
+    backend.close()
+
+
+@pytest.mark.parametrize("callback", [False, True])
+def test_profile_evidence_refuses_expired_exact_claim(tmp_path, monkeypatch, callback):
+    root, state, backend = _setup(tmp_path, monkeypatch)
+    backend.append(_claim_draft(backend, root, monkeypatch))
+    claim = backend.list_active_claims()[0]
+    draft = _submit(backend, claim)
+    before = _snapshot(backend, state)
+
+    def expire():
+        backend._clock.advance(hours=4)
+
+    if not callback:
+        expire()
+    with pytest.raises(EventRejected, match="verification profile refused"):
+        backend.append(draft, pre_log_check=expire if callback else None)
+    assert _snapshot(backend, state) == before
+    backend.close()
