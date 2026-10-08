@@ -6,6 +6,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.15] - 2026-10-08
+
+### Changed
+
+- Complete command-proof buffer inspection refuses oversized, nonregular,
+  replaced, or incomplete input before submission and preserves recorded failures.
+- Candidate package and harness versions include a new installed-wheel CLI
+  contract snapshot for the staged evidence-correction surface.
+
 ## [0.6.14] - 2026-09-29
 
 ### Changed
