@@ -24,7 +24,7 @@
       }
     ],
     "required": {
-      "api_version": "18",
+      "api_version": "19",
       "operation_catalog_version": 1,
       "operations": {
         "state.prd.content": {
