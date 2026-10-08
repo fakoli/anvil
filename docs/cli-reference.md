@@ -2009,3 +2009,36 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
 - `anvil hook heartbeat` — PostToolUse lease heartbeat: renews the actor's
   active claim lease(s) on tool activity so a lazy lease stays fresh
   (`--actor`); always exits 0.
+
+### Accepted-attempt invalidation
+
+`anvil apply TASK --invalidation-preview --json` reads the latest accepted event,
+review attempt, original claim/generation/actor/session, supporting evidence digest,
+root binding and complete `binding_digest`. It does not mutate state.
+
+After independent evidence-gap review and explicit human authorization,
+`anvil apply TASK --invalidate-accepted reviewed-decision.json --reviewer REVIEWER --json`
+prospectively invalidates exactly that accepted attempt. The bounded JSON object contains
+`accepted_event_id`, `binding_digest`, a stable `decision_id`, concrete `reason`,
+`evidence_gap_reference`, `evidence_gap_sha256`, `evidence_gap_reviewed_by` and
+`confirmed: true`. The explicit reviewer must match the recorded gap reviewer and
+must differ from every persisted evidence producer for the task.
+
+The original acceptance event, evidence, claim attribution and AcceptanceProof v1
+remain historical bytes. A new rejected review atomically returns `done` to `drafted`;
+normal review/promotion, a new claim generation and fresh verification are required.
+The native rejection category remains engine-derived (normally quality); this is
+not a fabricated source failure or an evidence-completeness override.
+
+The operation refuses changed attempt/task/claim bindings, active task claims,
+unreleased original owner reservations and active/completed transitive consumers.
+It neither transfers reservations nor resets dependent tasks. An exact retained
+retry is a no-op, including after a later accepted generation; a conflicting decision
+refuses. Replay checks the same persisted CAS facts without consulting today's registry.
+The reference records the independently reviewed gap; local reviewer labels and
+`confirmed` record coordination attribution and authorization, not cryptographic identity.
+
+Hook command import retains the existing 16-record/1 MiB bounds. A seventeenth valid
+capture or byte overflow now yields `command_proof_import_overflow` before evidence
+append on CLI, root-set and MCP submission. It preserves all captures, including
+failed commands; it never chooses a successful prefix or trims the buffer.

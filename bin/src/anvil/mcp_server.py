@@ -1962,7 +1962,7 @@ def submit_completion_evidence(
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
-        from anvil.cli.packet_apply import _read_command_proofs
+        from anvil.cli.packet_apply import CommandProofImportOverflow, _read_command_proofs
         from anvil.clock import SystemClock
         from anvil.state.backend import EventRejected
         from anvil.state.models import EventDraft
@@ -2059,7 +2059,10 @@ def submit_completion_evidence(
         # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
         # the PostToolUse hook observed) into typed CommandProofs, so an
         # MCP-driven submit carries the same observed proofs as the CLI path.
-        command_proofs = _read_command_proofs(state_dir, active_claim.id)
+        try:
+            command_proofs = _read_command_proofs(state_dir, active_claim.id)
+        except CommandProofImportOverflow as exc:
+            raise ToolError(f"{exc.code}: {exc}") from exc
 
         # Refresh after every artifact/buffer read, then revalidate the exact
         # lease window immediately before drafting. SQLite repeats this check

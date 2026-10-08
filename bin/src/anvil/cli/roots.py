@@ -676,7 +676,7 @@ def submit_evidence(
             if previous is not None:
                 data = previous
             else:
-                from anvil.cli.packet_apply import _read_command_proofs
+                from anvil.cli.packet_apply import CommandProofImportOverflow, _read_command_proofs
                 from anvil.clock import SystemClock
                 from anvil.roots.registry import root_set_use_authorized
                 from anvil.state.models import EventDraft
@@ -727,6 +727,10 @@ def submit_evidence(
                         )
                     except (OSError, ClaimCommandProofError) as exc:
                         raise RootSetError("root_set_command_proof_invalid", "claim-bound command proof is invalid") from exc
+                try:
+                    command_proofs = _read_command_proofs(state_dir, claim.id)
+                except CommandProofImportOverflow as exc:
+                    raise RootSetError(exc.code, str(exc)) from exc
                 evidence_id = "EVROOT-" + evidence["owner_manifest_digest"][:24]
                 payload = {
                     "task_id": task_id, "claim_id": claim.id,
@@ -735,7 +739,7 @@ def submit_evidence(
                     "output_excerpt": "Per-root isolated verification retained by owner manifest.",
                     "root_set_evidence": evidence,
                     "proofs": [proof.model_dump(mode="json") for proof in (
-                        *_read_command_proofs(state_dir, claim.id), *claim_bound_proofs)],
+                        *command_proofs, *claim_bound_proofs)],
                 }
                 with root_set_use_authorized(claim.root_set, backend=backend):
                     backend.append(EventDraft(

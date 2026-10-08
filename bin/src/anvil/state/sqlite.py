@@ -147,6 +147,7 @@ from anvil.state.payloads import (
     StateInitializedPayload,
     SyncMappingDeletedPayload,
     SyncMappingUpsertedPayload,
+    AcceptedAttemptInvalidation,
     TaskAppliedPayload,
     TaskCreatedPayload,
     TaskDeletedPayload,
@@ -1144,6 +1145,26 @@ class SqliteBackend:
     # ------------------------------------------------------------------
 
     def append(
+        self,
+        draft: EventDraft,
+        *,
+        pre_log_check: Callable[[], None] | None = None,
+    ) -> Event | None:
+        if draft.action == "task.applied" and draft.payload_json.get("invalidation") is not None:
+            payload = TaskAppliedPayload.model_validate(draft.payload_json)
+            # Hold the owner lock before the append lock. Replay never consults
+            # today's registry; it rechecks the persisted exact binding instead.
+            from anvil.roots.registry import RootSetError, RootSetRegistry
+
+            try:
+                with RootSetRegistry().locked(require_active=False) as registry:
+                    self._check_invalidation_root_custody(registry, payload)
+                    return self._append(draft, pre_log_check=pre_log_check)
+            except RootSetError as exc:
+                raise EventRejected(f"{exc.code}: {exc}") from exc
+        return self._append(draft, pre_log_check=pre_log_check)
+
+    def _append(
         self,
         draft: EventDraft,
         *,
@@ -3719,6 +3740,157 @@ class SqliteBackend:
             matched_process_predicate=matched_process_predicate,
             counts_toward_accept_rate=(category is RejectionCategory.quality),
         )
+
+    def acceptance_invalidation_binding(self, task_id: str) -> dict[str, Any]:
+        """Read the complete exact accepted-attempt CAS identity."""
+        return self._acceptance_invalidation_binding(self._require_conn(), task_id)
+
+    def _acceptance_invalidation_binding(
+        self, conn: sqlite3.Connection, task_id: str,
+    ) -> dict[str, Any]:
+        task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        accepted = conn.execute(
+            "SELECT id, payload_json FROM events WHERE action = 'task.applied' "
+            "AND target_id = ? AND json_extract(payload_json, '$.decision') = 'accepted' "
+            "ORDER BY rowid DESC LIMIT 1", (task_id,),
+        ).fetchone()
+        evidence_row = self._latest_evidence_row(conn, task_id)
+        if task_row is None or accepted is None or evidence_row is None:
+            raise EventRejected("acceptance_invalidation: exact accepted attempt unavailable")
+        task = self._row_to_task(task_row, conn)
+        evidence = self._row_to_evidence(evidence_row)
+        accepted_payload = json.loads(accepted[1])
+        if accepted_payload.get("review_attempt_id") != evidence.id:
+            raise EventRejected("acceptance_invalidation: latest evidence differs from accepted attempt")
+        claim_row = conn.execute("SELECT * FROM claims WHERE id = ?", (evidence.claim_id,)).fetchone()
+        if claim_row is None:
+            raise EventRejected("acceptance_invalidation: accepted claim unavailable")
+        claim = self._row_to_claim(claim_row)
+        latest_claim = conn.execute(
+            "SELECT id FROM claims WHERE task_id = ? ORDER BY generation DESC, rowid DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if latest_claim is None or latest_claim[0] != claim.id:
+            raise EventRejected("acceptance_invalidation: newer claim generation exists")
+        evidence_event = conn.execute(
+            "SELECT payload_json FROM events WHERE action = 'evidence.submitted' "
+            "AND target_id = ? AND json_extract(payload_json, '$.evidence_id') = ? "
+            "ORDER BY rowid DESC LIMIT 1", (task_id, evidence.id),
+        ).fetchone()
+        if evidence_event is None:
+            raise EventRejected("acceptance_invalidation: accepted evidence event unavailable")
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        material = {
+            "project_id": project[0] if project is not None else None,
+            "task": task.model_dump(mode="json"),
+            "accepted_event_id": accepted[0], "accepted_payload": accepted_payload,
+            "evidence": evidence.model_dump(mode="json"),
+            "evidence_payload": json.loads(evidence_event[0]),
+            "claim": claim.model_dump(mode="json"),
+        }
+        return {
+            "accepted_event_id": accepted[0], "review_attempt_id": evidence.id,
+            "claim_id": claim.id, "generation": claim.generation,
+            "actor": claim.claimed_by, "session_id": claim.session_id,
+            "supporting_evidence_digest": supporting_evidence_digest(evidence),
+            "root_set": claim.root_set.model_dump(mode="json") if claim.root_set else None,
+            "binding_digest": hashlib.sha256(canonical_json_bytes(material)).hexdigest(),
+        }
+
+    def _retained_invalidation(
+        self, conn: sqlite3.Connection, task_id: str, reference: AcceptedAttemptInvalidation,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT id, payload_json FROM events WHERE action = 'task.applied' "
+            "AND target_id = ? AND json_extract(payload_json, '$.invalidation.accepted_event_id') = ? "
+            "ORDER BY rowid DESC LIMIT 1", (task_id, reference.accepted_event_id),
+        ).fetchone()
+
+    def _check_invalidation_root_custody(
+        self, registry: dict[str, Any], payload: TaskAppliedPayload,
+    ) -> None:
+        assert payload.invalidation is not None
+        # An exact retained retry is harmless even after a new successful claim.
+        if self._retained_invalidation(self._require_conn(), payload.task_id, payload.invalidation):
+            return
+        attempt = self.get_latest_evidence(payload.task_id)
+        claim = self.get_claim(attempt.claim_id) if attempt is not None else None
+        if claim is None or claim.root_set is None:
+            return
+        roots = claim.root_set
+        reservation = registry["reservations"].get(roots.request_id)
+        if reservation is None or (
+            reservation.get("reservation_id") != roots.reservation_id
+            or reservation.get("digest") != roots.request_digest
+            or reservation.get("actor") != claim.claimed_by
+            or reservation.get("claim_id") != claim.id
+            or reservation.get("state_identity") != str(Path(self._db_path).parent.resolve())
+            or reservation.get("state") != "released"
+        ):
+            raise EventRejected("acceptance_invalidation: original owner root custody is not released")
+
+    def _check_acceptance_invalidation(
+        self, conn: sqlite3.Connection, payload: TaskAppliedPayload, event: EventDraft | Event,
+    ) -> None:
+        reference = payload.invalidation
+        assert reference is not None
+        retained = self._retained_invalidation(conn, payload.task_id, reference)
+        if retained is not None:
+            if json.loads(retained[1]) != payload.model_dump(mode="json", exclude_unset=True):
+                raise EventRejected("acceptance_invalidation: conflicting invalidation decision")
+            raise IdempotentNoOp("acceptance invalidation already retained")
+        binding = self._acceptance_invalidation_binding(conn, payload.task_id)
+        if (binding["accepted_event_id"] != reference.accepted_event_id
+            or binding["binding_digest"] != reference.binding_digest):
+            raise EventRejected("acceptance_invalidation: exact accepted binding changed")
+        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
+        if row is None or row[0] != "done":
+            raise EventRejected("acceptance_invalidation: task must be done")
+        if event.actor != payload.reviewer or payload.reviewer != reference.evidence_gap_reviewed_by:
+            raise EventRejected("acceptance_invalidation: explicit independent reviewer required")
+        if conn.execute(
+            "SELECT 1 FROM claims WHERE task_id = ? AND claimed_by = ?",
+            (payload.task_id, payload.reviewer),
+        ).fetchone():
+            raise EventRejected("acceptance_invalidation: reviewer must differ from evidence producer")
+        if conn.execute(
+            "SELECT 1 FROM claims WHERE task_id = ? AND status = 'active'", (payload.task_id,),
+        ).fetchone():
+            raise EventRejected("acceptance_invalidation: active claim exists")
+        # Refuse every active or completed transitive consumer; do not infer
+        # independence or silently reset a successor. Declared safe disposition
+        # is intentionally left to separately reviewed normal lifecycle work.
+        tasks = self.list_tasks()
+        consumers = {payload.task_id}
+        while True:
+            expanded = consumers | {task.id for task in tasks if consumers.intersection(task.dependencies)}
+            if expanded == consumers:
+                break
+            consumers = expanded
+        blocked = sorted(task.id for task in tasks if task.id != payload.task_id and task.id in consumers
+                         and task.status.value not in {"proposed", "drafted", "reviewed", "ready", "blocked", "rejected"})
+        if blocked:
+            raise EventRejected("acceptance_invalidation: dependent consumers require reviewed disposition: " + ", ".join(blocked))
+
+    def invalidate_task_acceptance(
+        self, *, task_id: str, reviewer: str, reference: AcceptedAttemptInvalidation,
+        timestamp: datetime.datetime,
+    ) -> Event | None:
+        retained = self._retained_invalidation(self._require_conn(), task_id, reference)
+        if retained is not None:
+            payload = json.loads(retained[1])
+            if payload.get("invalidation") != reference.model_dump(mode="json") or payload.get("reviewer") != reviewer:
+                raise EventRejected("acceptance_invalidation: conflicting invalidation decision")
+        else:
+            provenance = self.derive_task_rejection_provenance(
+                task_id, reason_code=RejectionReasonCode.unspecified_quality, quality_findings=[],
+            )
+            payload = {"schema_version": 1, "task_id": task_id, "reviewer": reviewer,
+                       "decision": "rejected", "notes": reference.reason,
+                       "rejection": provenance.model_dump(mode="json"),
+                       "invalidation": reference.model_dump(mode="json")}
+        return self.append(EventDraft(timestamp=timestamp, actor=reviewer, action="task.applied",
+                                      target_kind="task", target_id=task_id, payload_json=payload))
 
     # ------------------------------------------------------------------
     # Phase 8 — sync mapping query helpers
@@ -12987,6 +13159,9 @@ class SqliteBackend:
         decision: str = payload.decision
         task_id: str = payload.task_id
 
+        if payload.invalidation is not None:
+            self._check_acceptance_invalidation(conn, payload, event)
+
         if payload.schema_version != 1:
             raise EventRejected("task.applied: live event requires schema_version 1")
         if decision not in ("accepted", "rejected"):
@@ -13029,8 +13204,8 @@ class SqliteBackend:
         if row is None:
             raise EventRejected(f"task.applied: task '{task_id}' not found.")
         actual_status = row[0]
-        if actual_status == "needs_review":
-            return  # fresh apply — proceed.
+        if actual_status == "needs_review" or (payload.invalidation is not None and actual_status == "done"):
+            return  # fresh apply or fully checked invalidation — proceed.
         if decision == "rejected" and payload.rejection is not None:
             # Replay bypasses ``_check`` and is handled idempotently by the
             # writer. A second live event would classify the same persisted
@@ -13259,6 +13434,14 @@ class SqliteBackend:
                     "task.applied: unversioned review provenance is invalid"
                 )
 
+        if payload.invalidation is not None:
+            try:
+                self._check_acceptance_invalidation(conn, payload, event)
+            except IdempotentNoOp:
+                return
+            except EventRejected as exc:
+                raise TransactionAborted(str(exc)) from exc
+
         legacy_evidence = self._legacy_claimed_apply_evidence(conn, payload)
         if legacy_evidence is not None:
             self._restore_legacy_evidence_submission(
@@ -13361,9 +13544,9 @@ class SqliteBackend:
                    SET status = 'rejected',
                        updated_at = ?
                  WHERE id = ?
-                   AND status = 'needs_review'
+                   AND status = ?
                 """,
-                (timestamp, task_id),
+                (timestamp, task_id, "done" if payload.invalidation is not None else "needs_review"),
             )
             if conn.execute("SELECT changes()").fetchone()[0] == 0:
                 row = conn.execute(

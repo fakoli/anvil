@@ -87,6 +87,12 @@ def _rejection_metrics_block(
     }
 
 
+class CommandProofImportOverflow(ValueError):
+    """The bounded hook buffer cannot be imported completely."""
+
+    code = "command_proof_import_overflow"
+
+
 def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     """Reconcile the per-claim evidence buffer into typed CommandProofs.
 
@@ -109,9 +115,10 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
         if (
             not stat.S_ISREG(before_open.st_mode)
             or before_open.st_size < 0
-            or before_open.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
         ):
             return []
+        if before_open.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+            raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
         flags = os.O_RDONLY
         for flag_name in (
             "O_BINARY",
@@ -129,9 +136,10 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
             or not stat.S_ISREG(after_open.st_mode)
             or not os.path.samestat(opened, after_open)
             or opened.st_size < 0
-            or opened.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
         ):
             return []
+        if opened.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+            raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
         stream = os.fdopen(descriptor, "rb")
         descriptor = -1
     except OSError:
@@ -143,17 +151,14 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     proofs: list[CommandProof] = []
     bytes_read = 0
     with stream:
-        while (
-            len(proofs) < MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS
-            and bytes_read < MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
-        ):
+        while True:
             remaining = MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES - bytes_read
             raw_line = stream.readline(remaining + 1)
             if not raw_line:
                 break
             bytes_read += len(raw_line)
             if len(raw_line) > remaining:
-                break
+                raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
             try:
                 line = raw_line.decode("utf-8").strip()
                 if not line:
@@ -167,8 +172,7 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
                 if attribution.claim_id != claim_id:
                     continue
                 captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
-                proofs.append(
-                    CommandProof(
+                proof = CommandProof(
                         command=rec["command"],
                         exit_code=rec["exit_code"],
                         output_sha256=rec["output_sha256"],
@@ -176,7 +180,6 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
                         attribution=attribution,
                         semantic_digest=rec["semantic_digest"],
                     )
-                )
             except (
                 UnicodeDecodeError,
                 json.JSONDecodeError,
@@ -186,6 +189,9 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
                 TypeError,
             ):
                 continue  # malformed/pre-attribution records never block submit
+            if len(proofs) == MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+                raise CommandProofImportOverflow("command proof buffer exceeds its record limit")
+            proofs.append(proof)
     return proofs
 
 
@@ -1061,7 +1067,13 @@ def submit(
         # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
         # captured by the PostToolUse hook) into typed CommandProofs — the
         # observed proofs the gate trusts.
-        command_proofs = _read_command_proofs(state_dir, task_claim.id)
+        try:
+            command_proofs = _read_command_proofs(state_dir, task_claim.id)
+        except CommandProofImportOverflow as exc:
+            if json_output:
+                fail("submit", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         # Refresh time only after all artifact and compatibility-buffer I/O.
         # The backend repeats the lease check under its append lock; this early
@@ -1323,6 +1335,12 @@ def apply(
         "--reviewer",
         help="Reviewer identity; defaults to $USER or 'human'.",
     ),
+    invalidate_accepted: Path | None = typer.Option(  # noqa: B008
+        None, "--invalidate-accepted", help="Explicit reviewed exact accepted-attempt invalidation JSON; requires --reviewer.",
+    ),
+    invalidation_preview: bool = typer.Option(  # noqa: B008
+        False, "--invalidation-preview", help="Read the exact accepted-attempt CAS binding without mutation.",
+    ),
     strict: bool | None = typer.Option(  # noqa: B008
         None,
         "--strict/--no-strict",
@@ -1388,6 +1406,41 @@ def apply(
                 fail("apply", f"task '{task_id}' not found.", code="not_found")
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
             raise typer.Exit(code=1)
+
+        if invalidation_preview or invalidate_accepted is not None:
+            from anvil.clock import SystemClock
+            from anvil.roots.registry import RootSetError, RootSetRegistry
+            from anvil.state.backend import EventRejected
+            from anvil.state.payloads import AcceptedAttemptInvalidation
+
+            try:
+                if approve or reject or reason or reason_code or quality_finding or (invalidation_preview and invalidate_accepted is not None):
+                    raise EventRejected("invalidation mode cannot be combined with ordinary review flags")
+                if invalidation_preview:
+                    data = backend.acceptance_invalidation_binding(task_id)
+                else:
+                    if reviewer is None or not reviewer.strip():
+                        raise EventRejected("invalidation requires an explicit --reviewer")
+                    reference = AcceptedAttemptInvalidation.model_validate(
+                        RootSetRegistry()._read_json_regular(invalidate_accepted, limit=65_536)
+                    )
+                    applied = backend.invalidate_task_acceptance(
+                        task_id=task_id, reviewer=reviewer, reference=reference, timestamp=SystemClock().now(),
+                    )
+                    data = {"task_id": task_id, "status": backend.get_task(task_id).status.value,
+                            "invalidation": reference.model_dump(mode="json"),
+                            "event_id": applied.id if applied is not None else None,
+                            "already_retained": applied is None}
+            except (OSError, ValueError, RootSetError, EventRejected) as exc:
+                if json_output:
+                    fail("apply", str(exc), code="acceptance_invalidation_refused")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success("apply", data)
+            else:
+                typer.echo(json.dumps(data, indent=2))
+            return
 
         if task.status.value != "needs_review":
             if json_output:

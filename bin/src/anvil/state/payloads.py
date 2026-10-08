@@ -1384,6 +1384,28 @@ class EvidenceSubmittedPayload(BaseModel):
         return self
 
 
+class AcceptedAttemptInvalidation(BaseModel):
+    """Explicit prospective invalidation; the accepted historical event survives."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    accepted_event_id: StrictStr = Field(min_length=1, max_length=255)
+    binding_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    decision_id: StrictStr = Field(min_length=1, max_length=255)
+    reason: StrictStr = Field(min_length=1, max_length=4096)
+    evidence_gap_reference: StrictStr = Field(min_length=1, max_length=4096)
+    evidence_gap_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_gap_reviewed_by: StrictStr = Field(min_length=1, max_length=4096)
+    confirmed: Literal[True]
+
+    @field_validator("decision_id", "reason", "evidence_gap_reference", "evidence_gap_reviewed_by")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip() or any(ord(ch) < 32 for ch in value):
+            raise ValueError("invalidation identities and review references must be nonblank")
+        return value
+
+
 class TaskAppliedPayload(BaseModel):
     """Payload for 'task.applied'."""
 
@@ -1404,9 +1426,15 @@ class TaskAppliedPayload(BaseModel):
     # projected as quality by the writer. New live rejections must carry the
     # exact engine-derived object validated under the append lock.
     rejection: TaskRejectionProvenance | None = None
+    invalidation: AcceptedAttemptInvalidation | None = None
 
     @model_validator(mode="after")
     def _validate_rejection_shape(self) -> TaskAppliedPayload:
+        if self.invalidation is not None and (
+            self.decision != "rejected" or self.schema_version != 1
+            or self.notes != self.invalidation.reason
+        ):
+            raise ValueError("invalidation requires a versioned rejected review and exact reason")
         if self.decision != "rejected" and self.rejection is not None:
             raise ValueError("only a rejected task review may carry provenance")
         if self.decision == "rejected" and self.review_attempt_id is not None:
