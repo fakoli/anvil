@@ -36,6 +36,7 @@ from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
 )
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -1067,6 +1068,32 @@ class VerificationProfileBinding(BaseModel):
         return self
 
 
+def _bounded_prd_profile_bindings(
+    bindings: dict[str, VerificationProfileBinding],
+) -> dict[str, VerificationProfileBinding]:
+    from anvil.state.hashing import canonical_json_bytes
+
+    canonical_json_bytes(
+        {key: value.model_dump(mode="json") for key, value in bindings.items()},
+        max_bytes=262_144,
+        max_string_bytes=262_144,
+    )
+    return bindings
+
+
+PrdProfileBindings: TypeAlias = Annotated[
+    dict[
+        Annotated[StrictStr, Field(
+            max_length=255,
+            pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:)?T[0-9]{3,}(?:\.[0-9]+)*$",
+        )],
+        VerificationProfileBinding,
+    ],
+    Field(max_length=128),
+    AfterValidator(_bounded_prd_profile_bindings),
+]
+
+
 class Verification(BaseModel):
     """Verification instructions embedded on a Task."""
 
@@ -1294,6 +1321,7 @@ class PRD(BaseModel):
     source_sha256: StrictStr | None = Field(default=None, exclude=True)
     material_sha256: StrictStr | None = Field(default=None, exclude=True)
     content_event_id: StrictStr | None = Field(default=None, exclude=True)
+    profile_bindings: PrdProfileBindings | None = Field(default=None, exclude=True, repr=False)
     lifecycle_revision: StrictInt | None = Field(default=None, ge=1, exclude=True)
     lifecycle_source_sha256: StrictStr | None = Field(default=None, exclude=True)
     lifecycle_material_sha256: StrictStr | None = Field(default=None, exclude=True)
@@ -1342,6 +1370,7 @@ class PRD(BaseModel):
             "source_sha256",
             "material_sha256",
             "content_event_id",
+            "profile_bindings",
             "lifecycle_revision",
             "lifecycle_source_sha256",
             "lifecycle_material_sha256",
