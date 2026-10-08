@@ -94,6 +94,11 @@ def create_workflow_task(
     `implementation_notes` sentinel) so :func:`is_workflow_task` can tell it
     apart from PRD-derived tasks.
     """
+    if verification is not None and verification.profile is not None:
+        from anvil.verification_profiles import ProfileError
+
+        # This producer has no prepared repository-bound execution target.
+        raise ProfileError("identity_unavailable")
     _ensure_workflow_feature(backend, actor, clock)
     now = clock.now()
     task_id = f"{WORKFLOW_TASK_PREFIX}-{uuid.uuid4().hex[:8].upper()}"
