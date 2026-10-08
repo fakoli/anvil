@@ -250,10 +250,10 @@ def build_prd_persistence_plan(
                     if existing_prd is not None and existing_prd.profile_bindings is not None
                     else None
                 )
-                if (
-                    frozen is not None
-                    and frozen.reference == verification.profile
-                    and frozen != materialized.profile_binding
+                if existing_prd is not None and any(
+                    previous.reference == verification.profile
+                    and previous != materialized.profile_binding
+                    for previous in (existing_prd.profile_bindings or {}).values()
                 ):
                     raise PrdRevisionError("verification profile refused: binding_mismatch")
                 if (
