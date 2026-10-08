@@ -1,15 +1,17 @@
 """Actual CLI profile targets, Git custody, and compensation."""
 
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from anvil.cli import app
 from anvil.cli._helpers import _open_backend
 from anvil.state.backend import EventRejected
 from anvil.state.sqlite import SqliteBackend
-from tests.test_profile_planning_cli import _approve, _invoke, _project
+from tests.test_profile_planning_cli import _approve, _invoke, _project, runner
 
 
 def _git(root, *args):
@@ -66,6 +68,124 @@ def _git_identity(root):
         ("show-ref",), ("worktree", "list", "--porcelain"),
         ("rev-parse", "HEAD"), ("status", "--porcelain"),
     ])
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+@pytest.mark.parametrize("existing_branch", [False, True])
+@pytest.mark.parametrize("write_error", [sqlite3.OperationalError, EventRejected])
+def test_postlog_claim_failure_retains_recoverable_git(
+    tmp_path, monkeypatch, bundle, existing_branch, write_error,
+):
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
+    branch = "existing-target" if existing_branch else "new-target"
+    if existing_branch:
+        _git(root, "branch", branch)
+    target = root.parent / ("wt-b1" if bundle else "wt-t001")
+    before = (state / "events.jsonl").read_bytes()
+    action = "bundle.claimed" if bundle else "claim.created"
+    writer = "_write_bundle_claimed" if bundle else "_write_claim_created"
+
+    def fail_after_log(backend, conn, payload, event):
+        logged = (state / "events.jsonl").read_bytes()[len(before):]
+        assert action in logged.decode()
+        assert event.id in logged.decode()
+        assert payload.git_metadata.target_path == str(target)
+        assert target.is_dir()
+        raise write_error("injected post-log projection failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SqliteBackend, writer, fail_after_log)
+        result = _invoke(root, _claim_args(
+            bundle, "--worktree", "--branch", branch,
+        ), expected=1)
+
+    assert "log line remains" in result.output
+    appended = (state / "events.jsonl").read_bytes()[len(before):]
+    events = [json.loads(line) for line in appended.splitlines()]
+    assert len(events) == 1 and events[0]["action"] == action
+    assert target.is_dir()
+    assert _git(target, "symbolic-ref", "--short", "HEAD") == branch
+    assert _git(root, "rev-parse", branch) == _git(target, "rev-parse", "HEAD")
+    backend = _open_backend(state, project_root=root)
+    try:
+        claims = backend.list_active_claims()
+        assert len(claims) == 1
+        assert claims[0].worktree_path == str(target)
+        assert claims[0].branch == branch
+        assert claims[0].status.value == "active"
+        assert backend.get_task("T001").status.value == "claimed"
+        if bundle:
+            bundle_claim = backend.get_bundle_claim("B1")
+            assert bundle_claim.status.value == "active"
+            assert bundle_claim.id == claims[0].bundle_claim_id
+            assert bundle_claim.worktree_path == str(target)
+            assert bundle_claim.branch == branch
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+@pytest.mark.parametrize("failure", [
+    "unknown", "interruption", "interruption_context", "profile", "context_cycle",
+])
+def test_postcallback_claim_failure_respects_publication_certainty(
+    tmp_path, monkeypatch, bundle, failure,
+):
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
+    target = root.parent / ("wt-b1" if bundle else "wt-t001")
+    before = (state / "events.jsonl").read_bytes()
+    identity = _git_identity(root)
+    check = SqliteBackend._check_live_profiles
+    observed = []
+
+    def fail_after_callback(backend, conn, action, payload, prepared):
+        check(backend, conn, action, payload, prepared)
+        if action not in {"claim.created", "bundle.claimed"}:
+            return
+        observed.append(action)
+        assert target.is_dir()
+        if failure == "profile":
+            source = target / "verify.py"
+            original = source.read_bytes()
+            try:
+                source.write_text("assert False\n")
+                check(backend, conn, action, payload, prepared)
+                pytest.fail("native final profile guard did not reject drift")
+            finally:
+                source.write_bytes(original)
+        if failure.startswith("interruption"):
+            interrupt = KeyboardInterrupt("injected post-callback interruption")
+            if failure == "interruption_context":
+                interrupt.__context__ = EventRejected("earlier prepublication refusal")
+            raise interrupt
+        error = RuntimeError("injected post-callback uncertainty")
+        if failure == "context_cycle":
+            refusal = EventRejected("injected prepublication refusal")
+            error.__context__ = refusal
+            refusal.__context__ = error
+        raise error
+
+    monkeypatch.setattr(SqliteBackend, "_check_live_profiles", fail_after_callback)
+    result = runner.invoke(app, [
+        *_claim_args(bundle, "--worktree", "--branch", "new-target"), "--cwd", str(root),
+    ], catch_exceptions=True)
+
+    assert result.exit_code != 0
+    assert len(observed) == 1
+    _no_claim(state, root, before)
+    if failure in {"profile", "context_cycle"}:
+        assert not target.exists()
+        assert _git_identity(root) == identity
+    else:
+        assert target.is_dir()
+        assert _git(target, "symbolic-ref", "--short", "HEAD") == "new-target"
+        assert _git(root, "rev-parse", "new-target") == _git(target, "rev-parse", "HEAD")
+    if failure == "profile":
+        assert "verification profile refused" in result.output
+    elif failure.startswith("interruption"):
+        assert result.exit_code == 130
+    else:
+        assert "injected post-callback uncertainty" in str(result.exception)
 
 
 @pytest.mark.parametrize("bundle", [False, True])

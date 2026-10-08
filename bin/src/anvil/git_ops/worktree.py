@@ -32,6 +32,7 @@ from anvil.git_ops.branch import (
     is_git_repo,
 )
 from anvil.naming import safe_path_component
+from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.models import ClaimGitMetadata
 
 _MAX_GIT_OBSERVATION_BYTES = 8 * 1024 * 1024
@@ -172,6 +173,12 @@ class ClaimGitMutationTracker:
     branch_marker_created: bool = False
     worktree_identity: tuple[int, int, int] | None = None
     checkout_identity: tuple[int, int, int] | None = None
+    publication_attempted: bool = False
+
+    def check_before_publication(self, check: Callable[[], None]) -> None:
+        """Run the final caller guard before witnessing a possible native append."""
+        check()
+        self.publication_attempted = True
 
 
 def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
@@ -1201,8 +1208,13 @@ def compensate_claim_plan_tracker(
     tracker: ClaimGitMutationTracker,
     *,
     cwd: Path | None = None,
+    failure: BaseException | None = None,
 ) -> None:
-    """Compensate only mutations positively recorded by this invocation."""
+    """Compensate owned Git only when native publication is known not to exist."""
+    if tracker.publication_attempted and not _publication_rejected(failure):
+        # Projection can fail after the event is durable. Keep the target needed
+        # by native recovery, including when an interrupted append is uncertain.
+        return
     plan = tracker.plan
     if not plan.git_metadata_available or plan.branch is None:
         return
@@ -1228,6 +1240,25 @@ def compensate_claim_plan_tracker(
     tracker.branch_marker_created = False
     tracker.worktree_identity = None
     tracker.checkout_identity = None
+
+
+def _publication_rejected(failure: BaseException | None) -> bool:
+    """Recognize typed prepublication refusals through native error wrappers."""
+    pending = [failure] if failure is not None else []
+    seen: set[int] = set()
+    rejected = False
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        if isinstance(error, TransactionAborted) or not isinstance(error, Exception):
+            return False
+        rejected |= isinstance(error, EventRejected)
+        for wrapped in (error.__cause__, error.__context__):
+            if wrapped is not None:
+                pending.append(wrapped)
+    return rejected
 
 
 def _compensate_values(

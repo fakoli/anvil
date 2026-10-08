@@ -326,15 +326,19 @@ def claim(
                                     metadata.worktree_path if metadata is not None else None
                                 ),
                                 git_metadata=metadata,
-                                pre_log_check=lambda: require_canonical_prd_claim_binding(
-                                    state_dir,
-                                    backend.get_prd(execution_bundle.prd_id),
+                                pre_log_check=lambda: mutation_tracker.check_before_publication(
+                                    lambda: require_canonical_prd_claim_binding(
+                                        state_dir,
+                                        backend.get_prd(execution_bundle.prd_id),
+                                    ),
+                                ) if profiled else require_canonical_prd_claim_binding(
+                                    state_dir, backend.get_prd(execution_bundle.prd_id),
                                 ),
                             )
-                        except BaseException:
+                        except BaseException as exc:
                             if profiled:
                                 compensate_claim_plan_tracker(
-                                    mutation_tracker, cwd=resolved_cwd
+                                    mutation_tracker, cwd=resolved_cwd, failure=exc
                                 )
                             raise
                         if not profiled:
@@ -630,15 +634,19 @@ def claim(
                             ),
                             git_metadata=metadata,
                             operation_locked=True,
-                            pre_log_check=lambda: require_canonical_prd_claim_binding(
-                                state_dir,
-                                backend.get_prd(task.prd_id),
+                            pre_log_check=lambda: mutation_tracker.check_before_publication(
+                                lambda: require_canonical_prd_claim_binding(
+                                    state_dir,
+                                    backend.get_prd(task.prd_id),
+                                ),
+                            ) if profiled else require_canonical_prd_claim_binding(
+                                state_dir, backend.get_prd(task.prd_id),
                             ),
                         )
-                    except BaseException:
+                    except BaseException as exc:
                         if profiled:
                             compensate_claim_plan_tracker(
-                                mutation_tracker, cwd=resolved_cwd
+                                mutation_tracker, cwd=resolved_cwd, failure=exc
                             )
                         raise
                     if not profiled:
