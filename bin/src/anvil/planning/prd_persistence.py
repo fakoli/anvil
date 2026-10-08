@@ -21,6 +21,11 @@ from anvil.read_contracts import (
     PRD_CONTENT_SCHEMA_ID,
 )
 from anvil.state.models import EventDraft
+from anvil.verification_profiles import (
+    ProfileError,
+    materialize_verification,
+    require_profile_current,
+)
 
 if TYPE_CHECKING:
     from anvil.clock import Clock
@@ -197,11 +202,46 @@ def build_prd_persistence_plan(
     is_default: bool,
     actor: str,
     clock: Clock,
+    project_root: Path | None = None,
 ) -> PrdPersistencePlan:
     """Build exactly one create/revision event, or an exact-byte no-op."""
+    if any(error.section == "verification_profile" for error in parsed.errors):
+        raise PrdRevisionError("invalid verification profile declaration")
     stored_prd_id = parsed.prd.id
     existing_prd = backend.get_prd(stored_prd_id)
     material_sha256 = material_content_sha256(source, parsed.prd.title)
+
+    profile_tasks = [task for task in parsed.tasks if task.verification.profile is not None]
+    if profile_tasks:
+        if project_root is None:
+            raise PrdRevisionError("verification profiles require an explicit project root")
+        staged = []
+        try:
+            for task in profile_tasks:
+                verification = task.verification
+                stored_task = backend.get_task(task.id)
+                if stored_task is not None and stored_task.verification.profile is not None:
+                    stored = stored_task.verification
+                    if stored.profile_binding is None:
+                        raise PrdRevisionError(
+                            "historical PRD profile has no frozen task binding"
+                        )
+                    if stored.profile == verification.profile:
+                        # Unrelated PRD edits cannot authorize new runner bytes.
+                        # Update the manifest and canonical reference, then review.
+                        require_profile_current(stored, project_root)
+                materialized = materialize_verification(verification, project_root)
+                if (
+                    stored_task is not None
+                    and stored_task.verification.profile == verification.profile
+                    and materialized.profile_binding != stored_task.verification.profile_binding
+                ):
+                    raise PrdRevisionError("verification profile refused: binding_mismatch")
+                staged.append((task, materialized))
+        except ProfileError as exc:
+            raise PrdRevisionError(str(exc)) from None
+        for task, verification in staged:
+            task.verification = verification
 
     if existing_prd is not None and (
         existing_prd.content_available

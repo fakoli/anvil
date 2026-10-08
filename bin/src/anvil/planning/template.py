@@ -89,6 +89,7 @@ from anvil.state.models import (
     TaskStatus,
     TaskType,
     Verification,
+    VerificationProfileReference,
 )
 
 if TYPE_CHECKING:
@@ -1293,6 +1294,8 @@ def _parse_tasks(
         likely_files: list[str] = []
         acceptance_criteria: list[str] = []
         verification_commands: list[str] = []
+        verification_profile: VerificationProfileReference | None = None
+        profile_seen = False
         dependencies: list[str] = []
         description_parts: list[str] = []
         claims: list[TaskClaim] = []
@@ -1374,6 +1377,25 @@ def _parse_tasks(
                     in_acceptance_criteria = True
                     if val:
                         acceptance_criteria.append(val)
+                elif key == "verification_profile":
+                    if profile_seen:
+                        errors.append(ParseError(
+                            section="verification_profile", line=block_line,
+                            message="Duplicate **Verification profile:** field.",
+                        ))
+                    else:
+                        try:
+                            name, platform, digest = val.split()
+                            verification_profile = VerificationProfileReference(
+                                name=name, platform=platform, source_sha256=digest,
+                            )
+                        except ValueError:
+                            errors.append(ParseError(
+                                section="verification_profile", line=block_line,
+                                message=("Invalid **Verification profile:**; expected "
+                                         "NAME PLATFORM MANIFEST_SHA256."),
+                            ))
+                    profile_seen = True
                 elif key == "verification":
                     in_verification = True
                     if val:
@@ -1475,6 +1497,7 @@ def _parse_tasks(
                 acceptance_criteria=acceptance_criteria,
                 claims=claims,
                 verification=Verification(
+                    profile=verification_profile,
                     commands=verification_commands,
                     artifact_assertions=artifact_assertions,
                     # SL-3 / B48: turn each verification command into a typed
