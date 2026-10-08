@@ -6,6 +6,7 @@ are hermetically isolated and leave no on-disk state after completion.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -19,6 +20,26 @@ import pytest
 from anvil.clock import FrozenClock
 
 GitRepoFactory = Callable[[Path], Path]
+
+
+@pytest.fixture(autouse=True)
+def isolated_native_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default native state belongs to this test, never the operator's home.
+
+    Explicit environment or Path.home overrides in a test keep their ordinary
+    platform semantics; no default environment variable is reassigned here.
+    """
+    native_home = Path.home
+    baseline = {key: os.environ.get(key) for key in ("HOME", "USERPROFILE")}
+    test_home = tmp_path / "anvil-home"
+    test_home.mkdir()
+
+    def resolve_home(cls: type[Path]) -> Path:
+        if any(os.environ.get(key) != value for key, value in baseline.items()):
+            return native_home()
+        return test_home
+
+    monkeypatch.setattr(Path, "home", classmethod(resolve_home))
 
 
 @pytest.fixture(scope="session")
