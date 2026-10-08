@@ -2022,7 +2022,8 @@ prospectively invalidates exactly that accepted attempt. The bounded JSON object
 `accepted_event_id`, `binding_digest`, a stable `decision_id`, concrete `reason`,
 `evidence_gap_reference`, `evidence_gap_sha256`, `evidence_gap_reviewed_by` and
 `confirmed: true`. The explicit reviewer must match the recorded gap reviewer and
-must differ from every persisted evidence producer for the task.
+must differ from every persisted evidence producer for the task. Until a fresh
+acceptance, the same gap reviewer cannot claim a new evidence-producing generation.
 
 The original acceptance event, evidence, claim attribution and AcceptanceProof v1
 remain historical bytes. A new rejected review atomically returns `done` to `drafted`;

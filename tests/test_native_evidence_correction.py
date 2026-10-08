@@ -355,3 +355,18 @@ def test_invalidation_replay_refuses_tampered_exact_binding(accepted, tmp_path):
     with pytest.raises(TransactionAborted):
         rebuilt.initialize()
     rebuilt.close()
+
+
+
+def test_gap_reviewer_cannot_claim_fresh_evidence_generation(accepted, tmp_path):
+    _invalidate(accepted, _reference(accepted))
+    for old, new in [("drafted", "reviewed"), ("reviewed", "ready")]:
+        accepted.append(_make_event("task.status_changed", {"task_id": "T001", "from": old, "to": new},
+                                    target_kind="task", target_id="T001"))
+    before = (tmp_path / "events.jsonl").read_bytes()
+    with pytest.raises(EventRejected, match="gap reviewer cannot produce"):
+        accepted.append(_make_event("claim.created", _make_claim_payload(
+            claim_id="C002", generation=2, actor="gap-reviewer"),
+            target_kind="claim", target_id="C002"))
+    assert (tmp_path / "events.jsonl").read_bytes() == before
+    assert accepted.get_claim("C002") is None

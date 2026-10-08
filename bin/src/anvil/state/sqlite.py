@@ -11475,6 +11475,23 @@ class SqliteBackend:
                 "descendant events are quarantined."
             )
 
+    def _check_invalidation_claim_actor(
+        self, conn: sqlite3.Connection, task_id: str, actor: str,
+    ) -> None:
+        review = conn.execute(
+            "SELECT json_extract(payload_json, '$.reviewer') FROM events "
+            "WHERE action = 'task.applied' AND target_id = ? "
+            "AND json_extract(payload_json, '$.invalidation') IS NOT NULL "
+            "AND rowid > COALESCE((SELECT MAX(rowid) FROM events "
+            "WHERE action = 'task.applied' AND target_id = ? "
+            "AND json_extract(payload_json, '$.decision') = 'accepted'), 0) "
+            "ORDER BY rowid DESC LIMIT 1", (task_id, task_id),
+        ).fetchone()
+        if review is not None and review[0] == actor:
+            raise EventRejected(
+                "acceptance_invalidation: gap reviewer cannot produce the fresh evidence attempt"
+            )
+
     def _check_claim_created(
         self,
         conn: sqlite3.Connection,
@@ -11510,6 +11527,7 @@ class SqliteBackend:
         defaults to False, but replay applies via ``_write_*`` only and never
         runs this check, so the default is irrelevant on the replay path.
         """
+        self._check_invalidation_claim_actor(conn, payload.task_id, payload.claimed_by)
         if event.target_kind != "claim" or event.target_id != payload.id:
             raise EventRejected(
                 "claim.created: event target must be claim "
@@ -11885,6 +11903,11 @@ class SqliteBackend:
                     (claim_id,),
                 )
             return
+
+        try:
+            self._check_invalidation_claim_actor(conn, task_id, claimed_by)
+        except EventRejected as exc:
+            raise TransactionAborted(str(exc)) from exc
 
         # Replay is write-only. Preserve first-writer exclusion when a prior
         # standalone or internal bundle authorization already owns this task;
