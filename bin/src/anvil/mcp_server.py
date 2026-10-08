@@ -2920,7 +2920,7 @@ def parse_prd(
             path when ``file`` is given (but still honoured for the partition).
         cwd:  Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _DEFAULT_PRD_IDS
+    from anvil.cli._helpers import _DEFAULT_PRD_IDS, _resolve_project_root
     from anvil.clock import SystemClock
     from anvil.planning.diagnostics import parse_diagnostic_report
     from anvil.planning.prd_persistence import (
@@ -2990,6 +2990,7 @@ def parse_prd(
                 is_default=is_default_prd,
                 actor="anvil-mcp",
                 clock=clock,
+                project_root=_resolve_project_root(Path(cwd) if cwd else None),
             )
         except PrdRevisionError as exc:
             raise ToolError(str(exc)) from None
@@ -3452,6 +3453,23 @@ def plan_tasks(
                 "planning graph is emitted."
             )
 
+        from anvil.planning._plan_helpers import build_prd_revision_draft
+
+        clock = SystemClock()
+        try:
+            prd_revision_draft = build_prd_revision_draft(
+                backend,
+                result,
+                source,
+                actor="anvil-mcp",
+                clock=clock,
+                project_root=project_root,
+            )
+        except ValueError:
+            raise ToolError(
+                "Planning source could not be bound to the persisted PRD."
+            ) from None
+
         # Validate and infer the complete parsed task set before any event is
         # appended. Native path identity failures must surface as ToolError
         # and leave both the projection and append-only log byte-identical.
@@ -3462,8 +3480,6 @@ def plan_tasks(
             )
         except BundlePlanningError as exc:
             raise ToolError(f"Planning inference refused: {exc}") from None
-
-        clock = SystemClock()
 
         def _with_prd_id(payload: dict[str, Any], model_prd_id: str) -> dict[str, Any]:
             # prd_id is Field(exclude=True) on Feature/Task, so model_dump drops
@@ -3480,7 +3496,6 @@ def plan_tasks(
         # was missing the TransactionAborted catch that the MCP had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
-            build_prd_revision_draft,
             build_prune_event_drafts,
             classify_orphans,
             emit_planning_batch,
@@ -3507,19 +3522,6 @@ def plan_tasks(
                 "prune_force=True to delete despite the status (audit "
                 "history is preserved either way)."
             )
-
-        try:
-            prd_revision_draft = build_prd_revision_draft(
-                backend,
-                result,
-                source,
-                actor="anvil-mcp",
-                clock=clock,
-            )
-        except ValueError:
-            raise ToolError(
-                "Planning source could not be bound to the persisted PRD."
-            ) from None
 
         operations, prune_result = build_prune_event_drafts(
             classification,
