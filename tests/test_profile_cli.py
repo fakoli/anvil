@@ -370,6 +370,48 @@ def test_profile_claim_prepares_actual_isolated_target(
         backend.close()
 
 
+@pytest.mark.parametrize("linked", [False, True])
+def test_dedicated_profile_from_nested_caller_uses_actual_target(
+    tmp_path, monkeypatch, linked,
+):
+    import anvil.cli.bundle as bundle_cli
+
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=True, workspace=True)
+    target = root
+    if linked:
+        target = tmp_path / "linked"
+        _git(root, "worktree", "add", "-b", "linked", str(target))
+    caller = target / "nested"
+    caller.mkdir()
+    monkeypatch.setenv("ANVIL_ROOT", str(tmp_path / "unrelated"))
+    before = _git_identity(root), _git_identity(target)
+    opened_roots = []
+    open_backend = bundle_cli._open_backend
+
+    def observe_backend(*args, **kwargs):
+        opened_roots.append(kwargs["project_root"])
+        return open_backend(*args, **kwargs)
+
+    monkeypatch.setattr(bundle_cli, "_open_backend", observe_backend)
+    result = _invoke(caller, [
+        "bundle", "claim", "B1", "--shared-tree", "--actor", "author", "--json",
+    ])
+    claim = json.loads(result.output)["data"]["claim"]
+    assert opened_roots == [caller]
+    assert claim["git_metadata"]["target_path"] == str(target)
+    assert claim["git_metadata"]["canonical_root"] == str(root)
+    assert claim["branch"] == _git(target, "branch", "--show-current")
+    assert claim["worktree_path"] is None
+    assert (_git_identity(root), _git_identity(target)) == before
+    backend = _open_backend(state, project_root=caller)
+    try:
+        members = backend.list_active_claims()
+        assert len(members) == 1 and members[0].bundle_claim_id == claim["id"]
+        assert backend.get_task("T001").status.value == "claimed"
+    finally:
+        backend.close()
+
+
 @pytest.mark.parametrize("workspace", [False, True])
 @pytest.mark.parametrize("profiled", [False, True])
 def test_dedicated_bundle_uses_actual_shared_identity_without_git_mutation(

@@ -238,7 +238,6 @@ def claim_bundle(
         bundle = backend.get_bundle(bundle_id)
         if bundle is None:
             _fail(command, f"Bundle '{bundle_id}' not found.", json_output)
-        manager = _manager(backend, state_dir, resolve_actor(actor), cwd=cwd)
         project_dir = _resolve_project_root(cwd)
         profiled = any(
             member is not None and member.verification.profile is not None
@@ -270,6 +269,10 @@ def claim_bundle(
                     "claim_plan_changed", "The caller's existing branch identity changed",
                 )
             metadata = claim_git_metadata(plan)
+        manager = _manager(
+            backend, state_dir, resolve_actor(actor),
+            cwd=Path(metadata.target_path) if metadata is not None else cwd,
+        )
         from anvil.roots.registry import RootSetRegistry
         with RootSetRegistry().ordinary_claim_coordinator(project_dir):
             with backend.claim_operation_lock():
