@@ -1433,7 +1433,9 @@ def apply(
                     or quality_finding
                     or (invalidation_preview and invalidate_accepted is not None)
                 ):
-                    raise EventRejected("invalidation mode cannot be combined with ordinary review flags")
+                    raise EventRejected(
+                        "invalidation mode cannot be combined with ordinary review flags"
+                    )
                 if invalidation_preview:
                     data = backend.acceptance_invalidation_binding(task_id)
                 else:

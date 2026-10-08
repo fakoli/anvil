@@ -3823,13 +3823,14 @@ class SqliteBackend:
         task_id: str,
         reference: AcceptedAttemptInvalidation,
     ) -> sqlite3.Row | None:
-        return conn.execute(
+        row: sqlite3.Row | None = conn.execute(
             "SELECT id, payload_json FROM events WHERE action = 'task.applied' "
             "AND target_id = ? "
             "AND json_extract(payload_json, '$.invalidation.accepted_event_id') = ? "
             "ORDER BY rowid DESC LIMIT 1",
             (task_id, reference.accepted_event_id),
         ).fetchone()
+        return row
 
 
     def _check_invalidation_root_custody(
