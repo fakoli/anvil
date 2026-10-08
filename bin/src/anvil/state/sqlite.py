@@ -3783,6 +3783,7 @@ class SqliteBackend:
         material = {
             "project_id": project[0] if project is not None else None,
             "task": task.model_dump(mode="json"),
+            "prd": self.get_prd_for_task(task).model_dump(mode="json"),
             "accepted_event_id": accepted[0], "accepted_payload": accepted_payload,
             "evidence": evidence.model_dump(mode="json"),
             "evidence_payload": json.loads(evidence_event[0]),
@@ -3834,6 +3835,8 @@ class SqliteBackend:
     ) -> None:
         reference = payload.invalidation
         assert reference is not None
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("acceptance_invalidation: event/task binding mismatch")
         retained = self._retained_invalidation(conn, payload.task_id, reference)
         if retained is not None:
             if json.loads(retained[1]) != payload.model_dump(mode="json", exclude_unset=True):

@@ -15,7 +15,7 @@ from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.models import HookCommandAttribution, hook_command_semantic_digest
 from anvil.state.payloads import AcceptedAttemptInvalidation
 from anvil.state.snapshot import serialize_state
-from test_sqlite import (
+from tests.test_sqlite import (
     _T0, _make_applied_payload, _make_backend, _make_claim_payload,
     _make_evidence_payload, _make_event, _make_task_payload,
     _setup_claimable_task_and_claim,
@@ -148,7 +148,7 @@ def test_invalidation_refuses_changed_task_and_ordinary_done_reject(accepted, tm
     reference = _reference(accepted)
     accepted.append(_make_event('task.created', _make_task_payload(task_id='T002'),
                                 target_kind='task', target_id='T002'))
-    from test_sqlite import _make_rejected_applied_payload
+    from tests.test_sqlite import _make_rejected_applied_payload
     with pytest.raises(EventRejected, match='status-drift'):
         accepted.append(_make_event('task.applied', _make_rejected_applied_payload(accepted),
                                     target_kind='task', target_id='T001'))

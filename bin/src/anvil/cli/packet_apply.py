@@ -102,7 +102,8 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     semantic digest validate. ``output_sha256`` is carried through as-is, NOT
     re-verified here — the proof remains only as trustworthy as the hook that
     wrote the buffer. Malformed, historical unattributed, or cross-claim lines
-    are skipped, never fatal: ``submit`` must still succeed.
+    are skipped. A valid-record or byte overflow refuses the entire import;
+    callers must not turn an incomplete buffer into successful evidence.
     """
     import datetime
 
@@ -173,13 +174,13 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
                     continue
                 captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
                 proof = CommandProof(
-                        command=rec["command"],
-                        exit_code=rec["exit_code"],
-                        output_sha256=rec["output_sha256"],
-                        captured_at=captured_at,
-                        attribution=attribution,
-                        semantic_digest=rec["semantic_digest"],
-                    )
+                    command=rec["command"],
+                    exit_code=rec["exit_code"],
+                    output_sha256=rec["output_sha256"],
+                    captured_at=captured_at,
+                    attribution=attribution,
+                    semantic_digest=rec["semantic_digest"],
+                )
             except (
                 UnicodeDecodeError,
                 json.JSONDecodeError,
