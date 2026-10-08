@@ -94,6 +94,8 @@ __all__ = [
     # Models
     "Score",
     "Verification",
+    "VerificationProfileReference",
+    "VerificationProfileBinding",
     "HookCommandAttribution",
     "CommandProof",
     "hook_command_semantic_digest",
@@ -981,6 +983,90 @@ class ProofRequirement(BaseModel):
         return self
 
 
+def _profile_source_path(value: str) -> str:
+    # Portable repository paths also exclude Windows aliases and device names.
+    if (
+        not value or len(value.encode("utf-8")) > 1024
+        or any(char in value for char in '\\:<>"|?*')
+        or any(ord(c) < 32 or ord(c) == 127 for c in value)
+    ):
+        raise ValueError("invalid profile source path")
+    for part in value.split("/"):
+        if (
+            part in {"", ".", ".."} or part.endswith((".", " "))
+            or re.fullmatch(r"(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])", part.split(".")[0])
+        ):
+            raise ValueError("invalid profile source path")
+    return value
+
+
+def _profile_commands(values: tuple[str, ...]) -> tuple[str, ...]:
+    for value in values:
+        if (
+            not value.strip() or len(value.encode("utf-8")) > 1024
+            or any(ord(c) < 32 or ord(c) == 127 or c in "\u2028\u2029" for c in value)
+        ):
+            raise ValueError("invalid profile command")
+    if len(set(values)) != len(values):
+        raise ValueError("duplicate profile command")
+    return values
+
+
+class VerificationProfileReference(BaseModel):
+    """Canonical PRD selector pinning exact repository manifest bytes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
+
+    name: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    platform: Literal["linux", "darwin", "windows"]
+    source_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class VerificationProfileBinding(BaseModel):
+    """Immutable resolved contract; source digests are sorted (path, digest) pairs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
+
+    reference: VerificationProfileReference
+    source_file_digests: tuple[tuple[StrictStr, StrictStr], ...] = Field(
+        min_length=1, max_length=32
+    )
+    commands: tuple[StrictStr, ...] = Field(min_length=1, max_length=16)
+    preflight_commands: tuple[StrictStr, ...] = Field(default=(), max_length=16)
+    contract_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("commands", "preflight_commands", "source_file_digests", mode="before")
+    @classmethod
+    def _sequences(cls, values: Any) -> Any:
+        if type(values) not in (list, tuple):
+            raise ValueError("profile sequences require arrays")
+        return values
+
+    @field_validator("commands", "preflight_commands")
+    @classmethod
+    def _commands(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return _profile_commands(values)
+
+    @model_validator(mode="after")
+    def _validate_contract(self) -> VerificationProfileBinding:
+        from anvil.state.hashing import domain_separated_sha256
+
+        paths = []
+        for path, digest in self.source_file_digests:
+            paths.append(_profile_source_path(path))
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("invalid profile source digest")
+        if paths != sorted(set(paths)):
+            raise ValueError("profile sources must be unique and sorted")
+        expected = domain_separated_sha256(
+            b"anvil.verification-profile.v1\0",
+            self.model_dump(mode="json", exclude={"contract_sha256"}),
+        )
+        if self.contract_sha256 != expected:
+            raise ValueError("profile contract digest mismatch")
+        return self
+
+
 class Verification(BaseModel):
     """Verification instructions embedded on a Task."""
 
@@ -1000,6 +1086,24 @@ class Verification(BaseModel):
     # gate behaves exactly as before this feature.
     artifact_assertions: list[ArtifactAssertion] = Field(default_factory=list)
 
+    profile: VerificationProfileReference | None = None
+    profile_binding: VerificationProfileBinding | None = None
+
+    @model_validator(mode="after")
+    def _validate_profile_binding(self) -> Verification:
+        binding = self.profile_binding
+        if binding is not None:
+            if binding.reference != self.profile:
+                raise ValueError("profile binding reference mismatch")
+            for command in binding.commands:
+                if command not in self.commands or not any(
+                    proof.kind is ProofKind.command and proof.command == command
+                    and proof.passing_exit_codes == [0]
+                    for proof in self.required_proofs
+                ):
+                    raise ValueError("profile command requires an exact zero-exit proof")
+        return self
+
     @model_serializer(mode="wrap")
     def _omit_empty_assertions(self, handler: Any) -> dict[str, Any]:
         # Same omit-when-empty discipline as Task.claims: unused contracts
@@ -1007,6 +1111,9 @@ class Verification(BaseModel):
         data = handler(self)
         if not data.get("artifact_assertions"):
             data.pop("artifact_assertions", None)
+        for key in ("profile", "profile_binding"):
+            if data.get(key) is None:
+                data.pop(key, None)
         return data
 
 
