@@ -245,7 +245,7 @@ def resolve_profile(
 def materialize_verification(verification: Verification, project_root: Path) -> Verification:
     """Add literal profile commands and proofs; never replace a frozen binding."""
     try:
-        checked = Verification.model_validate(verification.model_dump(mode="json"))
+        checked = Verification.model_validate(verification.model_dump(mode="python"))
     except (ValidationError, ValueError):
         raise ProfileError("invalid_verification") from None
     if checked.profile is None:

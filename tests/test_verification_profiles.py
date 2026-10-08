@@ -121,6 +121,35 @@ def test_mutated_verification_is_revalidated(repository):
         require_profile_current(result, repository)
 
 
+@pytest.mark.parametrize("nested", ["reference", "binding"])
+def test_materialization_refuses_nested_byte_fields_before_reads(repository, monkeypatch, nested):
+    import anvil.verification_profiles as module
+
+    valid = materialize_verification(Verification(profile=reference(repository)), repository)
+    if nested == "reference":
+        malformed = Verification.model_construct(profile=VerificationProfileReference.model_construct(
+            name=b"full", platform="linux",
+            source_sha256=valid.profile.source_sha256.encode(),
+        ))
+    else:
+        fields = valid.profile_binding.model_dump(mode="python")
+        fields["commands"] = tuple(command.encode() for command in fields["commands"])
+        malformed = valid.model_copy(update={
+            "profile_binding": VerificationProfileBinding.model_construct(**fields),
+        })
+    reads = []
+    original = module._read_file
+
+    def read(*args):
+        reads.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(module, "_read_file", read)
+    with pytest.raises(ProfileError, match="invalid_verification"):
+        materialize_verification(malformed, repository)
+    assert not reads
+
+
 @pytest.mark.parametrize("text", [
     "", "not toml", MANIFEST_TEXT + "commands=[]\n",
     MANIFEST_TEXT.replace("schema_version = 1", "schema_version = true"),
