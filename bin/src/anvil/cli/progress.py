@@ -3,7 +3,8 @@
 retro-opps:T011. The CLI twin of the MCP ``submit_progress`` tool: appends
 one ``progress.noted`` audit event carrying an optional structured ``phase``
 label plus free-text detail. Audit-only — task status never changes, no
-claim is required. The read side (``anvil status`` / ``notify-digest``)
+claim is required for plain notes. Timing observations require the exact active
+ordinary claim. The read side (``anvil status`` / ``notify-digest``)
 lands in T012.
 """
 
@@ -83,7 +84,8 @@ def progress(
     Does NOT change task status and does not require an active claim —
     mirrors the MCP ``submit_progress`` tool so agents and humans share one
     event shape. ``anvil status`` surfaces the latest phase per active claim
-    (T012).
+    (T012). Timing observations require the exact active ordinary claim and
+    never renew it.
     """
     resolved_actor = resolve_actor(actor)
     if timing_file is not None and (bundle_mode or attestation_file is not None):
