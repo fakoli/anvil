@@ -12,7 +12,7 @@ from anvil.mcp_server import mcp
 from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.sqlite import SqliteBackend
 from tests.test_mcp import _data, _run
-from tests.test_profile_cli import _git, _git_identity, _prepared
+from tests.test_profile_cli import _git, _git_identity, _no_claim, _prepared
 
 
 async def _claim(client, root, bundle, **kwargs):
@@ -253,12 +253,17 @@ def test_mcp_preserves_legacy_state_first_order(tmp_path, monkeypatch, bundle, p
 
 
 @pytest.mark.parametrize("bundle", [False, True])
-def test_final_native_profile_callback_refuses_and_compensates(tmp_path, monkeypatch, bundle):
+def test_final_native_profile_callback_refuses_and_preserves_dirty_prepared_git(
+    tmp_path, monkeypatch, bundle,
+):
     root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
     before = (state / "events.jsonl").read_bytes()
-    identity = _git_identity(root)
+    caller_ref = _git(root, "symbolic-ref", "HEAD")
+    caller_oid = _git(root, "rev-parse", caller_ref)
+    caller_status = _git(root, "status", "--porcelain")
     original = SqliteBackend.append
-    touched = []
+    prepared = []
+    dirty_runner = b"unapproved runner\n"
 
     def append(self, draft, **kwargs):
         if draft.action in {"claim.created", "bundle.claimed"}:
@@ -266,8 +271,10 @@ def test_final_native_profile_callback_refuses_and_compensates(tmp_path, monkeyp
             def drift():
                 if callback is not None:
                     callback()
-                (root / "verify.py").write_text("unapproved runner\n")
-                touched.append(True)
+                prepared.append((
+                    _git(root, "show-ref", "--heads"), *_git_identity(root)[1:],
+                ))
+                (root / "verify.py").write_bytes(dirty_runner)
             kwargs["pre_log_check"] = drift
         return original(self, draft, **kwargs)
 
@@ -278,11 +285,15 @@ def test_final_native_profile_callback_refuses_and_compensates(tmp_path, monkeyp
             with pytest.raises(ToolError, match="verification profile"):
                 await _claim(client, root, bundle)
     _run(exercise())
-    assert touched
-    assert (state / "events.jsonl").read_bytes() == before
-    # Dirty caller content is preserved while newly owned refs are removed.
-    assert _git_identity(root)[:3] == identity[:3]
-    assert (root / "verify.py").read_text() == "unapproved runner\n"
+    assert len(prepared) == 1 and prepared[0][3] == caller_status
+    _no_claim(state, root, before)
+    # Dirty attached custody keeps its branch refs, topology and HEAD;
+    # temporary ownership markers are independently cleaned up.
+    retained = (_git(root, "show-ref", "--heads"), *_git_identity(root)[1:])
+    assert retained[:3] == prepared[0][:3]
+    assert retained[3].splitlines() == ["M verify.py", *caller_status.splitlines()]
+    assert _git(root, "rev-parse", caller_ref) == caller_oid
+    assert (root / "verify.py").read_bytes() == dirty_runner
 
 
 @pytest.mark.parametrize("bundle", [False, True])
