@@ -126,3 +126,41 @@ def test_legacy_cli_never_resolves_profile_files(tmp_path, monkeypatch):
         assert backend.get_prd().profile_bindings is None
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("prd", ["default", "release"])
+@pytest.mark.parametrize("drift", ["missing_runner", "manifest", "malformed", None])
+def test_generated_profiles_validate_before_source_replacement(tmp_path, monkeypatch, prd, drift):
+    from anvil.planning.llm_planner import TaskGenerationResult, _validate_and_normalize
+
+    root, state, source = _project(tmp_path, monkeypatch, prd, profiled=False)
+    source.write_text(source.read_text().split("## Tasks")[0])
+    extra = [] if prd == "default" else ["--prd", prd]
+    _invoke(root, ["prd", "parse", *extra, "--json"])
+    field = _field(root)
+    if drift == "missing_runner":
+        (root / "verify.py").unlink()
+    elif drift == "manifest":
+        (root / MANIFEST).write_text(_MANIFEST + "\n# drift\n")
+    elif drift == "malformed":
+        field = "**Verification profile:** malformed"
+    generated, count = _validate_and_normalize(
+        "## Tasks\n\n### T001: Verify generated\n**Feature:** F001\n"
+        "**Verification:** pytest -q\n" + field + "\n"
+    )
+    monkeypatch.setattr("anvil.planning.llm_planner.generate_tasks_markdown", lambda **kwargs:
+                        TaskGenerationResult(markdown=generated, task_count=count, provider_used="test"))
+    before = source.read_bytes(), (state / "events.jsonl").read_bytes()
+    result = _invoke(root, ["plan", *extra, "--json"], expected=1 if drift else 0)
+    if drift:
+        assert json.loads(result.output)["error"]["code"] == "invalid_prd_revision"
+        assert (source.read_bytes(), (state / "events.jsonl").read_bytes()) == before
+    else:
+        assert source.read_bytes() != before[0]
+        backend = _open_backend(state)
+        try:
+            task = backend.get_task("T001" if prd == "default" else "release:T001")
+            assert task.verification.profile_binding is not None
+            assert task.verification.commands == ["pytest -q", "python verify.py full"]
+        finally:
+            backend.close()
