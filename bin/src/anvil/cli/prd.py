@@ -22,6 +22,7 @@ from anvil.cli._helpers import (
     _get_project_id,
     _open_backend,
     _require_state_dir,
+    _resolve_project_root,
     _resolve_state_dir,
     canonical_prd_id,
     ingest_prd_source,
@@ -436,6 +437,7 @@ def prd_parse(
                 is_default=is_default_prd,
                 actor="anvil-cli",
                 clock=clock,
+                project_root=_resolve_project_root(cwd),
             )
         except PrdRevisionError as exc:
             message = str(exc)

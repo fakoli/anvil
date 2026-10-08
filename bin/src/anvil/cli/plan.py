@@ -708,6 +708,23 @@ def plan(
             )
             raise typer.Exit(code=1)
 
+        # Freeze verification before inference copies tasks or any event lands.
+        try:
+            prd_revision_draft = build_prd_revision_draft(
+                backend,
+                parsed,
+                source,
+                actor="anvil-cli",
+                clock=clock,
+                project_root=project_root,
+            )
+        except ValueError:
+            message = "Planning source could not be bound to the persisted PRD."
+            if json_output:
+                fail("plan", message, code="invalid_prd_revision")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from None
+
         # Complete every path-sensitive inference pass before the first event
         # append. A host path API failure must refuse atomically: no prune,
         # acknowledgement, feature, task, or conflict-group event may land.
@@ -766,28 +783,6 @@ def plan(
                     },
                 )
             )
-
-        # Surface TransactionAborted as a clean CLI error rather than a
-        # raw Python traceback. The handler's message is user-actionable
-        # as-is (names the blocking IDs and the resolution). Greptile MUST
-        # FIX from PR #63 review — previously this catch was missing and
-        # the most accessible trigger was "user removes a feature heading
-        # from prd.md while keeping its referencing tasks": the feature
-        # becomes an orphan, the handler refuses, the CLI crashed.
-        try:
-            prd_revision_draft = build_prd_revision_draft(
-                backend,
-                parsed,
-                source,
-                actor="anvil-cli",
-                clock=clock,
-            )
-        except ValueError:
-            message = "Planning source could not be bound to the persisted PRD."
-            if json_output:
-                fail("plan", message, code="invalid_prd_revision")
-            typer.echo(f"Error: {message}", err=True)
-            raise typer.Exit(code=1) from None
 
         operations, prune_result = build_prune_event_drafts(
             classification,
