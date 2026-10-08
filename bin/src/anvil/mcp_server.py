@@ -1477,14 +1477,21 @@ def claim_task(
                             ),
                             git_metadata=metadata,
                             operation_locked=True,
-                            pre_log_check=lambda: require_canonical_prd_claim_binding(
-                                state_dir,
-                                backend.get_prd(task.prd_id),
+                            pre_log_check=lambda: (
+                                mutation_tracker.check_before_publication(
+                                    lambda: require_canonical_prd_claim_binding(
+                                        state_dir, backend.get_prd(task.prd_id),
+                                    )
+                                ) if profiled else require_canonical_prd_claim_binding(
+                                    state_dir, backend.get_prd(task.prd_id),
+                                )
                             ),
                         )
-                    except BaseException:
+                    except BaseException as exc:
                         if profiled:
-                            compensate_claim_plan_tracker(mutation_tracker, cwd=project_dir)
+                            compensate_claim_plan_tracker(
+                                mutation_tracker, cwd=project_dir, failure=exc,
+                            )
                         raise
                     if not profiled:
                         try:
@@ -4831,14 +4838,21 @@ def claim_bundle(
                                 metadata.worktree_path if metadata is not None else None
                             ),
                             git_metadata=metadata,
-                            pre_log_check=lambda: require_canonical_prd_claim_binding(
-                                state_dir,
-                                backend.get_prd(bundle.prd_id),
+                            pre_log_check=lambda: (
+                                mutation_tracker.check_before_publication(
+                                    lambda: require_canonical_prd_claim_binding(
+                                        state_dir, backend.get_prd(bundle.prd_id),
+                                    )
+                                ) if profiled else require_canonical_prd_claim_binding(
+                                    state_dir, backend.get_prd(bundle.prd_id),
+                                )
                             ),
                         )
-                    except BaseException:
+                    except BaseException as exc:
                         if profiled:
-                            compensate_claim_plan_tracker(mutation_tracker, cwd=project_dir)
+                            compensate_claim_plan_tracker(
+                                mutation_tracker, cwd=project_dir, failure=exc,
+                            )
                         raise
                     if not profiled:
                         try:

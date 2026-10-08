@@ -1,4 +1,6 @@
 """Actual MCP claims preserve selected Git targets and transactional custody."""
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ from fastmcp.exceptions import ToolError
 
 from anvil.cli._helpers import _open_backend
 from anvil.mcp_server import mcp
+from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.sqlite import SqliteBackend
 from tests.test_mcp import _data, _run
 from tests.test_profile_cli import _git, _git_identity, _prepared
@@ -18,6 +21,124 @@ async def _claim(client, root, bundle, **kwargs):
         {"cwd": str(root), **({"bundle_id": "B1", "actor": "author"} if bundle
             else {"task_id": "T001", "claimed_by": "author"}), **kwargs},
     ))
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+@pytest.mark.parametrize("write_error", [sqlite3.OperationalError, EventRejected])
+def test_mcp_postlog_failure_retains_recoverable_git(
+    tmp_path, monkeypatch, bundle, write_error,
+):
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
+    before = (state / "events.jsonl").read_bytes()
+    action = "bundle.claimed" if bundle else "claim.created"
+    writer = "_write_bundle_claimed" if bundle else "_write_claim_created"
+    observed = []
+
+    def fail_after_log(backend, conn, payload, event):
+        events = [json.loads(line) for line in
+            (state / "events.jsonl").read_bytes()[len(before):].splitlines()]
+        assert len(events) == 1 and events[0]["id"] == event.id
+        assert events[0]["action"] == action
+        assert payload.git_metadata.target_path == str(root)
+        assert root.is_dir()
+        assert _git(root, "symbolic-ref", "--short", "HEAD") == payload.branch
+        assert _git(root, "rev-parse", payload.branch) == _git(root, "rev-parse", "HEAD")
+        observed.append((payload.id, payload.branch))
+        raise write_error("injected MCP post-log projection failure")
+
+    async def exercise():
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match="log line remains"):
+                await _claim(client, root, bundle)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SqliteBackend, writer, fail_after_log)
+        _run(exercise())
+    assert len(observed) == 1
+    published_log = (state / "events.jsonl").read_bytes()
+    backend = _open_backend(state, project_root=root)
+    try:
+        claims = backend.list_active_claims()
+        assert len(claims) == 1 and claims[0].status.value == "active"
+        assert backend.get_task("T001").status.value == "claimed"
+        recorded = backend.get_bundle_claim("B1") if bundle else claims[0]
+        assert recorded.id == observed[0][0] and recorded.status.value == "active"
+        if bundle:
+            assert claims[0].bundle_claim_id == recorded.id
+        assert recorded.branch == observed[0][1]
+        assert recorded.git_metadata.target_path == str(root)
+        assert claims[0].worktree_path is None
+        assert (state / "events.jsonl").read_bytes() == published_log
+        assert _git(root, "symbolic-ref", "--short", "HEAD") == recorded.branch
+        assert _git(root, "rev-parse", recorded.branch) == _git(root, "rev-parse", "HEAD")
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+@pytest.mark.parametrize("failure", [
+    "unknown", "interruption_context", "aborted_context", "rejected_context", "profile",
+])
+def test_mcp_postcallback_failure_respects_publication_certainty(
+    tmp_path, monkeypatch, bundle, failure,
+):
+    root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
+    before, identity = (state / "events.jsonl").read_bytes(), _git_identity(root)
+    check = SqliteBackend._check_live_profiles
+    observed = []
+
+    def fail_after_callback(backend, conn, action, payload, prepared):
+        check(backend, conn, action, payload, prepared)
+        if action not in {"claim.created", "bundle.claimed"}:
+            return
+        branch = payload.git_metadata.branch
+        assert _git(root, "symbolic-ref", "--short", "HEAD") == branch
+        observed.append(branch)
+        if failure == "profile":
+            source = root / "verify.py"
+            original = source.read_bytes()
+            try:
+                source.write_text("assert False\n")
+                check(backend, conn, action, payload, prepared)
+                pytest.fail("native final profile guard did not reject drift")
+            finally:
+                source.write_bytes(original)
+        error = RuntimeError("injected MCP post-callback uncertainty")
+        refusal = EventRejected("earlier prepublication refusal")
+        if failure == "interruption_context":
+            interrupted = KeyboardInterrupt("injected interruption context")
+            interrupted.__context__ = refusal
+            error.__cause__ = interrupted
+        elif failure == "aborted_context":
+            aborted = TransactionAborted("injected durable publication outcome")
+            aborted.__context__ = refusal
+            error.__cause__ = aborted
+        elif failure == "rejected_context":
+            error.__cause__ = refusal
+        raise error
+
+    monkeypatch.setattr(SqliteBackend, "_check_live_profiles", fail_after_callback)
+
+    async def exercise():
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match=("verification profile refused"
+                if failure == "profile" else "injected MCP post-callback uncertainty")):
+                await _claim(client, root, bundle)
+
+    _run(exercise())
+    assert len(observed) == 1
+    assert (state / "events.jsonl").read_bytes() == before
+    backend = _open_backend(state, project_root=root)
+    try:
+        assert backend.list_active_claims() == []
+        assert backend.get_task("T001").status.value == "ready"
+    finally:
+        backend.close()
+    if failure in {"profile", "rejected_context"}:
+        assert _git_identity(root) == identity
+    else:
+        assert _git(root, "symbolic-ref", "--short", "HEAD") == observed[0]
+        assert _git(root, "rev-parse", observed[0]) == _git(root, "rev-parse", "HEAD")
 
 
 @pytest.mark.parametrize("bundle", [False, True])
