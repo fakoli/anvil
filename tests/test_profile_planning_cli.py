@@ -164,3 +164,24 @@ def test_generated_profiles_validate_before_source_replacement(tmp_path, monkeyp
             assert task.verification.commands == ["pytest -q", "python verify.py full"]
         finally:
             backend.close()
+
+
+@pytest.mark.parametrize("profiled", [False, True])
+def test_generated_surrogate_is_structured_refusal_before_source_write(tmp_path, monkeypatch, profiled):
+    from anvil.planning.llm_planner import TaskGenerationResult, _validate_and_normalize
+
+    root, state, source = _project(tmp_path, monkeypatch, "default", profiled=False)
+    source.write_text(source.read_text().split("## Tasks")[0])
+    _invoke(root, ["prd", "parse", "--json"])
+    field = _field(root) if profiled else ""
+    generated, count = _validate_and_normalize(
+        "## Tasks\n\n### T001: Generated\n**Feature:** F001\n"
+        "**Description:** invalid surrogate \ud800\n**Verification:** pytest -q\n" + field + "\n"
+    )
+    monkeypatch.setattr("anvil.planning.llm_planner.generate_tasks_markdown", lambda **kwargs:
+                        TaskGenerationResult(markdown=generated, task_count=count, provider_used="test"))
+    before = source.read_bytes(), (state / "events.jsonl").read_bytes()
+    result = _invoke(root, ["plan", "--json"], expected=1)
+    assert json.loads(result.output)["error"]["code"] == "source_invalid_utf8"
+    assert not isinstance(result.exception, UnicodeEncodeError)
+    assert (source.read_bytes(), (state / "events.jsonl").read_bytes()) == before

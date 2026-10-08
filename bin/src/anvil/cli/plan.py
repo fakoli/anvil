@@ -539,7 +539,14 @@ def plan(
                 from anvil.cli._helpers import IngestedPrdSource
                 from anvil.planning._plan_helpers import build_prd_revision_draft
 
-                prospective_bytes = new_markdown.encode("utf-8")
+                try:
+                    prospective_bytes = new_markdown.encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    message = "PRD source is not valid UTF-8"
+                    if json_output:
+                        fail("plan", message, code="source_invalid_utf8")
+                    typer.echo(f"Error: {message}", err=True)
+                    raise typer.Exit(code=1) from None
                 prospective_source = IngestedPrdSource(
                     source_bytes=prospective_bytes, markdown=new_markdown,
                     source_sha256=hashlib.sha256(prospective_bytes).hexdigest(),
