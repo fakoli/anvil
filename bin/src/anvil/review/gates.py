@@ -469,7 +469,7 @@ def evaluate_claims(
     all_assertions = list(task.verification.artifact_assertions)
     assertion_results = (
         evaluate_assertions(all_assertions, project_root)
-        if all_assertions
+        if all_assertions and profile_failure is None
         else []
     )
     results_by_claim: dict[str, list] = {}
@@ -479,7 +479,7 @@ def evaluate_claims(
     verdicts: list[ClaimVerdict] = []
     for cid, group in groups.items():
         missing: list[str] = []
-        failures: list[str] = [profile_failure] if profile_failure and not cid else []
+        failures: list[str] = [profile_failure] if profile_failure else []
         has_requirements = bool(group["proofs"]) or bool(group["assertions"])
 
         proof_missing: list[str] = []
