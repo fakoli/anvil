@@ -23,18 +23,18 @@ from tests.test_sqlite import (
 
 
 def _buffer(state_dir: Path, count: int, *, failed: bool = False) -> Path:
-    path = task_claim_buffer_path(state_dir / '.evidence-buffer', 'C001')
+    path = task_claim_buffer_path(state_dir / '.evidence-buffer', 'C00000001')
     assert path is not None
     path.parent.mkdir(parents=True, exist_ok=True)
     attribution = HookCommandAttribution(
-        project_id='proj-1', claim_id='C001', generation=1, claimed_by='agent-alpha',
+        project_id='proj-1', claim_id='C00000001', generation=1, claimed_by='agent-alpha',
         task_id='T001', task_revision='a' * 64, prd_id='default', prd_revision=1,
     )
     records = []
     for i in range(count):
         command, exit_code = f'check {i}', 1 if failed and i == 0 else 0
         records.append(json.dumps({
-            'claim_id': 'C001', 'attribution': attribution.model_dump(mode='json'),
+            'claim_id': 'C00000001', 'attribution': attribution.model_dump(mode='json'),
             'timestamp': _T0.isoformat(), 'command': command, 'exit_code': exit_code,
             'output_sha256': 'b' * 64, 'semantic_digest': hook_command_semantic_digest(
                 attribution=attribution, command=command, exit_code=exit_code,
@@ -48,14 +48,14 @@ def _buffer(state_dir: Path, count: int, *, failed: bool = False) -> Path:
 def test_bounded_import_eof_and_failed_capture_preservation(tmp_path):
     path = _buffer(tmp_path, 16, failed=True)
     original = path.read_bytes()
-    proofs = _read_command_proofs(tmp_path, 'C001')
+    proofs = _read_command_proofs(tmp_path, 'C00000001')
     assert len(proofs) == 16 and proofs[0].exit_code == 1
     path.write_bytes(original + b'bad legacy record\n')
-    assert len(_read_command_proofs(tmp_path, 'C001')) == 16
+    assert len(_read_command_proofs(tmp_path, 'C00000001')) == 16
     path = _buffer(tmp_path, 17, failed=True)
     original = path.read_bytes()
     with pytest.raises(CommandProofImportOverflow, match='record limit'):
-        _read_command_proofs(tmp_path, 'C001')
+        _read_command_proofs(tmp_path, 'C00000001')
     assert path.read_bytes() == original
 
 
@@ -63,10 +63,10 @@ def test_bounded_import_byte_cap_and_exact_eof(tmp_path, monkeypatch):
     path = _buffer(tmp_path, 1)
     import anvil.cli.packet_apply as module
     monkeypatch.setattr(module, 'MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES', path.stat().st_size)
-    assert len(_read_command_proofs(tmp_path, 'C001')) == 1
+    assert len(_read_command_proofs(tmp_path, 'C00000001')) == 1
     path.write_bytes(path.read_bytes() + b' ')
     with pytest.raises(CommandProofImportOverflow, match='byte limit'):
-        _read_command_proofs(tmp_path, 'C001')
+        _read_command_proofs(tmp_path, 'C00000001')
 
 
 @pytest.fixture
@@ -124,7 +124,7 @@ def test_invalidation_preserves_history_replays_and_retry_cannot_reopen(accepted
     assert backend.get_task('T001').status.value == 'done'
     assert backend.get_claim('C002').generation == 2
     from anvil.state.sqlite import SqliteBackend
-    rebuilt = SqliteBackend(db_path=str(tmp_path / 'rebuilt.db'), events_path=str(tmp_path / 'events.jsonl'))
+    rebuilt = SqliteBackend(db_path=str(tmp_path / 'rebuilt.db'), events_path=str(tmp_path / 'events.jsonl'), clock=backend._clock)
     rebuilt.initialize()
     rebuilt.replay_from_empty(str(tmp_path / 'events.jsonl'))
     try:
@@ -195,3 +195,32 @@ def test_cli_preview_and_explicit_invalidation(accepted, tmp_path, monkeypatch):
                                      '--reviewer', 'gap-reviewer', '--json'])
     assert result.exit_code == 0, result.output
     assert accepted.get_task('T001').status.value == 'drafted'
+
+
+def test_mcp_overflow_refuses_without_evidence_append(tmp_path, monkeypatch):
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+    from anvil.mcp_server import mcp
+    from tests.test_mcp import _add_active_claim, _add_feature, _add_task, _init_state_dir, _run
+
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.chdir(tmp_path)
+    state_dir = _init_state_dir(tmp_path)
+    _add_feature(state_dir)
+    _add_task(state_dir, task_id='T001', status='in_progress')
+    _add_active_claim(state_dir, claim_id='C00000001', claimed_by='agent-alpha')
+    path = _buffer(state_dir, 17, failed=True)
+    before = (state_dir / 'events.jsonl').read_bytes()
+    original = path.read_bytes()
+
+    async def submit():
+        async with Client(mcp) as client:
+            await client.call_tool('submit_completion_evidence', {
+                'task_id': 'T001', 'actor': 'agent-alpha', 'commands_run': ['check 0'],
+                'files_changed': ['src/foo.py'], 'cwd': str(tmp_path),
+            })
+
+    with pytest.raises(ToolError, match='command_proof_import_overflow'):
+        _run(submit())
+    assert (state_dir / 'events.jsonl').read_bytes() == before
+    assert path.read_bytes() == original

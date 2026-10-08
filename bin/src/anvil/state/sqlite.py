@@ -1151,7 +1151,10 @@ class SqliteBackend:
         pre_log_check: Callable[[], None] | None = None,
     ) -> Event | None:
         if draft.action == "task.applied" and draft.payload_json.get("invalidation") is not None:
-            payload = TaskAppliedPayload.model_validate(draft.payload_json)
+            try:
+                payload = TaskAppliedPayload.model_validate(draft.payload_json)
+            except ValueError as exc:
+                raise EventRejected("acceptance_invalidation: invalid typed decision") from exc
             # Hold the owner lock before the append lock. Replay never consults
             # today's registry; it rechecks the persisted exact binding instead.
             from anvil.roots.registry import RootSetError, RootSetRegistry

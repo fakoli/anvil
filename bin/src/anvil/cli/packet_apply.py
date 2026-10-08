@@ -143,56 +143,63 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
             raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
         stream = os.fdopen(descriptor, "rb")
         descriptor = -1
-    except OSError:
+    except FileNotFoundError:
+        if "before_open" in locals():
+            raise CommandProofImportOverflow("command proof buffer changed before complete import") from None
         return []
+    except OSError as exc:
+        raise CommandProofImportOverflow("command proof buffer cannot be read completely") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
 
     proofs: list[CommandProof] = []
     bytes_read = 0
-    with stream:
-        while True:
-            remaining = MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES - bytes_read
-            raw_line = stream.readline(remaining + 1)
-            if not raw_line:
-                break
-            bytes_read += len(raw_line)
-            if len(raw_line) > remaining:
-                raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
-            try:
-                line = raw_line.decode("utf-8").strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("claim_id") != claim_id:
-                    continue
-                attribution = HookCommandAttribution.model_validate(rec["attribution"])
-                if attribution.claim_id != claim_id:
-                    continue
-                captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
-                proof = CommandProof(
-                    command=rec["command"],
-                    exit_code=rec["exit_code"],
-                    output_sha256=rec["output_sha256"],
-                    captured_at=captured_at,
-                    attribution=attribution,
-                    semantic_digest=rec["semantic_digest"],
-                )
-            except (
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                KeyError,
-                RecursionError,
-                ValueError,
-                TypeError,
-            ):
-                continue  # malformed/pre-attribution records never block submit
-            if len(proofs) == MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
-                raise CommandProofImportOverflow("command proof buffer exceeds its record limit")
-            proofs.append(proof)
+    try:
+        with stream:
+            while True:
+                remaining = MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES - bytes_read
+                raw_line = stream.readline(remaining + 1)
+                if not raw_line:
+                    break
+                bytes_read += len(raw_line)
+                if len(raw_line) > remaining:
+                    raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
+                try:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("claim_id") != claim_id:
+                        continue
+                    attribution = HookCommandAttribution.model_validate(rec["attribution"])
+                    if attribution.claim_id != claim_id:
+                        continue
+                    captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
+                    proof = CommandProof(
+                        command=rec["command"],
+                        exit_code=rec["exit_code"],
+                        output_sha256=rec["output_sha256"],
+                        captured_at=captured_at,
+                        attribution=attribution,
+                        semantic_digest=rec["semantic_digest"],
+                    )
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    KeyError,
+                    RecursionError,
+                    ValueError,
+                    TypeError,
+                ):
+                    continue  # malformed/pre-attribution records never block submit
+                if len(proofs) == MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+                    raise CommandProofImportOverflow("command proof buffer exceeds its record limit")
+                proofs.append(proof)
+    except OSError as exc:
+        raise CommandProofImportOverflow("command proof buffer cannot be read completely") from exc
     return proofs
 
 
