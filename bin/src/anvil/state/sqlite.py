@@ -1358,6 +1358,13 @@ class SqliteBackend:
             if pre_log_check is not None:
                 pre_log_check()
 
+            if action == "progress.noted" and typed_payload.timing is not None:
+                try:
+                    self._check_timing_noted(conn, typed_payload, materialized_draft)
+                except EventRejected as exc:
+                    self._append_audit_line("rejection", materialized_draft, str(exc))
+                    raise
+
             # ---- Phase 2: id assignment ----
             if self._events_storage == "git":
                 # Git mode (v1.22.0): hash-chained id + Lamport counter. The
@@ -6203,6 +6210,60 @@ class SqliteBackend:
             raise EventRejected(
                 "progress.noted: only the exact active claim owner may record progress."
             )
+
+    def _check_timing_noted(
+        self,
+        conn: sqlite3.Connection,
+        payload: ProgressNotedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Bind observations at the final live append boundary, never replay."""
+        receipt = payload.timing
+        assert receipt is not None
+        attribution = receipt.attribution
+        refusal = "progress.noted: timing ownership, binding or lifetime mismatch."
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?", (attribution.claim_id,),
+        ).fetchone()
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        if (
+            event.target_kind != "task" or event.target_id != payload.task_id
+            or event.actor != payload.actor or payload.actor != attribution.claimed_by
+            or payload.task_id != attribution.task_id or project is None
+            or attribution.project_id != project[0] or row is None
+            or row[0] != attribution.task_id or row[1] != attribution.claimed_by
+            or row[2] != "active" or row[3] is not None
+            or row[4] != attribution.generation or row[5] is None or row[8] is not None
+        ):
+            raise EventRejected(refusal)
+        try:
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            parse = datetime.datetime.fromisoformat
+            created, expires = parse(row[6]), parse(row[7])
+            noted = parse(payload.noted_at)
+            start = parse(receipt.started_at)
+            end = parse(receipt.ended_at) if receipt.ended_at is not None else None
+            now = self._clock.now()
+            if (
+                any(getattr(context, field) != getattr(attribution, field) for field in (
+                    "repository_id", "claim_start_sha", "prd_id", "prd_revision", "task_revision",
+                ))
+                or noted != event.timestamp or not created <= noted <= now < expires
+                or not created <= start <= noted
+                or (end is not None and not created <= end <= noted)
+            ):
+                raise EventRejected(refusal)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise EventRejected(refusal) from None
+        task = conn.execute("SELECT prd_id FROM tasks WHERE id = ?", (row[0],)).fetchone()
+        prd = conn.execute("SELECT revision FROM prds WHERE id = ?", (context.prd_id,)).fetchone()
+        if (
+            task is None or task[0] != context.prd_id
+            or prd is None or prd[0] != context.prd_revision
+        ):
+            raise EventRejected(refusal)
 
     @staticmethod
     def _progress_attestation_proof_is_valid(

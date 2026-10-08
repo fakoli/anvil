@@ -57,6 +57,7 @@ from anvil.state.models import (
     RootSetClaimBinding,
     TaskRejectionProvenance,
 )
+from anvil.timing_receipts import CommandTimingReceipt
 
 
 class ProjectCreatedPayload(BaseModel):
@@ -1472,6 +1473,7 @@ class ProgressNotedPayload(BaseModel):
     # still rejects unknown keys.
     phase: str | None = None
     detail: str | None = None
+    timing: CommandTimingReceipt | None = None
 
 
 class ProgressEvidenceCorePayload(BaseModel):
