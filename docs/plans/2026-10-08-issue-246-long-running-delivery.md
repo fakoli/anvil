@@ -1,6 +1,16 @@
 # Issue #246: long-running delivery plan
 
-Prepared 2026-10-08. **Status: reviewed proposal; implementation and live recovery are not authorized by this document.**
+Prepared 2026-10-08. **Status: implementation authorized as an unattended goal; final project validation remains with the user.** Live historical recovery and infrastructure changes remain outside this source-build scope.
+
+## Execution authorization
+
+The user authorized completion as an unattended goal on 2026-10-08, with final project validation and no interim approval steps. Routine implementation decisions, intermediate source milestones, tests, independent reviews and integration may proceed under that standing authorization. Required review, evidence, custody and CI gates remain in force. The coordinator must not impersonate a human reviewer, weaken a review floor, recover unrelated live tasks or change serving.
+
+Execution is tracked in the existing shared Anvil workspace under the named PRD `issue-246-long-running-delivery`. Eight tasks cover profile contracts, profile planning, claim enforcement, current-attempt reads, timing, correction/preflight integration, shipped guidance, and cross-project qualification. The existing `native-evidence-correction:T001` remains the sole writer for its overlapping evidence/recovery contract. Integration must wait for its reservations to clear and its reviewed source to be available.
+
+The profile design uses a repository-owned `anvil-verification.toml`, explicit name/platform/manifest-digest references in the canonical PRD, and frozen digests of declared runner files. Updating a profile requires an ordinary PRD revision and review. The parser stays pure; planning supplies an explicit repository root. Existing commands/proof requirements remain authoritative, and absent profile fields retain legacy serialization.
+
+The current-attempt read must enter a query-only boundary before ordinary packet generation's lease maintenance or sidecar writes. Provider snapshot composition is a consistency precedent, but its full-history hashing is unsuitable as a bounded scan implementation. Timing must include process rejections that existing acceptance-rate metrics deliberately omit.
 
 Tracking: [#246](https://github.com/fakoli/anvil/issues/246). Evidence, source inventory, and unresolved decisions: [research register](../research/2026-10-08-issue-246-long-running-delivery.md).
 
@@ -25,7 +35,7 @@ The decomposition is sound, but execution needs these clarifications:
 - The existing `execution-scheduler-v0` bundle also reports `replan_required`. It is not a resumable container for this epic; #246 does not authorize migrating or resetting it.
 - No open Anvil PR was returned by the GitHub query during this review. Fetch and inspect native ownership again before implementation; unpublished work may exist.
 
-This review changes documentation only. It creates no PRD, task, claim, acceptance, reservation release, installation, or live recovery operation. GitHub remains the issue tracker; Anvil remains authoritative for execution state. These files hold the proposed plan and research, not a second lifecycle ledger.
+The original review changed documentation only. The subsequent execution authorization created the named native PRD; task/claim/evidence status belongs in Anvil. GitHub remains the issue tracker. These documents retain design and research evidence, not a second lifecycle ledger.
 
 ## Delivery sequence
 
@@ -103,4 +113,4 @@ Epic closeout requires:
 - [ ] At least two comparable future cycles report environment retries, evidence processing, handoff, review, rework, stop/release, next dispatch, and external waits, with unknowns and failures included.
 - [ ] Installed CLI/MCP/plugin schemas and examples match delivered commands; CI, replay, and required platform checks pass.
 
-No implementation outcome or performance improvement is claimed by this review. The next concrete step is R1: reconcile the existing correction task with #247/#248, then settle the remaining design questions before expanding execution.
+No implementation outcome or performance improvement is claimed by the baseline review. Source mapping and independent review now resolve the remaining research items during the authorized build; outcomes must be pinned to final source and verification evidence.
