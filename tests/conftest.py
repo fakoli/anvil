@@ -49,6 +49,9 @@ def isolated_native_home(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(test_home / ".config"))
     for key in ("ANVIL_GLOBAL_CONFIG", "ANVIL_ROOT", "ANVIL_PRD", "ANVIL_ACTOR", "ANVIL_CLAIM_ID"):
         monkeypatch.delenv(key, raising=False)
+    # Pytest already configured this invocation; independent subprocess suites
+    # must not inherit options requiring this runner's plugins or protocol.
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
 
 
 @pytest.fixture(scope="session")
