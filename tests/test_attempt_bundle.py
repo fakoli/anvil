@@ -30,6 +30,27 @@ def test_bundle_switch_is_strict(tmp_path):
         read_attempt_view(tmp_path, "B001", bundle=1)
 
 
+@pytest.mark.parametrize("prd_id", [None, "release"])
+def test_bundle_identifier_is_opaque_not_a_task_scope(tmp_path, monkeypatch, prd_id):
+    import tests.test_bundle_execution as fixture
+
+    original = fixture._event
+
+    def event(action, kind, target, payload, **kwargs):
+        if action == "bundle.created":
+            target = "opaque:B001"
+            payload = {**payload, "id": target}
+        return original(action, kind, target, payload, **kwargs)
+
+    backend = _backend(tmp_path)
+    monkeypatch.setattr(fixture, "_event", event)
+    _seed(backend)
+    assert backend.get_bundle("opaque:B001").prd_id == "release"
+    result = read_attempt_view(tmp_path, "opaque:B001", bundle=True, prd_id=prd_id)
+    assert result["identity"]["bundle_id"] == "opaque:B001"
+    assert result["identity"]["prd_id"] == "release"
+
+
 def test_bundle_lifecycle_attribution_and_checkpoint(tmp_path):
     from datetime import timedelta
 

@@ -270,7 +270,7 @@ def _read_frontier(
             _refuse(ReadErrorCode.invalid_request, field="bundle")
         if type(task_id) is not str or (prd_id is not None and type(prd_id) is not str):
             _refuse(ReadErrorCode.invalid_identifier, field="identity")
-        if ":" in task_id:
+        if not bundle and ":" in task_id:
             prefix, local = task_id.split(":", 1)
             if prd_id is not None and prd_id != prefix:
                 _refuse(ReadErrorCode.missing_target, field="identity")
