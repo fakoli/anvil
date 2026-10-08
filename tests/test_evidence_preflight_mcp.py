@@ -1,5 +1,6 @@
 """Real hook capture, advisory reads and the final MCP evidence append boundary."""
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -92,6 +93,8 @@ def test_mcp_observed_instability_refuses_without_evidence_append(tmp_path, monk
     buffer = state / ".evidence-buffer" / f"{claim}.json"
     before, original_buffer = (state / "events.jsonl").read_bytes(), buffer.read_bytes()
     observed = []
+    replacement_errors = []
+    replacement_succeeded = []
     if race == "between_prepare_append":
         original = SqliteBackend.append
         def appended(self, draft, **kwargs):
@@ -107,16 +110,40 @@ def test_mcp_observed_instability_refuses_without_evidence_append(tmp_path, monk
             descriptor = original_open(candidate, *args, **kwargs)
             if Path(candidate) == buffer and not observed:
                 replacement = buffer.with_suffix(".replacement")
-                replacement.write_bytes(original_buffer)
-                replacement.replace(buffer)
-                observed.append(True)
+                try:
+                    replacement.write_bytes(original_buffer)
+                    observed.append(True)
+                    replacement.replace(buffer)
+                except OSError as exc:
+                    # The inspector has not received ownership of this fd yet.
+                    module.os.close(descriptor)
+                    replacement_errors.append(exc)
+                    raise
+                replacement_succeeded.append(True)
             return descriptor
         monkeypatch.setattr(module.os, "open", opened)
 
     async def exercise():
         async with Client(mcp) as client:
-            with pytest.raises(ToolError, match="command.*buffer.*changed"):
-                await _submit(client, tmp_path, task)
+            if race == "between_prepare_append":
+                with pytest.raises(ToolError, match="command.*buffer.*changed"):
+                    await _submit(client, tmp_path, task)
+            else:
+                with pytest.raises(ToolError, match="^command_proof_import_overflow:") as error:
+                    await _submit(client, tmp_path, task)
+                if replacement_errors:
+                    assert len(replacement_errors) == 1 and replacement_succeeded == []
+                    cause = replacement_errors[0]
+                    assert os.name == "nt", f"unexpected POSIX replacement failure: {cause!r}"
+                    assert isinstance(cause.winerror, int) and cause.winerror > 0
+                    assert str(error.value) == (
+                        "command_proof_import_overflow: command proof buffer cannot be read completely"
+                    )
+                else:
+                    assert replacement_succeeded == [True]
+                    assert str(error.value).startswith(
+                        "command_proof_import_overflow: command proof buffer changed"
+                    )
     _run(exercise())
     assert observed == [True]
     assert (state / "events.jsonl").read_bytes() == before

@@ -9,6 +9,7 @@ from fastmcp.exceptions import ToolError
 
 from anvil.cli._helpers import _open_backend
 from anvil.mcp_server import mcp
+from anvil.roots import registry as root_registry
 from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.sqlite import SqliteBackend
 from tests.test_mcp import _data, _run
@@ -321,6 +322,7 @@ def test_legacy_git_failure_releases_actual_claim(tmp_path, monkeypatch, bundle)
 
 
 @pytest.mark.parametrize("bundle", [False, True])
+@pytest.mark.skipif(root_registry.fcntl is None, reason="POSIX owner registry requires flock")
 def test_mcp_claim_keeps_registered_root_policy(tmp_path, monkeypatch, bundle):
     from anvil.roots.registry import RootSetRegistry
     root, state, _ = _prepared(tmp_path, monkeypatch, bundle=bundle)
