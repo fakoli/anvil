@@ -9,7 +9,7 @@ Use a bundle when the coordinator needs to keep integration reasoning in the mai
 any delegation can be bounded. Keep using ordinary task claims when work is genuinely
 independent and separate accepted deliveries are desirable.
 
-Use [Native resume and frozen handoff](../../AGENTS.md#native-resume-and-frozen-handoff)
+Use the repository's `AGENTS.md` section **Native resume and frozen handoff**
 for project identity, existing authority, verification preflight and the shared
 source/proof handoff. Bundle custody adds the rules below.
 

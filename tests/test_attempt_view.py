@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import timedelta
@@ -332,11 +333,11 @@ def test_unrelated_event_payload_uses_event_limit_not_projected_cell_limit(popul
 
 def test_exact_log_record_and_count_boundaries(populated):
     data = (_state_path(populated) / "events.jsonl").read_bytes()
-    lines = data.splitlines()
+    lines = data.splitlines(keepends=True)
     limits = {
         "max_event_log_bytes": len(data),
         "max_event_records": len(lines),
-        "max_event_bytes": max(map(len, lines)),
+        "max_event_bytes": max(len(line.removesuffix(b"\n")) for line in lines),
     }
     assert _read(populated, limits=limits)["event_cursor"]["event_count"] == len(lines)
     for field, value in limits.items():
@@ -424,18 +425,31 @@ def test_log_ahead_and_source_replacement_refuse_without_healing(
     assert event_file.read_bytes() == before
     event_file.write_bytes(original)
     compose = view_module._compose
+    replacement_errors = []
 
     def replaced(*args):
         result = compose(*args)
         replacement = root / "replacement"
         replacement.write_bytes(original)
-        replacement.replace(event_file)
+        try:
+            replacement.replace(event_file)
+        except PermissionError as exc:
+            replacement_errors.append(exc)
+            raise
         return result
 
     monkeypatch.setattr(view_module, "_compose", replaced)
     with pytest.raises(ProjectSnapshotError) as error:
         _read(populated)
-    assert error.value.error.code == ReadErrorCode.projection_not_converged
+    if os.name == "nt":
+        assert len(replacement_errors) == 1
+        assert replacement_errors[0].winerror == 32
+        assert error.value.error.code == ReadErrorCode.state_unavailable
+        assert (root / "replacement").read_bytes() == original
+    else:
+        assert replacement_errors == []
+        assert error.value.error.code == ReadErrorCode.projection_not_converged
+    assert event_file.read_bytes() == original
 
 
 def test_thousands_of_history_records_are_bounded(populated):

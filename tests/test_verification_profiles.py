@@ -357,7 +357,10 @@ def test_unreadable_file_is_safe_error(repository, monkeypatch):
     def denied(*args, **kwargs):
         raise PermissionError("secret source path")
 
-    monkeypatch.setattr(os, "open", denied)
+    monkeypatch.setattr(
+        "anvil.verification_profiles._windows_open" if os.name == "nt" else "os.open",
+        denied,
+    )
     with pytest.raises(ProfileError) as error:
         resolve_profile(repository, ref)
     assert str(error.value) == "verification profile refused: file_unavailable"
