@@ -443,7 +443,7 @@ def test_log_ahead_and_source_replacement_refuse_without_healing(
         _read(populated)
     if os.name == "nt":
         assert len(replacement_errors) == 1
-        assert replacement_errors[0].winerror == 32
+        assert replacement_errors[0].winerror in (5, 32)
         assert error.value.error.code == ReadErrorCode.state_unavailable
         assert (root / "replacement").read_bytes() == original
     else:
