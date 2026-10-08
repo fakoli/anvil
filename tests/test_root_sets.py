@@ -496,6 +496,30 @@ def test_inactive_registry_preserves_legacy_when_platform_has_no_flock(tmp_path,
     assert not home.exists()
 
 
+@pytest.mark.parametrize("kind", ["regular", "oversized", "directory"])
+def test_shared_json_reader_requires_bounded_regular_utf8(tmp_path, kind):
+    path = tmp_path / "input.json"
+    raw = b'{\r\n  "value": "caf\xc3\xa9"\r\n}\r\n'
+    if kind == "directory":
+        path.mkdir()
+        (path / "sentinel").write_bytes(b"preserved directory bytes\x00")
+    else:
+        path.write_bytes(raw if kind == "regular" else raw + b" " * len(raw))
+    before = {
+        str(item.relative_to(tmp_path)): item.read_bytes() if item.is_file() else None
+        for item in tmp_path.rglob("*")
+    }
+    if kind == "regular":
+        assert RootSetRegistry._read_json_regular(path, limit=len(raw)) == {"value": "café"}
+    else:
+        with pytest.raises((OSError, ValueError)):
+            RootSetRegistry._read_json_regular(path, limit=len(raw))
+    assert {
+        str(item.relative_to(tmp_path)): item.read_bytes() if item.is_file() else None
+        for item in tmp_path.rglob("*")
+    } == before
+
+
 @pytest.mark.parametrize("owner_state", ["absent", "empty", "activated"])
 def test_enrollment_without_flock_refuses_before_owner_changes(tmp_path, monkeypatch, owner_state):
     repo = _repo(tmp_path / "repo")

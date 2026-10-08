@@ -557,10 +557,15 @@ class RootSetRegistry:
 
     @staticmethod
     def _read_json_regular(path: Path, *, limit: int) -> object:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        if os.name == "nt":
+            from anvil.verification_profiles import _windows_open
+            fd = _windows_open(path, directory=False)
+        else:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size < 0 or info.st_size > limit:
+            if (not stat.S_ISREG(info.st_mode) or info.st_size < 0 or info.st_size > limit
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
                 raise ValueError("unsafe registry file")
             chunks: list[bytes] = []
             remaining = limit + 1
