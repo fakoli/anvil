@@ -487,6 +487,14 @@ def test_gap_reviewer_bundle_member_guard(accepted, tmp_path, monkeypatch, repla
     if replay:
         # An untrusted persisted event must independently fail in the shared writer.
         monkeypatch.setattr(accepted, "_check_bundle_claimed", lambda *args: None)
+        drafts = []
+        original_append = accepted.append
+
+        def capture_draft(draft, **kwargs):
+            drafts.append(draft)
+            return original_append(draft, **kwargs)
+
+        monkeypatch.setattr(accepted, "append", capture_draft)
     with pytest.raises(BundleError, match="gap reviewer cannot produce"):
         BundleManager(
             accepted, FrozenClock(now), actor="gap-reviewer", project_root=tmp_path
@@ -495,6 +503,13 @@ def test_gap_reviewer_bundle_member_guard(accepted, tmp_path, monkeypatch, repla
     assert not accepted.list_bundle_claims()
     assert len(accepted.list_claims()) == 1
     if replay:
+        # Failed live append compensates its log. Inject only the isolated
+        # adversarial replay fixture, never any native workspace state.
+        forged = drafts[0].model_dump(mode="json")
+        forged["id"] = "E000017"
+        (tmp_path / "events.jsonl").write_bytes(
+            before + (json.dumps(forged) + "\n").encode()
+        )
         rebuilt = SqliteBackend(
             db_path=str(tmp_path / "bundle-replay.db"),
             events_path=str(tmp_path / "events.jsonl"),
