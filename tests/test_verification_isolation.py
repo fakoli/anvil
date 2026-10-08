@@ -50,3 +50,41 @@ def test_subprocess_inherits_disposable_owner_home(tmp_path: Path) -> None:
         capture_output=True, text=True, check=True,
     )
     assert Path(result.stdout.strip()) == Path.home()
+
+
+@pytest.mark.parametrize("explicit_cache", [None, "absolute", "relative"])
+def test_fixture_preserves_resolved_uv_cache_and_restores_environment(
+    tmp_path: Path, explicit_cache: str | None,
+) -> None:
+    from types import SimpleNamespace
+
+    from tests.conftest import isolated_native_home, uv_cache_dir
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    with pytest.MonkeyPatch.context() as baseline:
+        baseline.setenv("HOME", str(owner))
+        if os.name == "nt":
+            baseline.setenv("USERPROFILE", str(owner))
+            baseline.setenv("LOCALAPPDATA", str(owner / "local"))
+        for key in ("UV_CACHE_DIR", "XDG_CACHE_HOME"):
+            baseline.delenv(key, raising=False)
+        if explicit_cache:
+            baseline.setenv(
+                "UV_CACHE_DIR",
+                str(tmp_path / "cache") if explicit_cache == "absolute" else "cache",
+            )
+        before = subprocess.check_output(["uv", "cache", "dir"], text=True).strip()
+        resolved = uv_cache_dir.__wrapped__()
+        previous = dict(os.environ)
+        with pytest.MonkeyPatch.context() as scoped:
+            isolated_native_home.__wrapped__(
+                SimpleNamespace(mktemp=lambda _: isolated), scoped, resolved,
+            )
+            after = subprocess.check_output(["uv", "cache", "dir"], text=True).strip()
+            assert after == before
+            assert Path.home() == isolated
+            assert not (isolated / ".anvil").exists()
+        assert dict(os.environ) == previous
