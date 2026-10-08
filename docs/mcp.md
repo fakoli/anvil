@@ -1534,11 +1534,11 @@ None.
 ```json
 {
   "api_version": "18",
-  "engine_version": "0.6.14",
-  "display_version": "0.6.14",
+  "engine_version": "0.6.15",
+  "display_version": "0.6.15",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.14",
+  "tag": "v0.6.15",
   "tag_distance": 0,
   "dirty": false,
   "schema_version": 22,
@@ -1623,7 +1623,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.14","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
+{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.15","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh

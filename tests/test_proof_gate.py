@@ -19,6 +19,9 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
+from anvil.claims.evidence_import import CommandProofImportOverflow
 from anvil.cli.packet_apply import _read_command_proofs
 from anvil.review.gates import evidence_complete, evidence_missing_details
 from anvil.state.models import (
@@ -363,10 +366,15 @@ def test_read_command_proofs_refuses_symlink_and_fifo_buffers(tmp_path: Path) ->
     buffer_dir.mkdir()
     target = tmp_path / "target.json"
     target.write_text(json.dumps(_command_record("pytest", 0)) + "\n")
+    original = target.read_bytes()
     buffer = buffer_dir / "C00000001.json"
     buffer.symlink_to(target)
-    assert _read_command_proofs(tmp_path, "C00000001") == []
+    with pytest.raises(CommandProofImportOverflow, match="not a regular file"):
+        _read_command_proofs(tmp_path, "C00000001")
+    assert target.read_bytes() == original
     buffer.unlink()
     if hasattr(os, "mkfifo"):
         os.mkfifo(buffer)
-        assert _read_command_proofs(tmp_path, "C00000001") == []
+        with pytest.raises(CommandProofImportOverflow, match="not a regular file"):
+            _read_command_proofs(tmp_path, "C00000001")
+        assert target.read_bytes() == original
