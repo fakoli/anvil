@@ -270,8 +270,41 @@ def test_cli_preview_and_explicit_invalidation(accepted, tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_require_state_dir", lambda *a, **k: None)
     monkeypatch.setattr(module, "_open_backend", lambda state: accepted)
     monkeypatch.setattr(accepted, "close", lambda: None)
-    result = CliRunner().invoke(app, ["apply", "T001", "--invalidation-preview", "--json"])
+    accepted.append(
+        _make_event(
+            "task.created",
+            _make_task_payload(task_id="T002", status="ready"),
+            target_kind="task",
+            target_id="T002",
+        )
+    )
+    accepted.append(
+        _make_event(
+            "claim.created",
+            _make_claim_payload(
+                claim_id="C002", task_id="T002", actor="other-producer"
+            ),
+            target_kind="claim",
+            target_id="C002",
+        )
+    )
+    before_events = (tmp_path / "events.jsonl").read_bytes()
+    before_state = serialize_state(accepted)
+    monkeypatch.setattr(
+        module, "_open_backend", lambda state: pytest.fail("mutable open")
+    )
+    monkeypatch.setattr(
+        module, "_reap_stale_claims", lambda backend: pytest.fail("lease maintenance")
+    )
+    result = CliRunner().invoke(
+        app, ["apply", "T001", "--invalidation-preview", "--json"]
+    )
     assert result.exit_code == 0, result.output
+    assert (tmp_path / "events.jsonl").read_bytes() == before_events
+    assert serialize_state(accepted) == before_state
+    assert accepted.get_claim("C002").status.value == "active"
+    assert accepted.get_task("T002").status.value == "claimed"
+    monkeypatch.setattr(module, "_open_backend", lambda state: accepted)
     assert json.loads(result.output)["data"]["claim_id"] == "C001"
     path = tmp_path / "invalidation.json"
     path.write_text(_reference(accepted).model_dump_json())
@@ -370,3 +403,105 @@ def test_gap_reviewer_cannot_claim_fresh_evidence_generation(accepted, tmp_path)
             target_kind="claim", target_id="C002"))
     assert (tmp_path / "events.jsonl").read_bytes() == before
     assert accepted.get_claim("C002") is None
+
+
+@pytest.mark.parametrize("claimed", [True, False])
+def test_blocked_consumer_ownership_guard(accepted, tmp_path, claimed):
+    payload = _make_task_payload(task_id="T002", status="ready")
+    payload["dependencies"] = ["T001"]
+    accepted.append(
+        _make_event("task.created", payload, target_kind="task", target_id="T002")
+    )
+    if claimed:
+        accepted.append(
+            _make_event(
+                "claim.created",
+                _make_claim_payload(claim_id="C002", task_id="T002", actor="consumer"),
+                target_kind="claim",
+                target_id="C002",
+            )
+        )
+        transitions = [("claimed", "in_progress"), ("in_progress", "blocked")]
+    else:
+        transitions = [("ready", "blocked")]
+    for old, new in transitions:
+        accepted.append(
+            _make_event(
+                "task.status_changed",
+                {"task_id": "T002", "from": old, "to": new},
+                target_kind="task",
+                target_id="T002",
+            )
+        )
+    before = (tmp_path / "events.jsonl").read_bytes()
+    if claimed:
+        with pytest.raises(EventRejected, match="dependent consumers.*T002"):
+            _invalidate(accepted, _reference(accepted))
+        assert (tmp_path / "events.jsonl").read_bytes() == before
+        assert accepted.get_claim("C002").status.value == "active"
+    else:
+        assert _invalidate(accepted, _reference(accepted)) is not None
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_gap_reviewer_bundle_member_guard(accepted, tmp_path, monkeypatch, replay):
+    from anvil.bundles.manager import BundleManager
+    from anvil.clock import FrozenClock
+    from anvil.state.backend import TransactionAborted
+    from anvil.state.models import EventDraft
+    from anvil.state.schema import SCHEMA_VERSION
+    from anvil.state.sqlite import SqliteBackend
+
+    _invalidate(accepted, _reference(accepted))
+    for old, new in [("drafted", "reviewed"), ("reviewed", "ready")]:
+        accepted.append(
+            _make_event(
+                "task.status_changed",
+                {"task_id": "T001", "from": old, "to": new},
+                target_kind="task",
+                target_id="T001",
+            )
+        )
+    now = _T0 + dt.timedelta(minutes=30)
+    accepted.append(
+        EventDraft(
+            timestamp=now,
+            actor="gap-reviewer",
+            action="bundle.created",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "id": "B001",
+                "schema_version": SCHEMA_VERSION,
+                "prd_id": "default",
+                "task_ids": ["T001"],
+                "coordinator": "gap-reviewer",
+                "status": "planned",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            },
+        )
+    )
+    before = (tmp_path / "events.jsonl").read_bytes()
+    if replay:
+        # An untrusted persisted event must independently fail in the shared writer.
+        monkeypatch.setattr(accepted, "_check_bundle_claimed", lambda *args: None)
+    error = TransactionAborted if replay else EventRejected
+    with pytest.raises(error, match="gap reviewer cannot produce"):
+        BundleManager(
+            accepted, FrozenClock(now), actor="gap-reviewer", project_root=tmp_path
+        ).claim("B001")
+    assert accepted.get_task("T001").status.value == "ready"
+    assert not accepted.list_bundle_claims()
+    assert len(accepted.list_claims()) == 1
+    if replay:
+        rebuilt = SqliteBackend(
+            db_path=str(tmp_path / "bundle-replay.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=accepted._clock,
+        )
+        with pytest.raises(TransactionAborted, match="gap reviewer cannot produce"):
+            rebuilt.initialize()
+        rebuilt.close()
+    else:
+        assert (tmp_path / "events.jsonl").read_bytes() == before

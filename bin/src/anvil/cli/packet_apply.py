@@ -1407,6 +1407,49 @@ def apply(
 
     resolved_reviewer = reviewer or os.environ.get("USER") or "human"
 
+    if invalidation_preview:
+        from anvil.clock import SystemClock
+        from anvil.state.backend import EventRejected
+        from anvil.state.sqlite import (
+            SchemaMismatch,
+            SchemaProbeFailed,
+            SqliteBackend,
+            query_only_transaction,
+        )
+
+        try:
+            if (
+                approve
+                or reject
+                or reason
+                or reason_code
+                or quality_finding
+                or invalidate_accepted is not None
+            ):
+                raise EventRejected(
+                    "invalidation mode cannot be combined with ordinary review flags"
+                )
+            with query_only_transaction(state_dir / "state.db", state_dir / "events.jsonl") as (
+                conn,
+                _,
+            ):
+                reader = SqliteBackend(
+                    db_path=str(state_dir / "state.db"),
+                    events_path=str(state_dir / "events.jsonl"),
+                    clock=SystemClock(),
+                )
+                data = reader.acceptance_invalidation_binding(task_id, connection=conn)
+        except (OSError, ValueError, SchemaMismatch, SchemaProbeFailed, EventRejected) as exc:
+            if json_output:
+                fail("apply", str(exc), code="acceptance_invalidation_refused")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if json_output:
+            emit_success("apply", data)
+        else:
+            typer.echo(json.dumps(data, indent=2))
+        return
+
     backend = _open_backend(state_dir)
     try:
         _reap_stale_claims(backend)

@@ -3743,10 +3743,13 @@ class SqliteBackend:
             counts_toward_accept_rate=(category is RejectionCategory.quality),
         )
 
-    def acceptance_invalidation_binding(self, task_id: str) -> dict[str, Any]:
+    def acceptance_invalidation_binding(
+        self, task_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
         """Read the complete exact accepted-attempt CAS identity."""
-        return self._acceptance_invalidation_binding(self._require_conn(), task_id)
-
+        return self._acceptance_invalidation_binding(
+            connection if connection is not None else self._require_conn(), task_id
+        )
 
     def _acceptance_invalidation_binding(
         self,
@@ -3791,7 +3794,14 @@ class SqliteBackend:
         if evidence_event is None:
             raise EventRejected("acceptance_invalidation: accepted evidence event unavailable")
         project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
-        prd = self.get_prd_for_task(task)
+        prd_row = (
+            conn.execute("SELECT * FROM prds WHERE id = ? LIMIT 1", (task.prd_id,)).fetchone()
+            if task.prd_id
+            else conn.execute(
+                "SELECT * FROM prds WHERE is_default = 1 ORDER BY id LIMIT 1"
+            ).fetchone()
+        )
+        prd = self._row_to_prd(prd_row) if prd_row is not None else None
         if project is None or prd is None:
             raise EventRejected("acceptance_invalidation: canonical project/PRD unavailable")
         material = {
@@ -3914,13 +3924,21 @@ class SqliteBackend:
             if expanded == consumers:
                 break
             consumers = expanded
+        active_consumers = {
+            row[0]
+            for row in conn.execute("SELECT task_id FROM claims WHERE status = 'active'").fetchall()
+            if row[0] in consumers and row[0] != payload.task_id
+        }
         blocked = sorted(
             task.id
             for task in tasks
             if task.id != payload.task_id
             and task.id in consumers
-            and task.status.value
-            not in {"proposed", "drafted", "reviewed", "ready", "blocked", "rejected"}
+            and (
+                task.id in active_consumers
+                or task.status.value
+                not in {"proposed", "drafted", "reviewed", "ready", "blocked", "rejected"}
+            )
         )
         if blocked:
             raise EventRejected(
@@ -9912,6 +9930,8 @@ class SqliteBackend:
             ).fetchall()
             member_ids = [member[0] for member in member_rows]
             supplied_ids = [member.task_id for member in payload.member_claims]
+            for member_id in member_ids:
+                self._check_invalidation_claim_actor(conn, member_id, payload.claimed_by)
             if supplied_ids != member_ids:
                 raise EventRejected(
                     "bundle.claimed: member claims must match stored member order."
@@ -10111,6 +10131,11 @@ class SqliteBackend:
             tuple(member_ids),
         ).fetchone():
             return
+        try:
+            for member_id in member_ids:
+                self._check_invalidation_claim_actor(conn, member_id, payload.claimed_by)
+        except EventRejected as exc:
+            raise TransactionAborted(str(exc)) from exc
         member_claim_ids = {
             member.task_id: member.id for member in payload.member_claims
         }
