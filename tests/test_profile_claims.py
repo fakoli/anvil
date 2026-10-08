@@ -7,7 +7,14 @@ from anvil.bundles.manager import BundleError, BundleManager
 from anvil.claims.manager import ClaimError, ClaimManager
 from anvil.clock import FrozenClock
 from anvil.review.gates import evaluate_claims, evidence_complete, evidence_missing_details
-from anvil.state.models import CommandProof, Evidence, TaskStatus, Verification
+from anvil.state.models import (
+    ArtifactAssertion,
+    CommandProof,
+    Evidence,
+    Predicate,
+    TaskStatus,
+    Verification,
+)
 from anvil.state.snapshot import serialize_state
 from anvil.verification_profiles import MANIFEST, materialize_verification
 from tests.test_bundle_execution import _NOW, _backend, _event, _seed
@@ -223,6 +230,36 @@ def test_old_successful_proof_cannot_pass_drift(tmp_path, monkeypatch, change):
     # These existing pure gates do not acquire profile filesystem authority.
     assert evidence_complete(task, evidence) == (True, [])
     assert evidence_missing_details(task, evidence) == ([], [])
+
+
+@pytest.mark.parametrize("change", ["missing_root", "relative_root", "manifest", "runner"])
+def test_profile_refusal_skips_root_dependent_assertions(tmp_path, monkeypatch, change):
+    root, state, backend = _setup(tmp_path, monkeypatch)
+    task = backend.get_task("release:T001")
+    task.verification.artifact_assertions.append(ArtifactAssertion(
+        artifact="result.json", assertions=[Predicate(path="status", op="exists")],
+        claim="artifact-result",
+    ))
+    selected_root = root
+    if change == "missing_root":
+        selected_root = None
+    elif change == "relative_root":
+        selected_root = Path("relative-repository")
+    elif change == "manifest":
+        (root / MANIFEST).write_text("changed")
+    else:
+        (root / "tools/verify.py").write_text("changed")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("profile refusal must not read artifacts")
+
+    monkeypatch.setattr("anvil.review.assertions.evaluate_assertions", forbidden)
+    verdict = evaluate_claims(task, _evidence(task), project_root=selected_root)
+    assert verdict.overall == "failed"
+    assert verdict.enforceable_unproven[0].failures[0].startswith(
+        "verification profile refused: "
+    )
+    assert next(item for item in verdict.claims if item.claim == "artifact-result").verdict == "failed"
 
 
 @pytest.mark.parametrize("category,command,exit_code,verdict", [
