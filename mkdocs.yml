@@ -88,6 +88,7 @@ not_in_nav: |
   research/competitor-issue-analysis.md
   research/intent-driven-development-landscape.md
   research/spec-driven-development-synthesis.md
+  research/2026-10-08-issue-246-long-running-delivery.md
   archive/README.md
   archive/BUILD-REPORT.md
   archive/phase-9-backlog.md
@@ -99,6 +100,7 @@ not_in_nav: |
   archive/2026-05-26-plugin-audit.md
   plans/2026-07-07-docs-assessment.md
   plans/2026-07-07-retro-opps-prd.md
+  plans/2026-10-08-issue-246-long-running-delivery.md
 
 nav:
   - Home: index.md
