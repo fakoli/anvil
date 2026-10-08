@@ -1,6 +1,7 @@
 """Portable disposable profile fixtures; no runner is executed by resolution."""
 import hashlib
 import os
+import warnings
 from pathlib import Path
 
 import pytest
@@ -121,8 +122,9 @@ def test_mutated_verification_is_revalidated(repository):
         require_profile_current(result, repository)
 
 
+@pytest.mark.parametrize("operation", [materialize_verification, require_profile_current])
 @pytest.mark.parametrize("nested", ["reference", "binding"])
-def test_materialization_refuses_nested_byte_fields_before_reads(repository, monkeypatch, nested):
+def test_materialization_refuses_nested_byte_fields_before_reads(repository, monkeypatch, nested, operation):
     import anvil.verification_profiles as module
 
     valid = materialize_verification(Verification(profile=reference(repository)), repository)
@@ -145,9 +147,12 @@ def test_materialization_refuses_nested_byte_fields_before_reads(repository, mon
         return original(*args)
 
     monkeypatch.setattr(module, "_read_file", read)
-    with pytest.raises(ProfileError, match="invalid_verification"):
-        materialize_verification(malformed, repository)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        with pytest.raises(ProfileError, match="invalid_verification"):
+            operation(malformed, repository)
     assert not reads
+    assert not captured
 
 
 @pytest.mark.parametrize("text", [
