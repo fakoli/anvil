@@ -14,7 +14,6 @@ from tests.test_profile_cli import _git, _prepared
 from tests.test_profile_planning_cli import _invoke
 from tests.test_root_set_evidence import _repo
 
-
 pytestmark = pytest.mark.skipif(
     root_registry.fcntl is None, reason="POSIX owner registry requires flock",
 )

@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from anvil.state.backend import EventRejected
 from anvil.roots import registry as root_registry
+from anvil.state.backend import EventRejected
 from tests.test_bundle_execution import _event
 from tests.test_claims import _git, _make_git_repo
 from tests.test_profile_claims import _manager, _metadata, _profile, _setup, _snapshot
