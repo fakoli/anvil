@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from anvil.claims.manager import ClaimError
 from anvil.cli import app
 from anvil.cli._helpers import _open_backend
 from anvil.state.backend import EventRejected
@@ -72,7 +73,9 @@ def _git_identity(root):
 
 @pytest.mark.parametrize("bundle", [False, True])
 @pytest.mark.parametrize("existing_branch", [False, True])
-@pytest.mark.parametrize("write_error", [sqlite3.OperationalError, EventRejected])
+@pytest.mark.parametrize("write_error", [
+    sqlite3.OperationalError, EventRejected, "audit_allocation",
+])
 def test_postlog_claim_failure_retains_recoverable_git(
     tmp_path, monkeypatch, bundle, existing_branch, write_error,
 ):
@@ -84,6 +87,15 @@ def test_postlog_claim_failure_retains_recoverable_git(
     before = (state / "events.jsonl").read_bytes()
     action = "bundle.claimed" if bundle else "claim.created"
     writer = "_write_bundle_claimed" if bundle else "_write_claim_created"
+    prepared = []
+    audit_failures = []
+    dumps = json.dumps
+
+    def fail_audit_allocation(value, *args, **kwargs):
+        if isinstance(value, dict) and value.get("kind") == "write_failed_after_log":
+            audit_failures.append(value["event_id"])
+            raise MemoryError("injected audit serialization allocation failure")
+        return dumps(value, *args, **kwargs)
 
     def fail_after_log(backend, conn, payload, event):
         logged = (state / "events.jsonl").read_bytes()[len(before):]
@@ -91,19 +103,32 @@ def test_postlog_claim_failure_retains_recoverable_git(
         assert event.id in logged.decode()
         assert payload.git_metadata.target_path == str(target)
         assert target.is_dir()
-        raise write_error("injected post-log projection failure")
+        prepared.append((_git_identity(target), (target / "verify.py").read_bytes()))
+        error_type = EventRejected if write_error == "audit_allocation" else write_error
+        raise error_type("injected post-log projection failure")
 
     with monkeypatch.context() as patch:
         patch.setattr(SqliteBackend, writer, fail_after_log)
-        result = _invoke(root, _claim_args(
-            bundle, "--worktree", "--branch", branch,
-        ), expected=1)
+        if write_error == "audit_allocation":
+            patch.setattr(json, "dumps", fail_audit_allocation)
+        result = runner.invoke(app, [
+            *_claim_args(bundle, "--worktree", "--branch", branch), "--cwd", str(root),
+        ], catch_exceptions=True)
 
-    assert "log line remains" in result.output
+    assert result.exit_code == 1
+    if write_error == "audit_allocation":
+        assert isinstance(result.exception, MemoryError)
+        assert isinstance(result.exception.__context__, EventRejected)
+        assert len(audit_failures) == 1
+    else:
+        assert "log line remains" in result.output
     appended = (state / "events.jsonl").read_bytes()[len(before):]
     events = [json.loads(line) for line in appended.splitlines()]
     assert len(events) == 1 and events[0]["action"] == action
+    if audit_failures:
+        assert audit_failures == [events[0]["id"]]
     assert target.is_dir()
+    assert prepared == [(_git_identity(target), (target / "verify.py").read_bytes())]
     assert _git(target, "symbolic-ref", "--short", "HEAD") == branch
     assert _git(root, "rev-parse", branch) == _git(target, "rev-parse", "HEAD")
     backend = _open_backend(state, project_root=root)
@@ -126,7 +151,9 @@ def test_postlog_claim_failure_retains_recoverable_git(
 
 @pytest.mark.parametrize("bundle", [False, True])
 @pytest.mark.parametrize("failure", [
-    "unknown", "interruption", "interruption_context", "profile", "context_cycle",
+    "unknown", "unknown_cause", "os_context", "native_wrapper_unknown",
+    "native_wrapper_context_only", "interruption", "interruption_context",
+    "profile", "context_cycle",
 ])
 def test_postcallback_claim_failure_respects_publication_certainty(
     tmp_path, monkeypatch, bundle, failure,
@@ -163,6 +190,17 @@ def test_postcallback_claim_failure_respects_publication_certainty(
             refusal = EventRejected("injected prepublication refusal")
             error.__context__ = refusal
             refusal.__context__ = error
+        elif failure == "unknown_cause":
+            error.__cause__ = EventRejected("earlier prepublication refusal")
+        elif failure == "os_context":
+            error = OSError("injected post-callback uncertainty")
+            error.__context__ = EventRejected("earlier prepublication refusal")
+        elif failure == "native_wrapper_unknown":
+            error.__cause__ = EventRejected("earlier prepublication refusal")
+            raise ClaimError("injected post-callback uncertainty") from error
+        elif failure == "native_wrapper_context_only":
+            error = ClaimError("injected post-callback uncertainty")
+            error.__context__ = EventRejected("earlier prepublication refusal")
         raise error
 
     monkeypatch.setattr(SqliteBackend, "_check_live_profiles", fail_after_callback)
@@ -173,7 +211,7 @@ def test_postcallback_claim_failure_respects_publication_certainty(
     assert result.exit_code != 0
     assert len(observed) == 1
     _no_claim(state, root, before)
-    if failure in {"profile", "context_cycle"}:
+    if failure == "profile":
         assert not target.exists()
         assert _git_identity(root) == identity
     else:
@@ -185,7 +223,7 @@ def test_postcallback_claim_failure_respects_publication_certainty(
     elif failure.startswith("interruption"):
         assert result.exit_code == 130
     else:
-        assert "injected post-callback uncertainty" in str(result.exception)
+        assert "injected post-callback uncertainty" in f"{result.output}{result.exception}"
 
 
 @pytest.mark.parametrize("bundle", [False, True])

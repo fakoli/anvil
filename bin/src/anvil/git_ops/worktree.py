@@ -1244,9 +1244,11 @@ def compensate_claim_plan_tracker(
 
 def _publication_rejected(failure: BaseException | None) -> bool:
     """Recognize typed prepublication refusals through native error wrappers."""
+    from anvil.bundles.manager import BundleError
+    from anvil.claims.manager import ClaimError
+
     pending = [failure] if failure is not None else []
     seen: set[int] = set()
-    rejected = False
     while pending:
         error = pending.pop()
         if id(error) in seen:
@@ -1254,11 +1256,22 @@ def _publication_rejected(failure: BaseException | None) -> bool:
         seen.add(id(error))
         if isinstance(error, TransactionAborted) or not isinstance(error, Exception):
             return False
-        rejected |= isinstance(error, EventRejected)
         for wrapped in (error.__cause__, error.__context__):
             if wrapped is not None:
                 pending.append(wrapped)
-    return rejected
+    # Only native managers' explicit causes carry refusal authority. Unknown
+    # outer failures can mask a logged write failure before TransactionAborted
+    # exists; incidental context must not authorize deletion of prepared Git.
+    seen.clear()
+    error = failure
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, EventRejected):
+            return True
+        if type(error) not in (ClaimError, BundleError):
+            return False
+        error = error.__cause__
+    return False
 
 
 def _compensate_values(
