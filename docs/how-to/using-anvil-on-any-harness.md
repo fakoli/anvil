@@ -4,9 +4,9 @@ Anvil's engine does not depend on Claude Code. Any harness can drive the full
 loop through one of two surfaces. (New to terms like packet, claim, or lease?
 See the [glossary](../glossary.md).)
 
-1. **MCP** — register the `anvil` stdio server. It serves the 24 execution
+1. **MCP** — register the `anvil` stdio server. It serves the 26 execution
    tools by default; set `ANVIL_MCP_PLANNING=1` in the server's env to expose
-   all 36 (adds the planning tools — `init_project`, `parse_prd`, `assess_prd`, `plan_tasks`,
+   all 38 (adds the planning tools — `init_project`, `parse_prd`, `assess_prd`, `plan_tasks`,
    `score_tasks`, `review_prd`, `review_tasks`, `apply_review_decision`,
    `find_decisions`, `edit_dependencies`, `describe_surface`, `create_bundle`).
 2. **CLI** — `anvil <command>` with `--json` for machine-readable output.
