@@ -1,5 +1,7 @@
 """Observation bounds and failed runs never become successful evidence."""
 import json
+from collections import UserDict
+from types import MappingProxyType
 
 import pytest
 from pydantic import ValidationError
@@ -77,6 +79,18 @@ def test_native_attribution_is_revalidated(field, value):
     data["attribution"] = HookCommandAttribution.model_construct(**data["attribution"])
     with pytest.raises(ValidationError):
         CommandTimingReceipt(**data)
+
+
+@pytest.mark.parametrize("mapping", [dict, UserDict, MappingProxyType])
+@pytest.mark.parametrize("version", [True, 1.0, 1])
+def test_all_attribution_mappings_preserve_strict_schema(mapping, version):
+    data = _receipt()
+    data["attribution"] = mapping({**data["attribution"], "schema_version": version})
+    if type(version) is int:
+        assert CommandTimingReceipt(**data).attribution.schema_version == 1
+    else:
+        with pytest.raises(ValidationError):
+            CommandTimingReceipt(**data)
 
 
 def test_canonical_byte_cap_counts_utf8_and_exact_boundary():
