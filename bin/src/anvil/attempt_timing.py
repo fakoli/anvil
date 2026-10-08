@@ -138,6 +138,7 @@ def project_attempt_timing(
                     or event["target_id"] != creation["payload"]["bundle_id"]
                     or source["bundle_id"] != event["target_id"]
                     or (action != "bundle.claim_stale"
+                        and not (action == "bundle.claim_released" and source["force"])
                         and source[actor_field] != claim["claimed_by"])):
                     raise ValueError("bundle timing lifecycle binding mismatch")
                 if action == "bundle.claim_renewed":

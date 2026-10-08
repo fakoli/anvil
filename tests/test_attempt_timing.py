@@ -191,7 +191,7 @@ def test_native_aware_offsets_preserve_claim_and_release_intervals(
     assert (root / "events.jsonl").read_bytes() == before
 
 
-@pytest.mark.parametrize("terminal", ["release", "stale"])
+@pytest.mark.parametrize("terminal", ["release", "force", "stale"])
 def test_native_bundle_member_creation_renewal_release_is_readable(tmp_path, monkeypatch, terminal):
     from anvil.roots import registry
     from tests.test_bundle_execution import _backend, _manager, _seed
@@ -212,6 +212,12 @@ def test_native_bundle_member_creation_renewal_release_is_readable(tmp_path, mon
         assert _read(backend, "release:T001")["timing"]["attempt_count"] == 1
         if terminal == "release":
             manager.release("B001", reason="owned runner stopped")
+        elif terminal == "force":
+            from anvil.bundles.manager import BundleManager
+
+            operator = BundleManager(backend, manager._clock, actor="operator", project_root=tmp_path)
+            operator.release("B001", force=True, reason="explicit operator recovery")
+            assert backend.list_bundle_claims()[0].status.value == "force_released"
         else:
             from anvil.claims.stale import detect_and_release_stale
 
@@ -222,9 +228,15 @@ def test_native_bundle_member_creation_renewal_release_is_readable(tmp_path, mon
         assert final == _read(backend, "release:T001")
         assert final["timing"]["attempts"][0]["release_event_id"] is not None
         assert final["timing"]["attempts"][0]["claim_cycle"]["elapsed_us"] == (
-            1_000_000 if terminal == "release" else 18_001_000_000
+            1_000_000 if terminal in {"release", "force"} else 18_001_000_000
         )
         assert final["custody"]["runner_stop"] == "unknown"
+        other = _read(backend, "release:T002")
+        assert other == _read(backend, "release:T002")
+        assert other["timing"]["attempts"][0]["claim_cycle"]["elapsed_us"] == (
+            1_000_000 if terminal in {"release", "force"} else 18_001_000_000
+        )
+        assert other["custody"]["runner_stop"] == "unknown"
         assert (tmp_path / "events.jsonl").read_bytes() == before
     finally:
         backend.close()
