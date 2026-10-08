@@ -212,10 +212,24 @@ def build_prd_persistence_plan(
     material_sha256 = material_content_sha256(source, parsed.prd.title)
 
     profile_tasks = [task for task in parsed.tasks if task.verification.profile is not None]
+    profile_bindings = {}
     if profile_tasks:
         if project_root is None:
             raise PrdRevisionError("verification profiles require an explicit project root")
         staged = []
+        if existing_prd is not None and existing_prd.profile_bindings is None:
+            from anvil.planning.template import parse_prd
+
+            historical = parse_prd(
+                (existing_prd.source_bytes or b"").decode("utf-8"), clock=clock,
+            )
+            historical_references = {
+                task.verification.profile
+                for task in historical.tasks
+                if task.verification.profile is not None
+            }
+            if any(task.verification.profile in historical_references for task in profile_tasks):
+                raise PrdRevisionError("historical PRD profile has no frozen source binding")
         try:
             for task in profile_tasks:
                 verification = task.verification
@@ -231,6 +245,23 @@ def build_prd_persistence_plan(
                         # Update the manifest and canonical reference, then review.
                         require_profile_current(stored, project_root)
                 materialized = materialize_verification(verification, project_root)
+                frozen = (
+                    existing_prd.profile_bindings.get(task.id)
+                    if existing_prd is not None and existing_prd.profile_bindings is not None
+                    else None
+                )
+                if (
+                    frozen is not None
+                    and frozen.reference == verification.profile
+                    and frozen != materialized.profile_binding
+                ):
+                    raise PrdRevisionError("verification profile refused: binding_mismatch")
+                if (
+                    existing_prd is not None
+                    and existing_prd.source_bytes == source.source_bytes
+                    and frozen is None
+                ):
+                    raise PrdRevisionError("historical PRD profile has no frozen source binding")
                 if (
                     stored_task is not None
                     and stored_task.verification.profile == verification.profile
@@ -238,6 +269,7 @@ def build_prd_persistence_plan(
                 ):
                     raise PrdRevisionError("verification profile refused: binding_mismatch")
                 staged.append((task, materialized))
+                profile_bindings[task.id] = materialized.profile_binding.model_dump(mode="json")
         except ProfileError as exc:
             raise PrdRevisionError(str(exc)) from None
         for task, verification in staged:
@@ -275,6 +307,7 @@ def build_prd_persistence_plan(
             "open_questions": parsed.prd.open_questions,
             "assumptions": [item.model_dump() for item in parsed.prd.assumptions],
             "material_sha256": material_sha256,
+            **({"profile_bindings": profile_bindings} if profile_tasks else {}),
             **source_binding(source, 1),
         }
         if not is_default:
@@ -363,6 +396,10 @@ def build_prd_persistence_plan(
             if requirement_id in new_by_id
         ],
         "material_sha256": material_sha256,
+        **(
+            {"profile_bindings": profile_bindings}
+            if profile_tasks or existing_prd.profile_bindings is not None else {}
+        ),
         **source_binding(source, revision),
     }
     if exact_parent:

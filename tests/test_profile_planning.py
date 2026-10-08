@@ -294,6 +294,63 @@ def test_first_plan_after_parse_materializes(backend, frozen_clock, repository):
     assert first.tasks[0].verification == parsed.tasks[0].verification
 
 
+@pytest.mark.parametrize("persist_tasks", [False, True])
+@pytest.mark.parametrize("source_suffix", ["", "\n"])
+def test_approved_source_freezes_runner_before_first_plan(
+    backend, state_dir, frozen_clock, repository, persist_tasks, source_suffix,
+):
+    markdown = _markdown(_field(repository))
+    parsed, plan = _build(backend, frozen_clock, markdown, repository)
+    _persist(backend, frozen_clock, parsed, plan, tasks=persist_tasks)
+    if persist_tasks:
+        backend.append(_event(frozen_clock, "task.deleted", "task", "T001", {"task_id": "T001"}))
+    prd = backend.get_prd()
+    common = {
+        "project_id": "project", "binding_version": 1, "expected_revision": prd.revision,
+        "source_sha256": prd.source_sha256, "material_sha256": prd.material_sha256,
+        "content_event_id": prd.content_event_id,
+    }
+    review = backend.append(_event(frozen_clock, "prd.reviewed", "prd", "project", {
+        **common, "reviewer": "reviewer", "expected_status": "draft",
+    }))
+    backend.append(_event(frozen_clock, "prd.approved", "prd", "project", {
+        **common, "approver": "reviewer", "expected_status": "reviewed",
+        "review_event_id": review.id,
+    }))
+    assert backend.get_task("T001") is None
+    again, same = _build(backend, frozen_clock, markdown, repository)
+    assert same.action == "unchanged"
+    assert again.tasks[0].verification == parsed.tasks[0].verification
+    before = (state_dir / "events.jsonl").read_bytes()
+    (repository / "verify.py").write_text("print('unreviewed runner')\n")
+    with pytest.raises(PrdRevisionError, match="binding_mismatch"):
+        _build(backend, frozen_clock, markdown + source_suffix, repository)
+    assert (state_dir / "events.jsonl").read_bytes() == before
+    assert backend.get_prd().status.value == "approved"
+    assert backend.get_prd().revision == 1
+    assert backend.get_prd().profile_bindings["T001"] == parsed.tasks[0].verification.profile_binding
+
+
+def test_historical_prd_only_profile_refuses_unreviewed_rebinding(
+    backend, state_dir, frozen_clock, repository,
+):
+    markdown = _markdown(_field(repository))
+    parsed, plan = _build(backend, frozen_clock, markdown, repository)
+    plan.draft.payload_json.pop("profile_bindings")
+    _persist(backend, frozen_clock, parsed, plan, tasks=False)
+    assert backend.get_prd().profile_bindings is None
+    before = (state_dir / "events.jsonl").read_bytes()
+    with pytest.raises(PrdRevisionError, match="no frozen source binding"):
+        _build(backend, frozen_clock, markdown, repository)
+    assert (state_dir / "events.jsonl").read_bytes() == before
+    (repository / MANIFEST).write_text(_MANIFEST + "\n# Explicit profile revision.\n")
+    revised, change = _build(backend, frozen_clock, _markdown(_field(repository)), repository)
+    assert change.action == "revised"
+    assert change.draft.payload_json["profile_bindings"]["T001"] == (
+        revised.tasks[0].verification.profile_binding.model_dump(mode="json")
+    )
+
+
 def test_changed_canonical_reference_creates_new_contract(backend, frozen_clock, repository):
     markdown = _markdown(_field(repository))
     parsed, plan = _build(backend, frozen_clock, markdown, repository)
