@@ -296,8 +296,9 @@ def test_first_plan_after_parse_materializes(backend, frozen_clock, repository):
 
 @pytest.mark.parametrize("persist_tasks", [False, True])
 @pytest.mark.parametrize("source_suffix", ["", "\n"])
+@pytest.mark.parametrize("rename", [False, True])
 def test_approved_source_freezes_runner_before_first_plan(
-    backend, state_dir, frozen_clock, repository, persist_tasks, source_suffix,
+    backend, state_dir, frozen_clock, repository, persist_tasks, source_suffix, rename,
 ):
     markdown = _markdown(_field(repository))
     parsed, plan = _build(backend, frozen_clock, markdown, repository)
@@ -321,10 +322,13 @@ def test_approved_source_freezes_runner_before_first_plan(
     again, same = _build(backend, frozen_clock, markdown, repository)
     assert same.action == "unchanged"
     assert again.tasks[0].verification == parsed.tasks[0].verification
+    changed_markdown = markdown.replace("### T001:", "### T002:") if rename else markdown
+    renamed, _ = _build(backend, frozen_clock, changed_markdown, repository)
+    assert renamed.tasks[0].verification.profile_binding == parsed.tasks[0].verification.profile_binding
     before = (state_dir / "events.jsonl").read_bytes()
     (repository / "verify.py").write_text("print('unreviewed runner')\n")
     with pytest.raises(PrdRevisionError, match="binding_mismatch"):
-        _build(backend, frozen_clock, markdown + source_suffix, repository)
+        _build(backend, frozen_clock, changed_markdown + source_suffix, repository)
     assert (state_dir / "events.jsonl").read_bytes() == before
     assert backend.get_prd().status.value == "approved"
     assert backend.get_prd().revision == 1
