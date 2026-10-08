@@ -206,6 +206,8 @@ def test_limits_are_lower_only_and_total_gate_precedes_scan(populated, monkeypat
     for requested in (
         {"max_event_records": True},
         {"max_response_bytes": 65537},
+        {"max_event_log_bytes": 32 * 1024 * 1024 + 1},
+        {"max_event_records": 20_001},
         {"oops": 1},
     ):
         with pytest.raises(ProjectSnapshotError) as error:
@@ -219,6 +221,45 @@ def test_limits_are_lower_only_and_total_gate_precedes_scan(populated, monkeypat
     with pytest.raises(ProjectSnapshotError) as error:
         _read(populated, limits={"max_event_log_bytes": 1})
     assert error.value.error.field == "max_event_log_bytes"
+
+
+def test_default_log_byte_ceiling_accepts_large_history_and_refuses_overflow(tmp_path):
+    limits = view_module.AttemptViewLimits()
+    path = tmp_path / "events.jsonl"
+    with path.open("wb") as stream:
+        stream.truncate(17 * 1024 * 1024)
+    with path.open("rb") as stream:
+        assert view_module._BoundedLog(stream, limits).total == 0
+    with path.open("wb") as stream:
+        stream.truncate(limits.max_event_log_bytes)
+    with path.open("rb") as stream:
+        view_module._BoundedLog(stream, limits)
+    with path.open("wb") as stream:
+        stream.truncate(limits.max_event_log_bytes + 1)
+    with path.open("rb") as stream, pytest.raises(ProjectSnapshotError) as error:
+        view_module._BoundedLog(stream, limits)
+    assert error.value.error.field == "max_event_log_bytes"
+    assert error.value.error.actual == limits.max_event_log_bytes + 1
+
+
+def test_unrelated_event_payload_uses_event_limit_not_projected_cell_limit(populated):
+    populated.append(
+        _event(
+            "progress.noted",
+            {
+                "task_id": "named:T001",
+                "actor": "snapshot-test",
+                "notes": "x" * 700_000,
+                "noted_at": _NOW.isoformat(),
+            },
+            kind="task",
+            target="named:T001",
+        )
+    )
+    assert _read(populated)["event_cursor"]["event_count"] == 9
+    with pytest.raises(ProjectSnapshotError) as error:
+        _read(populated, limits={"max_event_bytes": 699_999})
+    assert error.value.error.field == "max_event_bytes"
 
 
 def test_exact_log_record_and_count_boundaries(populated):

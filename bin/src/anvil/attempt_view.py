@@ -62,8 +62,8 @@ def _refuse(
 class AttemptViewLimits:
     """Hard ceilings; callers may lower any ceiling but cannot raise one."""
 
-    max_event_log_bytes: int = 16 * 1024 * 1024
-    max_event_records: int = 10_000
+    max_event_log_bytes: int = 32 * 1024 * 1024
+    max_event_records: int = 20_000
     max_event_bytes: int = 1024 * 1024
     max_cell_bytes: int = 256 * 1024
     max_response_bytes: int = 64 * 1024
@@ -106,7 +106,7 @@ class _BoundedLog:
 
     def readline(self, size: int) -> bytes:
         # ponytail: capped whole-history scan; an engine-owned incremental frontier
-        # is the upgrade path once 16 MiB / 10,000 records is insufficient.
+        # is the upgrade path once 32 MiB / 20,000 records is insufficient.
         line = self.source.readline(min(size, self.limits.max_event_bytes + 2))
         if line:
             self.count += 1
@@ -139,9 +139,13 @@ def _rows(
         _overflow("max_event_records", count, limits.max_event_records)
     checks = ", ".join(f"max(length(CAST({name} AS BLOB)))" for name in names)
     sizes = conn.execute(f"SELECT {checks} FROM {table} WHERE {where}", args).fetchone()
+    # Event payloads obey the event ceiling; smaller projected fields obey the
+    # cell ceiling. Otherwise a valid unrelated proof event can block this read.
+    cell_field = "max_event_bytes" if table == "events" else "max_cell_bytes"
+    cell_limit = getattr(limits, cell_field)
     for size in sizes:
-        if size is not None and size > limits.max_cell_bytes:
-            _overflow("max_cell_bytes", size, limits.max_cell_bytes)
+        if size is not None and size > cell_limit:
+            _overflow(cell_field, size, cell_limit)
     # Bound aggregate allocation as well as every individual cell.
     size_expr = " + ".join(f"coalesce(length(CAST({name} AS BLOB)), 0)" for name in names)
     total = conn.execute(

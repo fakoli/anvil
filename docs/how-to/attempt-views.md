@@ -38,16 +38,17 @@ may lower them:
 
 | Limit | Ceiling |
 | --- | ---: |
-| `max_event_log_bytes` | 16 MiB |
-| `max_event_records` | 10,000 |
+| `max_event_log_bytes` | 32 MiB |
+| `max_event_records` | 20,000 |
 | `max_event_bytes` | 1 MiB, excluding the newline |
-| `max_cell_bytes` | 256 KiB per raw projected cell |
+| `max_cell_bytes` | 256 KiB per projected cell, excluding event payloads |
 | `max_response_bytes` | 64 KiB, including digest and limits |
 
 Every associated row collection is also bounded by the record ceiling, and each
 selected collection's aggregate cells are bounded by the log-byte ceiling. The
-whole-history validation scan is deliberate; larger projects require an
-engine-maintained incremental frontier before these ceilings can be raised.
+whole-history validation scan is deliberate. These ceilings accommodate the
+measured 17 MiB / 9,543-event project history used for qualification; larger
+projects require an engine-maintained incremental frontier before another increase.
 
 Catch `ProjectSnapshotError` for all refusals. `AttemptViewError` is its
 execution-specific subclass, with an `AttemptViewRefusal` in `.error` carrying
