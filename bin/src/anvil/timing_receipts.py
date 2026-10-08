@@ -1,8 +1,12 @@
 """Pure command timing observations; never proofs, renewals or authority."""
 from __future__ import annotations
 
+import json
+import os
+import stat
 from collections.abc import Mapping
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import (
@@ -101,3 +105,54 @@ class CommandTimingReceipt(BaseModel):
             TIMING_RECEIPT_DOMAIN, self.model_dump(mode="json"),
             max_bytes=MAX_TIMING_RECEIPT_BYTES, max_string_bytes=MAX_TIMING_RECEIPT_BYTES,
         )
+
+
+class TimingReceiptError(ValueError):
+    """Value-safe receipt input refusal."""
+
+    code = "timing_receipt_invalid"
+
+
+def load_timing_receipt(path: Path) -> CommandTimingReceipt:
+    """Read one complete bounded regular file; never an evidence envelope."""
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        if os.name == "nt":
+            from anvil.verification_profiles import _windows_open
+            descriptor = _windows_open(path, directory=False)
+        elif hasattr(os, "O_NOFOLLOW"):
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        else:
+            raise OSError("safe file opening unavailable")
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode)
+                    or before.st_size > MAX_TIMING_RECEIPT_BYTES
+                    or (getattr(before, "st_file_attributes", 0)
+                        & stat.FILE_ATTRIBUTE_REPARSE_POINT)):
+                raise ValueError("invalid file")
+            raw = bytearray()
+            while len(raw) <= MAX_TIMING_RECEIPT_BYTES:
+                chunk = stream.read(MAX_TIMING_RECEIPT_BYTES + 1 - len(raw))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            after = os.fstat(stream.fileno())
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if (len(raw) > MAX_TIMING_RECEIPT_BYTES
+                    or any(getattr(before, key) != getattr(after, key) for key in fields)):
+                raise ValueError("changed or oversized file")
+        return CommandTimingReceipt.model_validate(
+            json.loads(raw.decode("utf-8"), object_pairs_hook=unique),
+        )
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        raise TimingReceiptError(
+            "timing receipt must be a complete bounded UTF-8 JSON regular file",
+        ) from exc
