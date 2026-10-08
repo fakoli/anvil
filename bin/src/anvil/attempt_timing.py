@@ -52,7 +52,10 @@ def _union(intervals: list[tuple[datetime, datetime]]) -> int | None:
 
 def _bound(attribution: dict, claim: dict, project_id: str) -> bool:
     context = claim.get("attestation_context")
-    return bool(context) and all(
+    if context is None:
+        expected = claim.get("proof_attribution")
+        return bool(expected) and all(attribution.get(k) == v for k, v in expected.items())
+    return all(
         attribution.get(key) == value
         for key, value in {
             "project_id": project_id, "task_id": claim["task_id"],
@@ -195,7 +198,7 @@ def project_attempt_timing(
                 "utc_interval": _interval(receipt.started_at, receipt.ended_at, kind="observed"),
             })
 
-    attempts, all_intervals, monotonic = [], [], []
+    attempts, all_intervals = [], []
     proof_seen = set()
     for claim in claims:
         if claim["id"] not in created:
@@ -239,10 +242,7 @@ def project_attempt_timing(
             (_utc(item["started_at"]), _utc(item["ended_at"]))
             for item in intervals if item["status"] == "observed"
         ]
-        measured = [sample["monotonic_elapsed_us"] for sample in samples
-                    if sample["monotonic_elapsed_us"] is not None]
         all_intervals.extend(valid_intervals)
-        monotonic.extend(measured)
         release = terminal.get(claim["id"])
         cycle = _interval(claim["created_at"], release["timestamp"] if release else observation_at,
                           kind="inferred" if release else "running")
@@ -269,7 +269,8 @@ def project_attempt_timing(
             "authoring_freeze_interval": "unknown", "external_wait": "unknown",
             "verification": {
                 "observations": samples, "utc_elapsed_union_us": _union(valid_intervals),
-                "summed_monotonic_execution_us": sum(measured) if measured else None,
+                **_execution_totals(samples),
+                "proof_intervals": proof_intervals,
                 "summed_proof_utc_interval_us": sum(proof_us) if proof_us else None,
                 "proof_interval_samples": len(proof_intervals),
                 "capture_only_samples": capture_only,
@@ -294,6 +295,57 @@ def project_attempt_timing(
         "legacy_review_binding_count": sum(
             review["binding_status"] == "legacy_unknown" for review in reviews),
         "utc_verification_elapsed_union_us": _union(all_intervals),
-        "summed_monotonic_execution_us": sum(monotonic) if monotonic else None,
+        **_execution_totals([sample for items in observations.values() for sample in items]),
         "forecast": "unavailable", "mutation_authority": False,
+    }
+
+
+def _execution_totals(samples: list[dict]) -> dict[str, Any]:
+    complete = [
+        s["monotonic_elapsed_us"]
+        for s in samples
+        if s["outcome"] in {"succeeded", "failed"} and s["monotonic_elapsed_us"] is not None
+    ]
+    partial = [
+        s["monotonic_elapsed_us"]
+        for s in samples
+        if s["outcome"] == "interrupted" and s["monotonic_elapsed_us"] is not None
+    ]
+    return {
+        "summed_monotonic_execution_us": sum(complete + partial) if complete or partial else None,
+        "complete_monotonic_execution_us": sum(complete) if complete else None,
+        "interrupted_monotonic_observed_us": sum(partial) if partial else None,
+        "monotonic_total_status": (
+            "mixed_partial"
+            if complete and partial
+            else "partial"
+            if partial
+            else "complete"
+            if complete
+            else "unknown"
+        ),
+    }
+
+
+def project_bundle_timing(members: list[dict]) -> dict[str, Any]:
+    """Union observed member intervals while retaining partial execution separately."""
+    timings = [member["timing"] for member in members]
+    samples, intervals = [], []
+    for timing in timings:
+        for attempt in timing["attempts"]:
+            verification = attempt["verification"]
+            samples.extend(verification["observations"])
+            for interval in [
+                sample["utc_interval"] for sample in verification["observations"]
+            ] + verification["proof_intervals"]:
+                if interval["status"] == "observed":
+                    intervals.append((_utc(interval["started_at"]), _utc(interval["ended_at"])))
+    return {
+        "schema_version": 1,
+        "member_count": len(members),
+        "utc_verification_elapsed_union_us": _union(intervals),
+        **_execution_totals(samples),
+        "unattributed_timing_count": sum(t["unattributed_timing_count"] for t in timings),
+        "forecast": "unavailable",
+        "mutation_authority": False,
     }

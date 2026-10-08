@@ -13,7 +13,7 @@ from typing import Any, BinaryIO, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from anvil.attempt_timing import project_attempt_timing
+from anvil.attempt_timing import project_attempt_timing, project_bundle_timing
 from anvil.project_snapshot import (
     ProjectSnapshotError,
     _event_cursor,
@@ -24,8 +24,17 @@ from anvil.project_snapshot import (
 from anvil.read_contracts import PrdScopedRefV1, ReadErrorCode
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
-from anvil.state.models import Claim, Evidence, Task, TaskStatus
-from anvil.state.payloads import TaskAppliedPayload
+from anvil.state.models import (
+    BundleCheckpoint,
+    Claim,
+    Evidence,
+    ExecutionBundle,
+    HookCommandAttribution,
+    Task,
+    TaskStatus,
+    task_snapshot_revision,
+)
+from anvil.state.payloads import BundleCreatedPayload, TaskAppliedPayload
 from anvil.state.sqlite import query_only_transaction
 
 SCHEMA_ID = "anvil.state.attempt-view.v1"
@@ -209,6 +218,46 @@ def read_attempt_view(
     prd_id: str | None = None,
     limits: AttemptViewLimits | Mapping[str, Any] | None = None,
     observation_at: str | None = None,
+    bundle: bool = False,
+) -> dict[str, Any]:
+    return _read_frontier(
+        state_dir,
+        task_id,
+        prd_id=prd_id,
+        limits=limits,
+        observation_at=observation_at,
+        bundle=bundle,
+    )
+
+
+def read_evidence_preflight(
+    state_dir: str | os.PathLike[str],
+    task_id: str,
+    *,
+    prd_id: str | None = None,
+    limits: AttemptViewLimits | Mapping[str, Any] | None = None,
+    observation_at: str | None = None,
+) -> dict[str, Any]:
+    """Inspect the complete buffer under one read frontier; never authorize submit."""
+    return _read_frontier(
+        state_dir,
+        task_id,
+        prd_id=prd_id,
+        limits=limits,
+        observation_at=observation_at,
+        preflight=True,
+    )
+
+
+def _read_frontier(
+    state_dir,
+    task_id,
+    *,
+    prd_id=None,
+    limits=None,
+    observation_at=None,
+    bundle=False,
+    preflight=False,
 ) -> dict[str, Any]:
     """Return complete current facts and labeled history, or a closed refusal.
 
@@ -217,6 +266,8 @@ def read_attempt_view(
     """
     applied = _limits(limits)
     try:
+        if type(bundle) is not bool:
+            _refuse(ReadErrorCode.invalid_request, field="bundle")
         if type(task_id) is not str or (prd_id is not None and type(prd_id) is not str):
             _refuse(ReadErrorCode.invalid_identifier, field="identity")
         if ":" in task_id:
@@ -227,8 +278,13 @@ def read_attempt_view(
         else:
             local = task_id
         scope = prd_id or "default"
-        _task_ref(scope, local)
-        stored = local if scope == "default" else f"{scope}:{local}"
+        if bundle:
+            if not task_id.strip() or len(task_id) > 255 or any(ord(c) < 32 for c in task_id):
+                _refuse(ReadErrorCode.invalid_identifier, field="identity")
+            stored = task_id
+        else:
+            _task_ref(scope, local)
+            stored = local if scope == "default" else f"{scope}:{local}"
         root = Path(state_dir)
         with query_only_transaction(root / "state.db", root / "events.jsonl") as (conn, fh):
             bounded = _BoundedLog(fh, applied)
@@ -243,15 +299,21 @@ def read_attempt_view(
                 preflight_only=True,
             )
             cursor, identity = _event_cursor(conn, bounded)
-            result = _compose(conn, stored, scope, applied, observation_at)
+            if bundle:
+                result = _compose_bundle(conn, stored, prd_id, applied, observation_at)
+            elif preflight:
+                result = _compose(conn, stored, scope, applied, observation_at, preflight_root=root)
+            else:
+                result = _compose(conn, stored, scope, applied, observation_at)
             result.update(
-                schema_id=SCHEMA_ID,
+                schema_id="anvil.state.evidence-preflight.v1" if preflight else SCHEMA_ID,
                 operation_version=1,
                 event_cursor=cursor.model_dump(mode="json"),
                 applied_limits=asdict(applied),
             )
             encoded = _encode(result, applied)
-            result["view_digest"] = "sha256:" + hashlib.sha256(DIGEST_DOMAIN + encoded).hexdigest()
+            domain = b"anvil.state.evidence-preflight.v1\0" if preflight else DIGEST_DOMAIN
+            result["view_digest"] = "sha256:" + hashlib.sha256(domain + encoded).hexdigest()
             _encode(result, applied)
             _verify_event_identity(fh, identity)
             return result
@@ -278,21 +340,136 @@ def _encode(value: dict[str, Any], limits: AttemptViewLimits) -> bytes:
         _overflow("max_response_bytes", limits.max_response_bytes + 1, limits.max_response_bytes)
 
 
+def _delivery(bundle: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bundle_id": bundle["id"],
+        "recorded_status": bundle["status"],
+        "checkpoint": bundle.get("checkpoint"),
+        "deployed": "unknown",
+        "checkpoint_is_delivery_proof": False,
+    }
+
+
+def _compose_bundle(conn, bundle_id, scope, limits, observation_at):
+    budget, response_budget = [0, 0], [0]
+    row = _one(
+        _rows(
+            conn,
+            "execution_bundles",
+            "id, creation_event_id, prd_id, coordinator, status, review_disposition_event_id, "
+            "superseded_by, last_result_at, branch, review_policy, throughput_budget, "
+            "checkpoint, created_at, updated_at",
+            "id = ?",
+            (bundle_id,),
+            limits,
+            budget=budget,
+        )
+    )
+    if scope is not None and row["prd_id"] != scope:
+        _refuse(ReadErrorCode.missing_target, field="identity")
+    scope = row["prd_id"]
+    membership = _rows(
+        conn,
+        "execution_bundle_members",
+        "task_id, position",
+        "bundle_id = ?",
+        (bundle_id,),
+        limits,
+        order="position",
+        budget=budget,
+    )
+    if [m["position"] for m in membership] != list(range(len(membership))):
+        _refuse(ReadErrorCode.projection_not_converged, field="membership")
+    row["task_ids"] = [m["task_id"] for m in membership]
+    bundle = ExecutionBundle.model_validate_json(
+        canonical_json_bytes(_json_columns(row, "review_policy throughput_budget checkpoint")),
+        strict=True,
+    )
+    creation = _one(
+        _rows(
+            conn,
+            "events",
+            "id, action, target_kind, target_id, payload_json",
+            "id = ?",
+            (bundle.creation_event_id,),
+            limits,
+            budget=budget,
+        )
+    )
+    source = BundleCreatedPayload.model_validate(
+        _json_columns(creation, "payload_json")["payload_json"]
+    )
+    if (
+        creation["action"] != "bundle.created"
+        or creation["target_kind"] != "bundle"
+        or creation["target_id"] != bundle_id
+        or source.id != bundle_id
+        or source.prd_id != scope
+        or source.task_ids != bundle.task_ids
+        or source.coordinator != bundle.coordinator
+    ):
+        _refuse(ReadErrorCode.projection_not_converged, field="membership")
+    safe = _pick(
+        bundle.model_dump(mode="json"),
+        "id creation_event_id prd_id task_ids coordinator status review_disposition_event_id "
+        "superseded_by last_result_at branch review_policy throughput_budget checkpoint "
+        "created_at updated_at",
+    )
+    safe["reviews"] = _rows(conn, "bundle_review_verdicts",
+        "id, creation_event_id, disposition_event_id, review_round, angle, reviewed_by, "
+        "decision, created_at", "bundle_id = ?", (bundle_id,), limits,
+        order="rowid", budget=budget)
+    if any(review["creation_event_id"] != bundle.creation_event_id for review in safe["reviews"]):
+        _refuse(ReadErrorCode.projection_not_converged, field="reviews")
+    response_budget[0] += len(_encode(safe, limits))
+    members = [
+        _compose(
+            conn,
+            task_id,
+            scope,
+            limits,
+            observation_at,
+            budget=budget,
+            response_budget=response_budget,
+        )
+        for task_id in bundle.task_ids
+    ]
+    project_ids = {member["identity"]["project_id"] for member in members}
+    if len(project_ids) != 1:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="identity")
+    return {
+        "identity": {
+            "project_id": members[0]["identity"]["project_id"],
+            "prd_id": scope,
+            "bundle_id": bundle_id,
+        },
+        "bundle": safe,
+        "members": members,
+        "timing": project_bundle_timing(members),
+        "source_delivery": _delivery(safe),
+        "custody": {"external_owner_state": "unknown", "runner_stop": "unknown"},
+        "mutation_authority": False,
+    }
+
+
 def _compose(
     conn: sqlite3.Connection,
     stored: str,
     scope: str,
     limits: AttemptViewLimits,
     observation_at: str | None = None,
+    *,
+    budget: list[int] | None = None,
+    response_budget: list[int] | None = None,
+    preflight_root: Path | None = None,
 ) -> dict[str, Any]:
-    budget = [0, 0]  # cumulative transferred records and bytes, across every query
-    response_bytes = 0
+    budget = [0, 0] if budget is None else budget
+    response_budget = [0] if response_budget is None else response_budget
 
     def reserve_response(value: dict[str, Any]) -> None:
-        nonlocal response_bytes
-        response_bytes += len(_encode(value, limits))
-        if response_bytes > limits.max_response_bytes:
-            _overflow("max_response_bytes", response_bytes, limits.max_response_bytes)
+        response_budget[0] += len(_encode(value, limits))
+        if response_budget[0] > limits.max_response_bytes:
+            _overflow("max_response_bytes", response_budget[0], limits.max_response_bytes)
 
     def rows(
         table: str, columns: str, where: str = "1", args: tuple = (), *, order: str = "id"
@@ -308,7 +485,7 @@ def _compose(
             "tasks",
             "id, feature_id, prd_id, title, description, status, priority, task_type, "
             "dependencies, conflict_groups, scores, acceptance_criteria, implementation_notes, "
-            "verification, claims, parent_task_id, created_at, updated_at",
+            "verification, claims, likely_files, parent_task_id, created_at, updated_at",
             "id = ? AND prd_id = ?",
             (stored, scope),
         )
@@ -316,12 +493,11 @@ def _compose(
     task_data = _json_columns(
         task_row,
         "dependencies conflict_groups scores acceptance_criteria "
-        "implementation_notes verification claims",
+        "implementation_notes verification claims likely_files",
     )
-    task_data.pop("prd_id")
-    task = Task.model_validate_json(canonical_json_bytes(task_data), strict=True).model_dump(
-        mode="json"
-    )
+    # Match the native row reader, including JSON arrays in frozen profile bindings.
+    typed_task = Task.model_validate(task_data)
+    task = typed_task.model_dump(mode="json")
     reserve_response(task)
     feature = _one(
         rows(
@@ -363,13 +539,13 @@ def _compose(
         "claims",
         "id, task_id, claimed_by, claim_type, status, generation, root_set, "
         "bundle_claim_id, attestation_context, created_at, lease_expires_at, last_heartbeat_at, "
-        "released_at, release_reason",
+        "released_at, release_reason, git_metadata, branch, worktree_path",
         "task_id = ?",
         (stored,),
         order="generation",
     ):
         claim = Claim.model_validate_json(
-            canonical_json_bytes(_json_columns(raw, "root_set attestation_context")),
+            canonical_json_bytes(_json_columns(raw, "root_set attestation_context git_metadata")),
             strict=True,
         ).model_dump(mode="json")
         safe = _pick(
@@ -377,6 +553,27 @@ def _compose(
             "id task_id claimed_by claim_type status generation bundle_claim_id "
             "created_at lease_expires_at last_heartbeat_at released_at release_reason",
         )
+        context = claim.get("attestation_context")
+        safe["proof_attribution"] = HookCommandAttribution(
+            project_id=project["id"],
+            claim_id=claim["id"],
+            generation=claim["generation"],
+            claimed_by=claim["claimed_by"],
+            task_id=claim["task_id"],
+            task_revision=context["task_revision"]
+            if context
+            else task_snapshot_revision(typed_task),
+            prd_id=context["prd_id"] if context else scope,
+            prd_revision=context["prd_revision"] if context else prd["revision"],
+            repository_id=context["repository_id"] if context else None,
+            claim_start_sha=context["claim_start_sha"] if context else None,
+        ).model_dump(mode="json")
+        if claim.get("git_metadata"):
+            safe["git_metadata"] = _pick(
+                claim["git_metadata"],
+                "schema_version mode selected_default_base_ref selected_default_base_sha "
+                "claim_start_ref claim_start_sha branch",
+            )
         root = claim.get("root_set")
         if root:
             safe["root_set"] = _pick(
@@ -385,15 +582,67 @@ def _compose(
                 "root_set_digest reservation_id",
             )
             safe["root_set"]["root_facts"] = [
-                _pick(fact, "root_id repository_id claim_start_sha") for fact in root["root_facts"]
+                _pick(fact, "root_id repository_id baseline_sha") for fact in root["root_facts"]
             ]
         reserve_response(safe)
         claims.append(safe)
-        timing_claims.append(claim)
+        timing_claims.append({**claim, "proof_attribution": safe["proof_attribution"]})
     by_claim = {claim["id"]: claim for claim in claims}
     active = [claim for claim in claims if claim["status"] == "active"]
     if len(active) > 1:
         _refuse(ReadErrorCode.invalid_hierarchy, field="claims")
+
+    if preflight_root is not None:
+        from anvil.claims.evidence_import import (
+            CommandBufferInspection,
+            CommandProofImportOverflow,
+            inspect_command_buffer,
+            project_evidence_preflight,
+        )
+
+        current = active[0] if active else (claims[-1] if claims else None)
+        parent = None
+        if current and current.get("bundle_claim_id"):
+            parent = _one(
+                rows(
+                    "bundle_claims",
+                    "id, bundle_id, claimed_by, status, released_at, lease_expires_at, "
+                    "member_claim_ids",
+                    "id = ?",
+                    (current["bundle_claim_id"],),
+                )
+            )
+            parent = _json_columns(parent, "member_claim_ids")
+            bundle_row = _one(
+                rows(
+                    "execution_bundles", "id, coordinator, status", "id = ?", (parent["bundle_id"],)
+                )
+            )
+            parent["bundle_status"] = bundle_row["status"]
+            parent["coordinator"] = bundle_row["coordinator"]
+            if parent["member_claim_ids"].get(stored) != current["id"]:
+                _refuse(ReadErrorCode.projection_not_converged, field="claims")
+        try:
+            inspection = (
+                inspect_command_buffer(preflight_root, current["id"])
+                if current
+                else CommandBufferInspection("ineligible", None, 0, 0, (), ())
+            )
+            return project_evidence_preflight(
+                identity={
+                    "project_id": project["id"],
+                    "prd_id": scope,
+                    "task_id": _local_entity_id(stored, scope),
+                    "stored_task_id": stored,
+                },
+                task=typed_task,
+                claim=current,
+                inspection=inspection,
+                observation_at=observation_at,
+                bundle_claim=parent, prd_revision=prd["revision"],
+            )
+        except CommandProofImportOverflow:
+            _refuse(ReadErrorCode.invalid_hierarchy, field="buffer")
 
     events, timing_events = [], []
     event_rows = rows(
@@ -529,6 +778,35 @@ def _compose(
             causal_order=event["causal_order"],
             binding_status="exact" if attempt is not None else "legacy_unknown",
         )
+        bound = by_evidence.get(attempt)
+        if bound:
+            review.update(
+                evidence_id=bound["id"],
+                evidence_event_id=bound["event_id"],
+                claim_id=bound["claim_id"],
+                generation=bound["generation"],
+            )
+        if material.invalidation:
+            accepted_event = review_events.get(f"RV-{material.invalidation.accepted_event_id}")
+            accepted_material = review_materials.get(
+                f"RV-{material.invalidation.accepted_event_id}"
+            )
+            if (
+                accepted_event is None
+                or accepted_material.decision != "accepted"
+                or accepted_material.review_attempt_id != attempt
+                or accepted_event["causal_order"] >= event["causal_order"]
+            ):
+                _refuse(ReadErrorCode.projection_not_converged, field="invalidation")
+            review.pop("notes", None)
+            review["kind"] = "acceptance_invalidation"
+            review["counts_toward_quality_rejection"] = False
+            review["invalidation"] = _pick(
+                material.invalidation.model_dump(mode="json"),
+                "accepted_event_id binding_digest decision_id evidence_gap_sha256 "
+                "evidence_gap_reviewed_by",
+            )
+            review["invalidation"]["event_id"] = event["id"]
         reserve_response(review)
         reviews.append(review)
     if len(reviews) != len(review_events):
@@ -557,11 +835,16 @@ def _compose(
             rows(
                 "execution_bundles",
                 "id, prd_id, creation_event_id, coordinator, status, "
-                "review_disposition_event_id, superseded_by, last_result_at",
+                "review_disposition_event_id, superseded_by, last_result_at, checkpoint",
                 "id = ?",
                 (membership["bundle_id"],),
             )
         )
+        bundle = _json_columns(bundle, "checkpoint")
+        if bundle["checkpoint"] is not None:
+            bundle["checkpoint"] = BundleCheckpoint.model_validate(bundle["checkpoint"]).model_dump(
+                mode="json"
+            )
         bundle["claims"] = rows(
             "bundle_claims",
             "id, bundle_id, claimed_by, status, created_at, "
@@ -573,8 +856,12 @@ def _compose(
         bundles.append(bundle)
     accepted = [review for review in reviews if review["decision"] == "accepted"]
     timing = project_attempt_timing(
-        project_id=project["id"], claims=timing_claims, events=timing_events,
-        evidence=evidence, reviews=reviews, observation_at=observation_at,
+        project_id=project["id"],
+        claims=timing_claims,
+        events=timing_events,
+        evidence=evidence,
+        reviews=reviews,
+        observation_at=observation_at,
     )
     reserve_response(timing)
     return {
@@ -609,14 +896,16 @@ def _compose(
             "task_status": task["status"],
             "accepted": task["status"] in {"accepted", "done"},
             "latest_accepted_event_id": accepted[-1]["event_id"] if accepted else None,
-            "invalidation": "unknown",
+            "invalidation": next(
+                (r["invalidation"] for r in reversed(reviews) if "invalidation" in r), None
+            ),
         },
         "custody": {
             "bundles": bundles,
             "external_owner_state": "unknown",
             "runner_stop": "unknown",
         },
-        "source_delivery": "unknown",
+        "source_delivery": [_delivery(b) for b in bundles] if bundles else "unknown",
         "timing": timing,
         "mutation_authority": False,
         "events": events,
