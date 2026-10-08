@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -38,7 +40,9 @@ def test_explicit_path_home_override_wins(
     assert RootSetRegistry().base == explicit / ".anvil" / "root-sets"
 
 
-def test_default_environment_values_are_preserved(tmp_path: Path) -> None:
-    # A disposable resolver is enough; the process home and caches stay intact.
-    assert Path.home() == tmp_path / "anvil-home"
-    assert os.environ.get("HOME") != str(Path.home())
+def test_subprocess_inherits_disposable_owner_home(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", "from pathlib import Path; print(Path.home())"],
+        capture_output=True, text=True, check=True,
+    )
+    assert Path(result.stdout.strip()) == tmp_path / "anvil-home"
