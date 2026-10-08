@@ -18,6 +18,8 @@ def test_default_home_is_empty_and_per_test(tmp_path: Path) -> None:
     registry = RootSetRegistry()
     assert registry.base == Path.home() / ".anvil" / "root-sets"
     assert not registry.base.exists()
+    assert os.environ["XDG_CONFIG_HOME"] == str(Path.home() / ".config")
+    assert all(key not in os.environ for key in ("ANVIL_ROOT", "ANVIL_PRD", "ANVIL_ACTOR", "ANVIL_CLAIM_ID"))
 
 
 def test_explicit_environment_override_keeps_platform_semantics(
