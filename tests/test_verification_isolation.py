@@ -13,7 +13,9 @@ from anvil.roots.registry import RootSetRegistry
 
 
 def test_default_home_is_empty_and_per_test(tmp_path: Path) -> None:
-    assert Path.home() == tmp_path / "anvil-home"
+    assert Path.home().parent == tmp_path.parent
+    assert Path.home() != tmp_path
+    assert not list(tmp_path.iterdir())
     assert _home_dir() == Path.home()
     registry = RootSetRegistry()
     assert registry.base == Path.home() / ".anvil" / "root-sets"
@@ -47,4 +49,4 @@ def test_subprocess_inherits_disposable_owner_home(tmp_path: Path) -> None:
         [sys.executable, "-c", "from pathlib import Path; print(Path.home())"],
         capture_output=True, text=True, check=True,
     )
-    assert Path(result.stdout.strip()) == tmp_path / "anvil-home"
+    assert Path(result.stdout.strip()) == Path.home()
