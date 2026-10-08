@@ -22,7 +22,6 @@ from anvil.verification_profiles import (
     resolve_profile,
 )
 
-
 MANIFEST_TEXT = '''schema_version = 1
 [profiles.full]
 source_files = ["tools/verify.py"]
