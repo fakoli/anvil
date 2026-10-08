@@ -44,8 +44,9 @@ may lower them:
 | `max_cell_bytes` | 256 KiB per projected cell, excluding event payloads |
 | `max_response_bytes` | 64 KiB, including digest and limits |
 
-Every associated row collection is also bounded by the record ceiling, and each
-selected collection's aggregate cells are bounded by the log-byte ceiling. The
+Transferred rows and bytes share cumulative record and log-byte ceilings across
+all composition queries. Repeated feature requirement references resolve once;
+safe collection entries consume the response budget before expansion continues. The
 whole-history validation scan is deliberate. These ceilings accommodate the
 measured 17 MiB / 9,543-event project history used for qualification; larger
 projects require an engine-maintained incremental frontier before another increase.

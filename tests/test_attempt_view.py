@@ -16,7 +16,16 @@ from anvil.read_contracts import ReadErrorCode
 from anvil.roots import registry
 from anvil.state.models import RejectionReasonCode
 from anvil.state.sqlite import SqliteBackend
-from tests.test_project_snapshot import _NOW, _event, _seed, _state_path
+from tests.test_project_snapshot import (
+    _NOW,
+    _event,
+    _feature_payload,
+    _prd_payload,
+    _project_payload,
+    _seed,
+    _state_path,
+    _task_payload,
+)
 from tests.test_sqlite import (
     _make_applied_payload,
     _make_claim_command_proof,
@@ -220,6 +229,65 @@ def test_limits_are_lower_only_and_total_gate_precedes_scan(populated, monkeypat
     monkeypatch.setattr(view_module, "_event_cursor", forbidden)
     with pytest.raises(ProjectSnapshotError) as error:
         _read(populated, limits={"max_event_log_bytes": 1})
+    assert error.value.error.field == "max_event_log_bytes"
+
+
+@pytest.mark.parametrize("prd", ["default", "named"])
+def test_native_four_digit_task_and_dependency_refs(populated, prd):
+    prefix = "" if prd == "default" else f"{prd}:"
+    feature = prefix + "F001"
+    for local, dependencies in (("T1000", []), ("T002", [prefix + "T1000"])):
+        target = prefix + local
+        populated.append(_event("task.created", _task_payload(
+            target, feature, prd, dependencies=dependencies,
+        ), kind="task", target=target))
+    assert _read(populated, prefix + "T1000")["identity"]["task_id"] == "T1000"
+    assert _read(populated, prefix + "T002")["dependencies"][0]["ref"] == {
+        "prd_id": prd, "task_id": "T1000",
+    }
+
+
+@pytest.mark.parametrize("target", ["T1", "T1000\n", "T1000/private", "T1000:evil"])
+def test_invalid_native_task_refs_refuse(populated, target):
+    with pytest.raises(ProjectSnapshotError):
+        _read(populated, target)
+
+
+def test_requirement_resolution_is_unique_and_cumulatively_bounded(backend, monkeypatch):
+    backend.append(_event("project.created", _project_payload(), kind="project", target="project-1"))
+    prd = _prd_payload("default", title="", source=None)
+    prd["requirements"] = [{"id": "R001", "text": "x" * 4000, "prd_section": "requirements"}]
+    backend.append(_event("prd.parsed", prd, kind="prd", target="default"))
+    feature = _feature_payload("F001", "default")
+    feature["requirements"] = ["R001"] * 100
+    backend.append(_event("feature.created", feature, kind="feature", target="F001"))
+    backend.append(_event("task.created", _task_payload("T001", "F001", "default", dependencies=[]),
+                          kind="task", target="T001"))
+    original = view_module._rows
+    reads = []
+
+    def observed(conn, table, *args, **kwargs):
+        result = original(conn, table, *args, **kwargs)
+        if table == "requirements":
+            reads.append(sum(len(row["text"]) for row in result))
+        return result
+
+    monkeypatch.setattr(view_module, "_rows", observed)
+    assert len(_read(backend)["requirements"]) == 1
+    assert reads == [4000]
+    reads.clear()
+    with pytest.raises(ProjectSnapshotError) as error:
+        _read(backend, limits={"max_event_records": 4, "max_event_log_bytes": 16000})
+    assert error.value.error.field == "max_event_records"
+    assert reads == []
+
+    # A second individually valid query must not get a fresh allocation budget.
+    conn = backend._require_conn()
+    budget = [0, 0]
+    limits = view_module.AttemptViewLimits(max_event_log_bytes=6000)
+    original(conn, "requirements", "text", "id = ?", ("R001",), limits, budget=budget)
+    with pytest.raises(ProjectSnapshotError) as error:
+        original(conn, "requirements", "text", "id = ?", ("R001",), limits, budget=budget)
     assert error.value.error.field == "max_event_log_bytes"
 
 

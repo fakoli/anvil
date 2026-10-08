@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -19,7 +20,7 @@ from anvil.project_snapshot import (
     _strict_json,
     _verify_event_identity,
 )
-from anvil.read_contracts import ReadErrorCode, TaskScopedRefV1
+from anvil.read_contracts import PrdScopedRefV1, ReadErrorCode
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
 from anvil.state.models import Claim, Evidence, Task, TaskStatus
@@ -131,6 +132,7 @@ def _rows(
     *,
     order: str = "id",
     preflight_only: bool = False,
+    budget: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Inspect byte lengths in SQLite before transferring any projected cell."""
     names = [name.split(" AS ")[0] for name in columns.split(", ")]
@@ -153,6 +155,13 @@ def _rows(
     ).fetchone()[0]
     if total > limits.max_event_log_bytes:
         _overflow("max_event_log_bytes", total, limits.max_event_log_bytes)
+    if budget is not None:
+        budget[0] += count
+        budget[1] += total
+        if budget[0] > limits.max_event_records:
+            _overflow("max_event_records", budget[0], limits.max_event_records)
+        if budget[1] > limits.max_event_log_bytes:
+            _overflow("max_event_log_bytes", budget[1], limits.max_event_log_bytes)
     if preflight_only:
         return []
     return [
@@ -184,6 +193,14 @@ def _pick(value: dict[str, Any], names: str) -> dict[str, Any]:
     return {key: value[key] for key in names.split() if key in value}
 
 
+def _task_ref(prd_id: str, task_id: str) -> dict[str, str]:
+    # Native task numbers have minimum width three; provider v1 is narrower.
+    reference = PrdScopedRefV1(prd_id=prd_id).model_dump(mode="json")
+    if type(task_id) is not str or re.fullmatch(r"T[0-9]{3,}(?:\.[0-9]+)*", task_id) is None:
+        _refuse(ReadErrorCode.invalid_identifier, field="identity")
+    return {**reference, "task_id": task_id}
+
+
 def read_attempt_view(
     state_dir: str | os.PathLike[str],
     task_id: str,
@@ -208,7 +225,7 @@ def read_attempt_view(
         else:
             local = task_id
         scope = prd_id or "default"
-        TaskScopedRefV1(prd_id=scope, task_id=local)
+        _task_ref(scope, local)
         stored = local if scope == "default" else f"{scope}:{local}"
         root = Path(state_dir)
         with query_only_transaction(root / "state.db", root / "events.jsonl") as (conn, fh):
@@ -265,10 +282,19 @@ def _compose(
     scope: str,
     limits: AttemptViewLimits,
 ) -> dict[str, Any]:
+    budget = [0, 0]  # cumulative transferred records and bytes, across every query
+    response_bytes = 0
+
+    def reserve_response(value: dict[str, Any]) -> None:
+        nonlocal response_bytes
+        response_bytes += len(_encode(value, limits))
+        if response_bytes > limits.max_response_bytes:
+            _overflow("max_response_bytes", response_bytes, limits.max_response_bytes)
+
     def rows(
         table: str, columns: str, where: str = "1", args: tuple = (), *, order: str = "id"
     ) -> list[dict[str, Any]]:
-        return _rows(conn, table, columns, where, args, limits, order=order)
+        return _rows(conn, table, columns, where, args, limits, order=order, budget=budget)
 
     project = _one(rows("projects", "id, name"))
     prd = _one(rows("prds", "id, project_id, revision, status", "id = ?", (scope,)))
@@ -293,7 +319,7 @@ def _compose(
     task = Task.model_validate_json(canonical_json_bytes(task_data), strict=True).model_dump(
         mode="json"
     )
-    _encode(task, limits)
+    reserve_response(task)
     feature = _one(
         rows(
             "features",
@@ -306,31 +332,28 @@ def _compose(
     if type(requirement_ids) is not list or any(type(item) is not str for item in requirement_ids):
         _refuse(ReadErrorCode.invalid_hierarchy, field="requirements")
     requirements = []
-    for req_id in requirement_ids:
-        requirements.append(
-            _one(
-                rows(
-                    "requirements",
-                    "id, prd_id, text, prd_section, revision_introduced, revision_superseded",
-                    "id = ? AND prd_id = ?",
-                    (req_id, scope),
-                )
+    for req_id in dict.fromkeys(requirement_ids):
+        requirement = _one(
+            rows(
+                "requirements",
+                "id, prd_id, text, prd_section, revision_introduced, revision_superseded",
+                "id = ? AND prd_id = ?",
+                (req_id, scope),
             )
         )
+        reserve_response(requirement)
+        requirements.append(requirement)
     dependencies = []
     for dep_id in task["dependencies"]:
         dep = _one(rows("tasks", "id, prd_id, status", "id = ?", (dep_id,)))
         TaskStatus(dep["status"])
-        dependencies.append(
-            {
-                "ref": TaskScopedRefV1(
-                    prd_id=dep["prd_id"],
-                    task_id=_local_entity_id(dep["id"], dep["prd_id"]),
-                ).model_dump(mode="json"),
-                "stored_task_id": dep["id"],
-                "status": dep["status"],
-            }
-        )
+        dependency = {
+            "ref": _task_ref(dep["prd_id"], _local_entity_id(dep["id"], dep["prd_id"])),
+            "stored_task_id": dep["id"],
+            "status": dep["status"],
+        }
+        reserve_response(dependency)
+        dependencies.append(dependency)
 
     claims = []
     for raw in rows(
@@ -361,6 +384,7 @@ def _compose(
             safe["root_set"]["root_facts"] = [
                 _pick(fact, "root_id repository_id claim_start_sha") for fact in root["root_facts"]
             ]
+        reserve_response(safe)
         claims.append(safe)
     by_claim = {claim["id"]: claim for claim in claims}
     active = [claim for claim in claims if claim["status"] == "active"]
@@ -391,6 +415,7 @@ def _compose(
             "created_at noted_at phase rejection",
         )
         # Never return arbitrary event payloads (source bytes, root paths, logs).
+        reserve_response(event)
         events.append(event)
         if row["action"] == "evidence.submitted":
             evidence_id = payload.get("evidence_id")
@@ -436,6 +461,7 @@ def _compose(
             generation=claim["generation"],
             proofs=[_proof(p) for p in item["proofs"]],
         )
+        reserve_response(safe)
         evidence.append(safe)
     if len(evidence_events) != len(evidence):
         _refuse(ReadErrorCode.projection_not_converged, field="evidence")
@@ -494,6 +520,7 @@ def _compose(
             causal_order=event["causal_order"],
             binding_status="exact" if attempt is not None else "legacy_unknown",
         )
+        reserve_response(review)
         reviews.append(review)
     if len(reviews) != len(review_events):
         _refuse(ReadErrorCode.projection_not_converged, field="reviews")
@@ -533,6 +560,7 @@ def _compose(
             "bundle_id = ?",
             (bundle["id"],),
         )
+        reserve_response(bundle)
         bundles.append(bundle)
     accepted = [review for review in reviews if review["decision"] == "accepted"]
     return {
