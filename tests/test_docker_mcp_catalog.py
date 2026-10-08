@@ -35,6 +35,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import yaml
@@ -283,7 +284,7 @@ class TestDockerBuildSmoke:
 
     def test_build_and_help(self) -> None:
         root = _repo_root()
-        tag = "anvil-mcp:t021-test"
+        tag = f"anvil-mcp:t021-test-{uuid4().hex}"
         build = subprocess.run(
             ["docker", "build", "-t", tag, "."],
             cwd=str(root),

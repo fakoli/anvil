@@ -896,6 +896,7 @@ class SqliteBackend:
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
         schema_probe_fn: Callable[[str | os.PathLike[str]], int] | None = None,
+        project_root: str | os.PathLike[str] | None = None,
     ) -> None:
         self._db_path = db_path
         self._events_path = events_path
@@ -905,6 +906,7 @@ class SqliteBackend:
         self._sleep_fn = sleep_fn
         self._monotonic_fn = monotonic_fn
         self._schema_probe_fn = schema_probe_fn
+        self._project_root = Path(project_root) if project_root is not None else None
         self._conn: sqlite3.Connection | None = None
         # In-memory monotonic counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
@@ -1374,12 +1376,51 @@ class SqliteBackend:
                 self._append_audit_line("idempotent_no_op", materialized_draft, reason)
                 return None
 
+            prepared_profiles = None
+            if action in {"claim.created", "bundle.claimed", "evidence.submitted"} or (
+                action == "task.applied" and typed_payload.decision == "accepted"
+            ):
+                task_ids = (
+                    [member.task_id for member in typed_payload.member_claims]
+                    if action == "bundle.claimed" else [typed_payload.task_id]
+                )
+                prepared_profiles = {}
+                for task_id in task_ids:
+                    task = self.get_task(task_id)
+                    prd = self.get_prd(task.prd_id) if task and task.verification.profile else None
+                    prepared_profiles[task_id] = (task, prd.revision if prd else None)
+
             # Final caller-supplied invariant at the append linearization
             # point. This runs after authoritative state validation and before
             # id assignment or log mutation, so refusal cannot leave a usable
             # partial claim that must be compensated afterward.
             if pre_log_check is not None:
                 pre_log_check()
+
+            if action == "progress.noted" and typed_payload.timing is not None:
+                try:
+                    self._check_timing_noted(conn, typed_payload, materialized_draft)
+                except EventRejected as exc:
+                    self._append_audit_line("rejection", materialized_draft, str(exc))
+                    raise
+
+            if prepared_profiles is not None:
+                try:
+                    if pre_log_check is not None and any(
+                        task is not None and task.verification.profile is not None
+                        for task, _ in prepared_profiles.values()
+                    ):
+                        # A reentrant callback cannot change custody after its first check.
+                        try:
+                            spec.check(conn, typed_payload, materialized_draft)
+                        except IdempotentNoOp:
+                            raise EventRejected(
+                                "verification profile refused: binding_mismatch"
+                            ) from None
+                    self._check_live_profiles(conn, action, typed_payload, prepared_profiles)
+                except EventRejected as exc:
+                    self._append_audit_line("rejection", materialized_draft, str(exc))
+                    raise
 
             # ---- Phase 2: id assignment ----
             if self._events_storage == "git":
@@ -6472,6 +6513,164 @@ class SqliteBackend:
                 "progress.noted: only the exact active claim owner may record progress."
             )
 
+    def _check_live_profiles(
+        self, conn: sqlite3.Connection, action: str, payload: Any,
+        prepared: dict[str, tuple[Task | None, int | None]],
+    ) -> None:
+        """Inspect the exact execution checkout at final live append, never replay."""
+        for task_id, (original, revision) in prepared.items():
+            task = self.get_task(task_id)
+            if (
+                (original is None or original.verification.profile is None)
+                and (task is None or task.verification.profile is None)
+            ):
+                continue
+            current_prd = conn.execute(
+                "SELECT revision FROM prds WHERE id = ?", (task.prd_id if task else None,),
+            ).fetchone()
+            if task != original or current_prd is None or current_prd[0] != revision:
+                raise EventRejected("verification profile refused: binding_mismatch")
+            refusal = "verification profile refused: identity_unavailable"
+            if self._project_root is None:
+                raise EventRejected(refusal)
+            if action in {"claim.created", "bundle.claimed"}:
+                origin = payload
+            else:
+                claim_id = payload.claim_id if action == "evidence.submitted" else None
+                if action == "task.applied":
+                    evidence = conn.execute(
+                        "SELECT claim_id FROM evidence WHERE id = ? AND task_id = ?",
+                        (payload.review_attempt_id, task_id),
+                    ).fetchone()
+                    if evidence is not None:
+                        claim_id = evidence[0]
+                origin = self.get_claim(claim_id) if claim_id is not None else None
+                if origin is None or origin.task_id != task_id:
+                    raise EventRejected(refusal)
+                if action == "evidence.submitted" and (
+                    origin.status != ClaimStatus.active
+                    or origin.released_at is not None
+                    or origin.claimed_by != payload.submitted_by
+                    or origin.lease_expires_at <= self._clock.now()
+                ):
+                    raise EventRejected(refusal)
+            metadata = origin.git_metadata
+            root_set = getattr(origin, "root_set", None)
+            context = getattr(origin, "attestation_context", None)
+            if (
+                action == "claim.created" and context is not None
+                and context.task_revision != task_snapshot_revision(task)
+            ):
+                raise EventRejected("verification profile refused: binding_mismatch")
+            if root_set is not None:
+                from anvil.roots.registry import _LIVE_APPEND_AUTH, root_set_claim_authorized
+
+                if action == "claim.created":
+                    authorization = _LIVE_APPEND_AUTH.get()
+                    if (
+                        not isinstance(authorization, tuple)
+                        or not root_set_claim_authorized(root_set, authorization[1])
+                    ):
+                        raise EventRejected(refusal)
+                primary = next(fact for fact in root_set.root_facts
+                               if fact.root_id == root_set.primary_root_id)
+                target = Path(primary.claim_worktree)
+                baseline = primary.baseline_sha
+                canonical = Path(primary.canonical_root)
+                if primary.verification_commands != tuple(task.verification.commands):
+                    raise EventRejected(refusal)
+                if metadata is not None and (
+                    Path(metadata.target_path) != target or metadata.claim_start_sha != baseline
+                ):
+                    raise EventRejected(refusal)
+            elif metadata is not None:
+                target = Path(metadata.target_path)
+                canonical = Path(metadata.canonical_root)
+                baseline = metadata.claim_start_sha
+            else:
+                raise EventRejected(refusal)
+            from anvil.claims.progress_attestation import (
+                ProgressAttestationError,
+                inspect_local_repository,
+            )
+            from anvil.verification_profiles import ProfileError, require_profile_current
+
+            try:
+                project = self.get_project()
+                if project is None or not target.is_absolute() or not canonical.is_absolute():
+                    raise EventRejected(refusal)
+                selected = inspect_local_repository(self._project_root, project_id=project.id)
+                actual = inspect_local_repository(target, project_id=project.id)
+                recorded = inspect_local_repository(canonical, project_id=project.id)
+                if (
+                    actual.root != target.resolve(strict=True)
+                    or actual.common_dir != selected.common_dir
+                    or recorded.common_dir != selected.common_dir
+                    or (action in {"claim.created", "bundle.claimed"}
+                        and actual.head_oid != baseline)
+                    or (context is not None and actual.repository_id != context.repository_id)
+                ):
+                    raise EventRejected(refusal)
+                require_profile_current(task.verification, target)
+            except ProfileError as exc:
+                raise EventRejected(f"verification profile refused: {exc.code}") from None
+            except (ProgressAttestationError, OSError, RuntimeError, ValueError):
+                raise EventRejected(refusal) from None
+
+    def _check_timing_noted(
+        self,
+        conn: sqlite3.Connection,
+        payload: ProgressNotedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Bind observations at the final live append boundary, never replay."""
+        receipt = payload.timing
+        assert receipt is not None
+        attribution = receipt.attribution
+        refusal = "progress.noted: timing ownership, binding or lifetime mismatch."
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?", (attribution.claim_id,),
+        ).fetchone()
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        if (
+            event.target_kind != "task" or event.target_id != payload.task_id
+            or event.actor != payload.actor or payload.actor != attribution.claimed_by
+            or payload.task_id != attribution.task_id or project is None
+            or attribution.project_id != project[0] or row is None
+            or row[0] != attribution.task_id or row[1] != attribution.claimed_by
+            or row[2] != "active" or row[3] is not None
+            or row[4] != attribution.generation or row[5] is None or row[8] is not None
+        ):
+            raise EventRejected(refusal)
+        try:
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            parse = datetime.datetime.fromisoformat
+            created, expires = parse(row[6]), parse(row[7])
+            noted = parse(payload.noted_at)
+            start = parse(receipt.started_at)
+            end = parse(receipt.ended_at) if receipt.ended_at is not None else None
+            now = self._clock.now()
+            if (
+                any(getattr(context, field) != getattr(attribution, field) for field in (
+                    "repository_id", "claim_start_sha", "prd_id", "prd_revision", "task_revision",
+                ))
+                or noted != event.timestamp or not created <= noted <= now < expires
+                or not created <= start <= noted
+                or (end is not None and not created <= end <= noted)
+            ):
+                raise EventRejected(refusal)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise EventRejected(refusal) from None
+        task = conn.execute("SELECT prd_id FROM tasks WHERE id = ?", (row[0],)).fetchone()
+        prd = conn.execute("SELECT revision FROM prds WHERE id = ?", (context.prd_id,)).fetchone()
+        if (
+            task is None or task[0] != context.prd_id
+            or prd is None or prd[0] != context.prd_revision
+        ):
+            raise EventRejected(refusal)
+
     @staticmethod
     def _progress_attestation_proof_is_valid(
         payload: ProgressAttestedPayload,
@@ -7268,6 +7467,25 @@ class SqliteBackend:
                 f"(current revision is {current}, expected {current + 1})"
             )
         current_status = str(row[1])
+        if row[4] is not None:
+            content = conn.execute(
+                "SELECT payload_json FROM events WHERE id = ?", (row[4],)
+            ).fetchone()
+            previous_bindings = (
+                json.loads(content[0]).get("profile_bindings") if content is not None else None
+            )
+            if previous_bindings is not None:
+                if payload.profile_bindings is None:
+                    raise EventRejected("prd.revised: frozen profile bindings must be explicit.")
+                for binding in payload.profile_bindings.values():
+                    if any(
+                        previous["reference"] == binding.reference.model_dump(mode="json")
+                        and previous != binding.model_dump(mode="json")
+                        for previous in previous_bindings.values()
+                    ):
+                        raise EventRejected(
+                            "prd.revised: unchanged profile reference cannot rebind."
+                        )
         if (
             payload.expected_status is not None
             and payload.status != payload.expected_status
@@ -14351,6 +14569,13 @@ class SqliteBackend:
             d["source_bytes"] = bytes(d["source_bytes"])
         if "content_available" in d and d["content_available"] is not None:
             d["content_available"] = bool(d["content_available"])
+        if d.get("content_event_id") is not None:
+            content = self._require_conn().execute(
+                "SELECT payload_json FROM events WHERE id = ?",
+                (d["content_event_id"],),
+            ).fetchone()
+            if content is not None:
+                d["profile_bindings"] = json.loads(content[0]).get("profile_bindings")
         # Review #13: created_at / updated_at are backfilled by the v6->v7
         # migration via COALESCE(last_reviewed_at, project.created_at), both of
         # which are stored as tz-aware UTC ISO strings — so the PRD field

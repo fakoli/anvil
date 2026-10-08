@@ -27,6 +27,7 @@ import re
 from collections import defaultdict, deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -276,6 +277,7 @@ def build_prd_revision_draft(
     *,
     actor: str,
     clock: Clock,
+    project_root: Path | None = None,
 ) -> EventDraft | None:
     """Bind changed plan input to state as the batch's first operation.
 
@@ -300,6 +302,7 @@ def build_prd_revision_draft(
         is_default=existing_prd.is_default,
         actor=actor,
         clock=clock,
+        project_root=project_root,
     )
     if plan.action == "parsed":
         raise ValueError("planning source has no persisted PRD")
