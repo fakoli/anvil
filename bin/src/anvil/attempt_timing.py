@@ -1,19 +1,25 @@
 """Pure timing from one bounded native frontier. Observations are not authority."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from anvil.state.models import ClaimCommandEvidenceCore
-from anvil.state.payloads import ClaimCreatedPayload
+from anvil.state.payloads import (
+    BundleClaimedPayload,
+    BundleClaimReleasedPayload,
+    BundleClaimRenewedPayload,
+    BundleClaimStalePayload,
+    ClaimCreatedPayload,
+)
 from anvil.timing_receipts import CommandTimingReceipt
 
 
 def _utc(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
-    if parsed.utcoffset() != timedelta(0):
-        raise ValueError("timing requires UTC")
-    return parsed
+    if parsed.utcoffset() is None:
+        raise ValueError("timing requires an aware native timestamp")
+    return parsed.astimezone(UTC)
 
 
 def _us(delta: timedelta) -> int:
@@ -95,6 +101,49 @@ def project_attempt_timing(
                 raise ValueError("claim timing target disagrees with creation")
             created[claim["id"]] = event
             leases[claim["id"]] = source["lease_expires_at"]
+        elif action == "bundle.claimed":
+            source = BundleClaimedPayload.model_validate(payload).model_dump(mode="json")
+            if (event["target_kind"] != "bundle" or event["target_id"] != source["bundle_id"]
+                or event["actor"] != source["claimed_by"]):
+                raise ValueError("bundle timing target disagrees with creation")
+            for member in source["member_claims"]:
+                claim = by_claim.get(member["id"])
+                if claim is None:
+                    continue
+                if (
+                    claim["id"] in created or claim["bundle_claim_id"] != source["id"]
+                    or claim["task_id"] != member["task_id"]
+                    or claim["claimed_by"] != source["claimed_by"]
+                    or claim.get("attestation_context") is not None
+                    or _utc(claim["created_at"]) != _utc(source["created_at"])
+                ):
+                    raise ValueError("bundle child timing disagrees with creation")
+                created[claim["id"]] = event
+                leases[claim["id"]] = source["lease_expires_at"]
+        elif action in {"bundle.claim_renewed", "bundle.claim_released", "bundle.claim_stale"}:
+            model = {"bundle.claim_renewed": BundleClaimRenewedPayload,
+                     "bundle.claim_released": BundleClaimReleasedPayload,
+                     "bundle.claim_stale": BundleClaimStalePayload}[action]
+            source = model.model_validate(payload).model_dump(mode="json")
+            actor_field = {"bundle.claim_renewed": "renewed_by",
+                           "bundle.claim_released": "released_by",
+                           "bundle.claim_stale": "actor"}[action]
+            if event["actor"] != source[actor_field]:
+                raise ValueError("bundle timing lifecycle actor mismatch")
+            for claim in claims:
+                if claim.get("bundle_claim_id") != source["bundle_claim_id"]:
+                    continue
+                creation = created.get(claim["id"])
+                if (creation is None or event["target_kind"] != "bundle"
+                    or event["target_id"] != creation["payload"]["bundle_id"]
+                    or source["bundle_id"] != event["target_id"]
+                    or (action != "bundle.claim_stale"
+                        and source[actor_field] != claim["claimed_by"])):
+                    raise ValueError("bundle timing lifecycle binding mismatch")
+                if action == "bundle.claim_renewed":
+                    leases[claim["id"]] = source["lease_expires_at"]
+                else:
+                    terminal.setdefault(claim["id"], event)
         elif action in {"claim.released", "claim.stale"}:
             terminal.setdefault(payload["claim_id"], event)
         elif action == "evidence.submitted":

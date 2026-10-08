@@ -400,8 +400,12 @@ def _compose(
         "events",
         "rowid AS causal_order, id, timestamp, actor, action, target_kind, target_id, payload_json",
         "(target_kind = 'task' AND target_id = ?) OR "
-        "(target_kind = 'claim' AND target_id IN (SELECT id FROM claims WHERE task_id = ?))",
-        (stored, stored),
+        "(target_kind = 'claim' AND target_id IN (SELECT id FROM claims WHERE task_id = ?)) OR "
+        "(target_kind = 'bundle' AND action IN "
+        "('bundle.claimed', 'bundle.claim_renewed', 'bundle.claim_released', 'bundle.claim_stale') "
+        "AND target_id IN (SELECT bundle_id FROM bundle_claims WHERE id IN "
+        "(SELECT bundle_claim_id FROM claims WHERE task_id = ?)))",
+        (stored, stored, stored),
         order="rowid",
     )
     evidence_events = {}

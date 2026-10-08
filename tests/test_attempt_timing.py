@@ -160,3 +160,78 @@ def test_native_success_proof_interval_is_utc_not_monotonic_or_capture_time():
     unknown = project_attempt_timing(**facts)
     assert unknown["unattributed_timing_count"] == 1
     assert unknown["attempts"][0]["handoffs"][0]["verification_to_submission"]["status"] == "unknown"
+
+
+@pytest.mark.parametrize("offset_hours", [-5, 2])
+def test_native_aware_offsets_preserve_claim_and_release_intervals(
+    backend, tmp_path, monkeypatch, offset_hours,
+):
+    from datetime import timezone
+
+    from anvil.roots import registry
+    from tests.test_sqlite import _make_claim_payload, _make_event, _setup_claimable_task
+
+    original = registry.RootSetRegistry
+    monkeypatch.setattr(registry, "RootSetRegistry", lambda: original(tmp_path / "owner"))
+    _setup_claimable_task(backend)
+    offset = _T0.astimezone(timezone(timedelta(hours=offset_hours)))
+    backend.append(_make_event("claim.created", _make_claim_payload(now=offset),
+                               target_kind="claim", target_id="C001", now=offset))
+    backend.append(_make_event(
+        "claim.released",
+        {"claim_id": "C001", "released_by": "agent-alpha", "release_reason": "stopped"},
+        target_kind="claim", target_id="C001", now=offset + timedelta(minutes=2),
+    ))
+    root = _state_path(backend)
+    before = (root / "events.jsonl").read_bytes()
+    view = _read(backend)
+    assert view == _read(backend)
+    assert view["timing"]["attempts"][0]["claim_cycle"]["elapsed_us"] == 120_000_000
+    assert view["custody"]["runner_stop"] == "unknown"
+    assert (root / "events.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("terminal", ["release", "stale"])
+def test_native_bundle_member_creation_renewal_release_is_readable(tmp_path, monkeypatch, terminal):
+    from anvil.roots import registry
+    from tests.test_bundle_execution import _backend, _manager, _seed
+
+    original = registry.RootSetRegistry
+    monkeypatch.setattr(registry, "RootSetRegistry", lambda: original(tmp_path / "owner"))
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        manager = _manager(backend, tmp_path)
+        manager.claim("B001")
+        initial = _read(backend, "release:T001")
+        assert initial["task"]["status"] == "claimed"
+        assert initial["timing"]["attempt_count"] == 1
+        assert initial["timing"]["attempts"][0]["claim_cycle"]["status"] == "running"
+        manager._clock.advance(seconds=1)
+        manager.renew("B001")
+        assert _read(backend, "release:T001")["timing"]["attempt_count"] == 1
+        if terminal == "release":
+            manager.release("B001", reason="owned runner stopped")
+        else:
+            from anvil.claims.stale import detect_and_release_stale
+
+            manager._clock.advance(hours=5)
+            detect_and_release_stale(backend, manager._clock, actor="observer")
+        before = (tmp_path / "events.jsonl").read_bytes()
+        final = _read(backend, "release:T001")
+        assert final == _read(backend, "release:T001")
+        assert final["timing"]["attempts"][0]["release_event_id"] is not None
+        assert final["timing"]["attempts"][0]["claim_cycle"]["elapsed_us"] == (
+            1_000_000 if terminal == "release" else 18_001_000_000
+        )
+        assert final["custody"]["runner_stop"] == "unknown"
+        assert (tmp_path / "events.jsonl").read_bytes() == before
+    finally:
+        backend.close()
+
+
+def test_missing_standalone_creation_still_refuses():
+    facts = _facts()
+    facts["events"] = []
+    with pytest.raises(ValueError, match="claim creation"):
+        project_attempt_timing(**facts)
