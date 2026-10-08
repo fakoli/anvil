@@ -5792,6 +5792,11 @@ class SqliteBackend:
             and draft.payload_json.get("expected_prd_source_sha256") != cached[2]
         ):
             return None
+        if draft.action == "prd.approved" and draft.payload_json.get("binding_version") == 1:
+            # append has validated this exact review against the current content.
+            review_event_id = draft.payload_json.get("review_event_id")
+            return review_event_id if isinstance(review_event_id, str) else None
+
         operation = self._planning_batch_prd_content_operation(draft)
         action = operation.get("action") if operation is not None else draft.action
         graph_only = draft.action == "planning.batch_applied" and operation is None
