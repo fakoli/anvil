@@ -22,9 +22,18 @@ from anvil.clock import FrozenClock
 GitRepoFactory = Callable[[Path], Path]
 
 
+@pytest.fixture(scope="session")
+def uv_cache_dir() -> str:
+    """Resolve uv's supported cache before any test redirects its home."""
+    return subprocess.check_output(
+        ["uv", "cache", "dir"], text=True, timeout=10,
+    ).strip()
+
+
 @pytest.fixture(autouse=True)
 def isolated_native_home(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+    uv_cache_dir: str,
 ) -> None:
     """Default native state belongs to this test, never the operator's home.
 
@@ -33,6 +42,7 @@ def isolated_native_home(
     """
     # Keep tmp_path empty for tests that initialize a repository at its root.
     test_home = tmp_path_factory.mktemp("anvil-home")
+    monkeypatch.setenv("UV_CACHE_DIR", uv_cache_dir)
     monkeypatch.setenv("HOME", str(test_home))
     if os.name == "nt":
         monkeypatch.setenv("USERPROFILE", str(test_home))
