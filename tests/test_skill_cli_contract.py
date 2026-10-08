@@ -100,6 +100,20 @@ def test_validator_accepts_real_commands(contract: dict[str, object]) -> None:
     ) == []
 
 
+@pytest.mark.parametrize("command", ["claim", "release", "renew"])
+def test_claim_selection_does_not_invent_claim_id_prd_flags(
+    contract: dict[str, object], command: str,
+) -> None:
+    findings = check_invocation(
+        ["anvil", command, "release:T001" if command == "claim" else "C001",
+         "--prd", "release"], contract,
+    )
+    if command == "claim":
+        assert findings == []
+    else:
+        assert findings == [f"unknown flag --prd for: anvil {command}"]
+
+
 def test_fenced_shell_continuations_are_one_validated_invocation(
     contract: dict[str, object],
 ) -> None:

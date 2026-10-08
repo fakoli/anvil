@@ -27,6 +27,13 @@ One or more tasks in `needs_review`. Confirm before proceeding:
 anvil list --status needs_review
 ```
 
+Require the source/proof freeze, three independent whole-task reviews and
+observed stopped custody from
+[Native resume and frozen handoff](../../AGENTS.md#native-resume-and-frozen-handoff).
+The coordinator validates their bindings and verdicts; it does not repeat the
+independent source/security reviews. Repair blocking findings and repeat
+affected checks and reviews before disposition.
+
 The table columns are `TaskID`, `Title`, `Status`, `Priority`, `Type`, `Score`, `Feature`. (To see who claimed a task and what the evidence was, run `anvil show TASK_ID` and `anvil apply TASK_ID`; see Step 2.) Commands used in this skill:
 
 | Command | What it does |
@@ -96,15 +103,26 @@ Before approving:
 
 - Confirm every acceptance criterion (from `anvil show`) has a corresponding verification command that exited 0.
 - Confirm the files the agent changed match what the acceptance criteria required: a task that was supposed to modify `src/claims/manager.py` but only touched `tests/` is suspicious. The submitted `--files-changed` list appears in the `anvil submit` output and the task's `evidence.submitted` event.
-- If a PR URL was linked at submit time (`anvil submit --pr-url`), open the PR and scan the diff to spot anything the evidence summary missed.
+- Bind the independent reports to the actual task/claim/generation, frozen
+  commit, exact commands/results and authoritative evidence. If a PR URL was
+  linked at submit time (`anvil submit --pr-url`), verify it identifies that
+  reviewed source. Changed source or proof attribution needs affected checks
+  and reviews; unchanged green source does not need a duplicate full run.
 
 ---
 
 ### Step 3 — Pick a disposition (the hard handoff gate)
 
-This is the one place in the entire anvil workflow where the agent must wait for explicit user confirmation before executing the next command. `apply --approve` transitions the task and appends an immutable `task.applied` event to the append-only event log (and on approval writes a signed acceptance proof); it is the formal "ship it" gate. The agent must not run it on inference.
+`apply --approve` appends an immutable `task.applied` event and a signed
+acceptance proof. Require explicit user authority for the actual disposition;
+tool availability, green checks and a general unattended-build request do not
+grant it. If existing explicit authority covers this intermediate disposition,
+use it without asking again. Preserve any human-only or protected gate and the
+final user project-validation gate.
 
-After surfacing the task detail and evidence gate from Step 2, present the disposition options conversationally and ask the user to pick — then run the chosen command yourself:
+After surfacing the task detail, evidence gate and independent verdicts, act
+within that authority. If the disposition is unresolved, present these options
+and ask the user to pick, then run the chosen command:
 
 > The evidence for **T012** is summarized above. How should this be dispositioned?
 > 1. **Accept and ship** — verification exited 0, evidence is complete, diff matches acceptance criteria.
@@ -118,11 +136,11 @@ Based on the answer, drive the corresponding command yourself rather than asking
 
 #### On "accept" (1)
 
-Confirm one more time before invoking the gate — this is the irreversible-via-audit point:
-
-> Approving will transition T012 `needs_review → done` (through `accepted`) and append a permanent `task.applied` event with you as the approver. Confirm? (yes / no)
-
-On `yes`, invoke `anvil apply T012 --approve` (or the equivalent `apply_review_decision` MCP tool). The command prints `Task 'T012' approved by '<reviewer>' → done.` and the path to a signed proof under the workspace's `proofs/` directory. Surface the response inline. Then ask whether to drive Step 4 (the ship sequence, i.e. the git merge) now or later. On `no`, return to the disposition prompt.
+With explicit approval authority and the required gates satisfied, invoke
+`anvil apply T012 --approve` (or the equivalent `apply_review_decision` MCP
+tool). Surface the resulting disposition and signed proof path. Drive Step 4
+only when existing publication authority covers it; otherwise keep the reviewed
+result ready for that decision. Do not ask twice for the same authorization.
 
 #### On "reject" (2)
 
@@ -130,7 +148,10 @@ Ask for a concrete reason before invoking:
 
 > Reject T012 with which reason? Concrete is required — "pytest -x reports 3 failures in test_retry.py" is good; "not done" is not.
 
-Once the user supplies a reason, invoke `anvil apply T012 --reject --reason "<their reason>"` directly. The command prints `Task 'T012' rejected by '<reviewer>' → drafted (rejection recorded; task returned to 'drafted' for rework).` and echoes the reason. Surface the response. The rejection is recorded as a `task.applied` event and the original branch + evidence are preserved in the audit log. Tell the user the task is back at `drafted` and ask whether to re-trigger `anvil review tasks` or leave it for the agent to fix the underlying issue.
+With a concrete reason and explicit rejection authority, invoke
+`anvil apply T012 --reject --reason "<their reason>"`. Surface the result; the
+original branch and evidence remain audit history. Continue authorized rework
+through the current readiness/ownership flow, or return the unresolved choice.
 
 #### On "hold" (3)
 
@@ -184,7 +205,8 @@ Invoke `anvil apply T012 --reject --reason "discarded — <their reason>"` direc
 
 On `yes`, run `git branch -D agent/t012-<slug>` yourself. On `no`, leave the branch intact and tell the user the audit log retains the `evidence.submitted` and rejection `task.applied` events regardless.
 
-**The rule:** the agent picks the question, the user picks the answer, the agent runs the command. The handoff is the *decision*, not the *typing*.
+**The rule:** the user supplies disposition authority; the agent carries out
+the authorized command. Ask only when the needed choice or authority is absent.
 
 ---
 
@@ -245,7 +267,10 @@ For **decision-presentation discipline** — how to surface multi-option disposi
 | After reject + redraft | `/anvil:plan` — if the task needs re-scoping; `/anvil:execute` — to re-claim and re-attempt |
 | After accept + merge | The project's normal PR + deploy workflow; anvil does not drive deployment |
 
-Before invoking `anvil apply`, you may dispatch the plugin-local `sentinel` agent (if available in this session) against the task's evidence bundle. Sentinel produces a pass/fail recommendation that supplements — but does not replace — the reviewer's judgment. The `apply` call is always a human decision.
+Before invoking `anvil apply`, you may dispatch the plugin-local `sentinel`
+agent (if available in this session) against the task's evidence bundle. Its
+recommendation supplements the required independent reviews and never grants
+immutable disposition authority.
 
 ### Tier-aware review depth
 
@@ -253,12 +278,13 @@ The work packet (and `anvil show` / `anvil next`) carries a derived
 **review tier** — `light`, `standard`, or `max` — computed from the task's
 six-dimension score plus its risk-confirmation flags. Read the packet's
 `Review tier:` line (or the `review_tier` JSON key) and dispatch review
-effort at the matching depth instead of reviewing everything at maximum:
+effort at the matching depth. Every tier still requires the shared workflow's
+three independent adversarial whole-task reviews; tiers vary depth, not count:
 
 | Review tier | What the reviewer runs before `apply` |
 |---|---|
-| `light` | Evidence-gate check only — confirm the submitted commands/files satisfy the required evidence. Confirmed low-risk fast-lane change; no diff read required. |
-| `standard` | Evidence gate **plus** a read of the diff against the acceptance criteria. |
+| `light` | Evidence gate and focused whole-task diff review against acceptance criteria, with three distinct adversarial angles. |
+| `standard` | Evidence gate and whole-task diff review, tracing relevant callers and regression risks. |
 | `max` | Evidence gate, diff read, **and** an adversarial pass — dispatch the plugin-local `critic` agent (or the session's strongest reviewer) to actively refute the change. For a task that declares an **evidence contract** (named `claims` / `Artifact assertions`), also dispatch the `sentinel` agent in its **evidence-critic** mode to return a `PROVEN`/`UNPROVEN` verdict per claim (treating diagnostic-category evidence as non-completion) before you approve. High or unconfirmed risk; an unscored task always lands here. |
 
 When the task declares an evidence contract, `anvil apply` prints a
@@ -272,8 +298,8 @@ An advisory `Intent check` block (`intent_warnings`) flags intents the
 contract never bound — a prompt to ask whether an artifact assertion is
 missing.
 
-The tier is advisory routing for review *effort* — the human
-`apply --approve` decision is unchanged at every tier, and a reviewer may
+The tier is advisory routing for review *effort* — explicit user authority for
+`apply --approve` is unchanged at every tier, and a reviewer may
 always choose a deeper pass than the tier suggests (never a shallower one
 for `max`).
 

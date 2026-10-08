@@ -23,6 +23,37 @@ command in the same row.** The two provider-read operations are intentionally
 CLI-only execution surfaces; MCP clients discover their versioned contracts and
 schemas through `describe_surface`, then execute the documented CLI command.
 
+## Native resume and frozen handoff
+
+1. Resolve the intended checkout and CLI-selected State before acting. Inspect
+   `anvil status --json` and available `anvil project snapshot --json` history.
+   Unavailable State in a worktree is not proof of absent history: check project
+   identity, other worktrees and recovery records before initializing. Preserve
+   named PRD selection, including `anvil prd parse --prd PRD_ID`.
+2. Resume from `anvil packet TASK_ID --attempt --format json` (add `--bundle`
+   for a bundle ID), then read the actual work packet. Match task, claim, actor,
+   generation and custody before edits. Released/expired ownership needs current
+   readiness and a fresh claim; never reuse its old proof attribution. One bundle
+   coordinator owns child mutations; released/stale bundles require replan, and
+   root reservations require owner reconciliation. Never infer force authority.
+3. Inspect `verification.profile` and the environment before costly verification;
+   Anvil validates frozen literal commands/file bindings but does not run the
+   repository runner. `anvil evidence-preflight TASK_ID --json` is advisory and
+   grants no submission, renewal or approval authority. Retain failed captures;
+   do not trim buffers or retarget old evidence to pass a new claim.
+4. Existing user authorization permits routine claim/work/submit without repeated
+   confirmation. Immutable approval requires explicit user authority for that
+   disposition; tool availability and green checks do not grant it. Preserve
+   protected acceptance, human-only and final user project-validation gates.
+5. Freeze source and actual proof attribution after required checks pass. Hand
+   off task/claim/generation/commit, exact commands/results, authoritative evidence
+   references, remaining risks, and observed writer-stop/custody facts. Obtain
+   three independent adversarial reviews with distinct angles for each whole
+   task. Authors are not independent reviewers. The coordinator validates these
+   bindings/verdicts and stopped custody rather than repeating the source review.
+   Repair blockers and repeat affected checks/reviews; repeat broader checks only
+   for changes, failures or unresolved risks. Unknown runner stop stays unknown.
+
 ## The standalone loop
 
 init → author/parse PRD → review → plan + score → claim → work packet →
@@ -117,8 +148,9 @@ the planning phase; the steady-state execution loop needs none of the 12.
   reviews with distinct angles. Treat any unresolved blocking finding as a
   failed gate; fix it and repeat the affected reviews. Record the reviewers,
   angles, verdicts, and supporting commands in the task or PR evidence. This
-  review gate is automatic for every task, but it does not replace the human
-  confirmation required before the immutable `anvil apply --approve` event.
+  review gate is automatic for every task, but it does not replace explicit human
+  authority required before the immutable `anvil apply --approve` event or the
+  final user project-validation gate.
 - Claude Code and Codex can run Anvil's non-blocking
   SessionStart/PreToolUse/PostToolUse **hooks** from `hooks/hooks.json`; the
   manifest uses a shell-free `uv run --quiet ... anvil.cli hook dispatch ...`

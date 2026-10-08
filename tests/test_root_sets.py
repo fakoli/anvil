@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -657,3 +658,64 @@ def test_readiness_refusal_before_prelog_is_cancellable(tmp_path, monkeypatch):
         request_digest_value = _json(runner.invoke(app, ["roots", "request-digest", task["id"], "--request-file", str(request_path), "--actor", "owner", "--cwd", str(repo), "--json"], catch_exceptions=False))["data"]["request_digest"]
     cancelled = runner.invoke(app, ["roots", "reconcile", "--request-id", "blocked-before-prelog", "--request-digest", request_digest_value, "--actor", "owner", "--cancel-if-no-claim", "--cwd", str(repo), "--json"], catch_exceptions=False)
     assert cancelled.exit_code == 0, cancelled.output
+
+
+@pytest.mark.skipif(root_registry.fcntl is None, reason="POSIX owner registry requires flock")
+@pytest.mark.parametrize("workspace", [False, True])
+@pytest.mark.parametrize("tool", ["release_task", "renew_claim"])
+def test_mcp_root_lifecycle_refuses_without_changing_custody(
+    tmp_path, monkeypatch, workspace, tool,
+):
+    """Real owner claims refuse both MCP routes before changing either journal."""
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+
+    from anvil.cli._helpers import _open_backend
+    from anvil.mcp_server import mcp
+    from tests.test_profile_cli import _git_identity
+    from tests.test_profile_roots import _claim, _roots
+
+    primary, state, request, _ = _roots(tmp_path, monkeypatch, workspace=workspace)
+    claimed = _claim(primary, request)["data"]
+    registry = RootSetRegistry()
+
+    def snapshot():
+        backend = _open_backend(state, project_root=primary)
+        try:
+            claim = backend.get_claim(claimed["claim_id"])
+            task = backend.get_task("T001")
+            assert claim.status.value == "active" and task.status.value == "claimed"
+            facts = claim.root_set.root_facts
+            assert len(facts) == 2
+            native = (claim.model_dump(mode="json"), task.model_dump(mode="json"))
+        finally:
+            backend.close()
+        return (
+            native,
+            (state / "events.jsonl").read_bytes(),
+            (state / "state.db").read_bytes(),
+            {str(path.relative_to(registry.base)): path.read_bytes()
+             for path in registry.base.rglob("*") if path.is_file()},
+            request.read_bytes(),
+            tuple((_git_identity(Path(fact.canonical_root)),
+                   _git_identity(Path(fact.claim_worktree))) for fact in facts),
+        )
+
+    before = snapshot()
+
+    async def exercise():
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match='"code":"actor_mismatch"') as wrong_actor:
+                await client.call_tool(tool, {
+                    "task_id": "T001", "actor": "other-owner", "cwd": str(primary),
+                })
+            assert "root_set_unsupported" not in str(wrong_actor.value)
+            assert snapshot() == before
+            with pytest.raises(ToolError, match="root_set_unsupported:") as owner:
+                await client.call_tool(tool, {
+                    "task_id": "T001", "actor": "root-author", "cwd": str(primary),
+                })
+            assert f"`anvil {'release' if tool == 'release_task' else 'renew'}`" in str(owner.value)
+            assert snapshot() == before
+
+    asyncio.run(exercise())

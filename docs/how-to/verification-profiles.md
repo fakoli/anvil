@@ -1,9 +1,10 @@
 # Frozen repository verification profiles
 
 The core profile API resolves repository-owned verification instructions without
-executing commands or installing a runner. Planning, canonical PRD selection,
-claim/evidence integration, reviewer isolation and runner resource enforcement
-are separate integration work; this API alone does not implement those gates.
+executing commands or installing a runner. Canonical PRD planning freezes the
+selected profile. Native claim creation, evidence submission and acceptance
+revalidate its binding against the actual execution checkout. The repository
+owns runner prerequisites, resource enforcement and process cleanup.
 
 Use `anvil-verification.toml` at the explicit repository root:
 
@@ -55,6 +56,21 @@ working directory. Existing explicit requirements remain in place. Preflight
 commands are retained separately and cannot replace verification command proofs.
 No-profile verification retains its original serialization. Existing bindings
 are compared with fresh resolution and cannot be silently updated.
+
+In canonical PRD task metadata, select the exact manifest digest explicitly:
+
+```markdown
+**Verification profile:** full linux <manifest-sha256>
+```
+
+The final append guard runs after caller callbacks and before event assignment
+or log writes. Creation checks the prepared target baseline; later submission
+and acceptance permit legitimate advancing commits while preserving repository
+and profile identity. Acceptance follows the exact reviewed evidence's originating
+claim, including a released claim. Replay checks recorded history rather than
+current files; release, rejection and explicit correction remain available during
+profile drift. [Long-running delivery](long-running-delivery.md) describes advisory
+reads and audit-only timing; neither replaces a verification proof or review.
 
 Schema 1 rejects unknown fields, duplicate TOML keys, invalid types, unsupported
 platforms and duplicate entries. It allows 1–64 profiles with 1–64-character

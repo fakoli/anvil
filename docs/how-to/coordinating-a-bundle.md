@@ -9,6 +9,10 @@ Use a bundle when the coordinator needs to keep integration reasoning in the mai
 any delegation can be bounded. Keep using ordinary task claims when work is genuinely
 independent and separate accepted deliveries are desirable.
 
+Use [Native resume and frozen handoff](../../AGENTS.md#native-resume-and-frozen-handoff)
+for project identity, existing authority, verification preflight and the shared
+source/proof handoff. Bundle custody adds the rules below.
+
 ## Invariants
 
 - One coordinator owns the bundle claim and all Anvil mutations for its members.
@@ -22,8 +26,9 @@ independent and separate accepted deliveries are desirable.
   Hook proofs retain their exact member claim/generation; submission additionally
   checks the active coordinator, member mapping, and both lease expiries.
   Imported external claim-command artifacts still require an ordinary claim.
-- Reviewers must be distinct from the coordinator and from one another. Required angles,
-  review count, and re-review budget come from the bundle policy.
+- Reviewers must be distinct from the coordinator, source authors and one
+  another. Every whole task needs at least three independent adversarial angles;
+  bundle policy may require more and sets the re-review budget.
 
 ## Coordinator-only workflow
 
@@ -71,7 +76,8 @@ Delegation is optional and remains a harness concern. A useful pattern is:
 
 1. The coordinator claims and reads the aggregate packet.
 2. Delegate one bounded, non-overlapping member or one read-only investigation with a
-   concrete return contract: patch or findings, commands run, files touched, and deadline.
+   concrete return contract: patch or findings, commands run, files touched,
+   deadline and the shared workflow's source/proof and writer-stop bindings.
 3. Continue independent coordinator work instead of waiting indefinitely.
 4. Record an audit note, for example:
 
@@ -81,20 +87,23 @@ Delegation is optional and remains a harness concern. A useful pattern is:
      --actor lead
    ```
 
-5. Validate and integrate the returned work in the coordinator loop. The coordinator runs
-   the verification and submits the member evidence.
+5. Validate the actual bindings and stopped custody before integrating returned
+   work. Capture required verification under the coordinator's member authority
+   and submit its evidence. Independent reviewers own source/security judgment;
+   the coordinator validates their verdicts without duplicating those reviews.
 
 Keep the wave within `--max-tasks` and `--max-serial-stages`. Anvil's
 `delegated_agents` field is observational state; it does not gate the lifecycle, and the
-public CLI/MCP surface does not manage child-agent processes. If a delegate stalls, take
-the member back into the main loop and record the recovery rather than waiting without a
-deadline.
+public CLI/MCP surface does not manage child-agent processes. If a delegate stalls,
+observe that its writers and runners have stopped before taking the member back
+and record recovery. A deadline or audit note is not proof of stopped custody;
+keep an unknown stop unresolved.
 
 ## Recovery semantics
 
 | Situation | Safe response |
 |---|---|
-| A delegate stalls while the coordinator lease is active | Take the member back, record progress, renew the bundle lease, and continue. |
+| A delegate stalls while the coordinator lease is active | Observe stopped writers/runners, take the member back, record progress, and renew only under the current lease/progress rules before continuing. |
 | The coordinator stops while the bundle is `active` | `anvil bundle release B001 --reason "handoff" --actor lead` marks the bundle `replan_required`. Members that still have active authorizations return to `ready`; members already submitted remain `needs_review`. Release is not pause/resume. |
 | The coordinator lease expires while the bundle is `active` | The next lease-sensitive mutation reaps active coordinator/member claims, resets only actively authorized members, and marks the bundle `replan_required`. A stale lease cannot be renewed. |
 | The coordinator claim is released or expires after `bundle complete` | Do not expect a reset: the bundle and submitted member statuses remain in review state, but finalization requires an active coordinator claim. The public surface cannot reclaim that bundle; create an eligible replacement and supersede the stranded source. |

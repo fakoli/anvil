@@ -1616,11 +1616,11 @@ def release_task(
             raise _actor_mismatch_tool_error(
                 owner=active_claim.claimed_by, actual=actor, action="release the claim"
             )
-            if active_claim.root_set is not None:
-                raise ToolError(
-                    "root_set_unsupported: release coordinated root-set claims through "
-                    "`anvil release` so the owner reservation is reconciled."
-                )
+        if active_claim.root_set is not None:
+            raise ToolError(
+                "root_set_unsupported: release coordinated root-set claims through "
+                "`anvil release` so the owner reservation is reconciled."
+            )
 
         manager = ClaimManager(
             backend,
@@ -1708,11 +1708,11 @@ def renew_claim(
             raise _actor_mismatch_tool_error(
                 owner=active_claim.claimed_by, actual=actor, action="renew the claim"
             )
-            if active_claim.root_set is not None:
-                raise ToolError(
-                    "root_set_unsupported: renew coordinated root-set claims through "
-                    "`anvil renew` so the owner reservation is extended first."
-                )
+        if active_claim.root_set is not None:
+            raise ToolError(
+                "root_set_unsupported: renew coordinated root-set claims through "
+                "`anvil renew` so the owner reservation is extended first."
+            )
 
         lease_minutes = max(1, extend_seconds // 60)
         manager = ClaimManager(
