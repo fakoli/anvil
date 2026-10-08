@@ -268,7 +268,7 @@ def test_cli_preview_and_explicit_invalidation(accepted, tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "_resolve_state_dir", lambda cwd: tmp_path)
     monkeypatch.setattr(module, "_require_state_dir", lambda *a, **k: None)
-    monkeypatch.setattr(module, "_open_backend", lambda state: accepted)
+    monkeypatch.setattr(module, "_open_backend", lambda state, *, project_root=None: accepted)
     monkeypatch.setattr(accepted, "close", lambda: None)
     accepted.append(
         _make_event(
@@ -291,7 +291,7 @@ def test_cli_preview_and_explicit_invalidation(accepted, tmp_path, monkeypatch):
     before_events = (tmp_path / "events.jsonl").read_bytes()
     before_state = serialize_state(accepted)
     monkeypatch.setattr(
-        module, "_open_backend", lambda state: pytest.fail("mutable open")
+        module, "_open_backend", lambda state, *, project_root=None: pytest.fail("mutable open")
     )
     monkeypatch.setattr(
         module, "_reap_stale_claims", lambda backend: pytest.fail("lease maintenance")
@@ -304,7 +304,7 @@ def test_cli_preview_and_explicit_invalidation(accepted, tmp_path, monkeypatch):
     assert serialize_state(accepted) == before_state
     assert accepted.get_claim("C002").status.value == "active"
     assert accepted.get_task("T002").status.value == "claimed"
-    monkeypatch.setattr(module, "_open_backend", lambda state: accepted)
+    monkeypatch.setattr(module, "_open_backend", lambda state, *, project_root=None: accepted)
     monkeypatch.setattr(module, "_reap_stale_claims", lambda backend: None)
     assert json.loads(result.output)["data"]["claim_id"] == "C001"
     path = tmp_path / "invalidation.json"

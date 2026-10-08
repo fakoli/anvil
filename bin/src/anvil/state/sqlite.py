@@ -3440,13 +3440,13 @@ class SqliteBackend:
             ).fetchone()
         if row is None:
             return None
-        return self._row_to_prd(row)
+        return self._row_to_prd(row, conn)
 
     def list_prds(self) -> list[PRD]:
         """Return every PRD ordered by ``id`` ASC (deterministic for replay)."""
         conn = self._require_conn()
         rows = conn.execute("SELECT * FROM prds ORDER BY id").fetchall()
-        return [self._row_to_prd(row) for row in rows]
+        return [self._row_to_prd(row, conn) for row in rows]
 
     def default_prd_id(self) -> str | None:
         """Return the ``is_default = 1`` PRD's id, or None if no PRD exists."""
@@ -3842,7 +3842,7 @@ class SqliteBackend:
                 "SELECT * FROM prds WHERE is_default = 1 ORDER BY id LIMIT 1"
             ).fetchone()
         )
-        prd = self._row_to_prd(prd_row) if prd_row is not None else None
+        prd = self._row_to_prd(prd_row, conn) if prd_row is not None else None
         if project is None or prd is None:
             raise EventRejected("acceptance_invalidation: canonical project/PRD unavailable")
         material = {
@@ -14541,7 +14541,7 @@ class SqliteBackend:
             submitted_by=row[11],
         )
 
-    def _row_to_prd(self, row: Any) -> PRD:
+    def _row_to_prd(self, row: Any, conn: sqlite3.Connection) -> PRD:
         """Deserialise a prds row into a PRD model instance.
 
         Maps the v7 identity/release columns (id / title / target_version /
@@ -14575,7 +14575,7 @@ class SqliteBackend:
         if "content_available" in d and d["content_available"] is not None:
             d["content_available"] = bool(d["content_available"])
         if d.get("content_event_id") is not None:
-            content = self._require_conn().execute(
+            content = conn.execute(
                 "SELECT payload_json FROM events WHERE id = ?",
                 (d["content_event_id"],),
             ).fetchone()

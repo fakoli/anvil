@@ -4,8 +4,10 @@ import json
 
 import pytest
 
+from anvil.clock import FrozenClock
 from anvil.state.backend import EventRejected
 from anvil.state.models import Event
+from anvil.state.sqlite import SqliteBackend, query_only_transaction
 from tests.test_git_events import (
     _T0,
     _draft,
@@ -189,3 +191,23 @@ def test_current_graph_and_revision_parents_keep_the_existing_chain(tmp_path):
         assert revised.parent_event_id == second.id
     finally:
         backend.close()
+
+
+def test_prd_projection_uses_supplied_query_only_connection(tmp_path, monkeypatch):
+    backend, _, _, approval = _reviewed(tmp_path)
+    backend.append(approval)
+    expected = backend.get_prd("default")
+    backend.close()
+    paths = [tmp_path / "state.db", tmp_path / "events.jsonl"]
+    original = [path.read_bytes() for path in paths]
+    reader = SqliteBackend(
+        db_path=str(paths[0]), events_path=str(paths[1]), clock=FrozenClock(_T0),
+    )
+    monkeypatch.setattr(reader, "_require_conn", lambda: pytest.fail("mutable connection"))
+    monkeypatch.setattr(reader, "initialize", lambda: pytest.fail("mutable initialization"))
+    with query_only_transaction(*paths) as (conn, _):
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        row = conn.execute("SELECT * FROM prds WHERE id = ?", ("default",)).fetchone()
+        assert reader._row_to_prd(row, conn) == expected
+    assert reader._conn is None
+    assert [path.read_bytes() for path in paths] == original

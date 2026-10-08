@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from anvil.state.backend import EventRejected
+from anvil.roots import registry as root_registry
 from tests.test_bundle_execution import _event
 from tests.test_claims import _git, _make_git_repo
 from tests.test_profile_claims import _manager, _metadata, _profile, _setup, _snapshot
@@ -197,6 +198,7 @@ def test_legacy_raw_claim_has_no_profile_or_repository_reads(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("change", ["none", "authorization", "commands", "baseline"])
+@pytest.mark.skipif(root_registry.fcntl is None, reason="POSIX owner registry requires flock")
 def test_root_set_profile_requires_exact_prepared_capability(tmp_path, monkeypatch, change):
     from anvil.roots.registry import (
         authorize_root_set_claim,

@@ -632,6 +632,8 @@ class RootSetRegistry:
         repository_id = _require_id(repository_id, "repository id")
         live = live_repository_identity(path, declared_origin=str(origin))
         commands = _validate_commands(verification_commands or [])
+        if fcntl is None:
+            raise _error("root_set_unsupported", "this platform cannot lock the owner root registry.")
         # Enrollment is the explicit activation action, so it may create the
         # owner directory after legacy callers deliberately avoided doing so.
         self.base.mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -12,7 +12,7 @@ complementary surfaces:
 
 - **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
   after `uv tool install anvil-state`).
-- **MCP** — `anvil-mcp` (FastMCP stdio; 24 execution tools by default, all 36
+- **MCP** — `anvil-mcp` (FastMCP stdio; 26 execution tools by default, all 38
   with `ANVIL_MCP_PLANNING=1`). Run `anvil mcp-config <your-client>` to print
   client-specific config.
 
@@ -66,6 +66,8 @@ anvil apply T001           # apply the review verdict
 | Release claim | `release_task` | `anvil release <id>` |
 | Renew claim lease | `renew_claim` | `anvil renew <id>` |
 | Work packet | `generate_work_packet` | `anvil packet <id>` |
+| Attempt history (read-only) | `get_attempt_view` | `anvil packet <id> --attempt --format json` |
+| Evidence preflight (advisory, read-only) | `read_evidence_preflight` | `anvil evidence-preflight <id> --json` |
 | Submit progress | `submit_progress` | `anvil progress <id> <phase>` |
 | Submit evidence | `submit_completion_evidence` | `anvil submit <id> --commands … --files-changed …` |
 | Update task status | `update_task_status` | (via claim/submit/apply flow) |
@@ -98,7 +100,7 @@ See `docs/how-to/coordinating-a-bundle.md` for the complete recovery and review 
 
 ### Execution vs planning surface (MCP)
 
-To keep the per-turn context lean, the MCP server exposes only the **24
+To keep the per-turn context lean, the MCP server exposes only the **26
 execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
 status/conflicts/deps plus coordinator-bundle operations). The **12 one-shot planning tools** (`init_project`,
 `parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
@@ -106,7 +108,7 @@ status/conflicts/deps plus coordinator-bundle operations). The **12 one-shot pla
 `describe_surface`, `create_bundle`) are **hidden by default** and re-appear when the server is
 started with **`ANVIL_MCP_PLANNING=1`** (or `true`/`yes`/`on`). Nothing is
 removed — every capability stays reachable via the CLI command in the same row,
-and the full 36-tool surface returns the moment the env flag is set. Use it for
+and the full 38-tool surface returns the moment the env flag is set. Use it for
 the planning phase; the steady-state execution loop needs none of the 12.
 
 ## Notes

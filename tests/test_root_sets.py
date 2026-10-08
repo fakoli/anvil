@@ -496,6 +496,58 @@ def test_inactive_registry_preserves_legacy_when_platform_has_no_flock(tmp_path,
     assert not home.exists()
 
 
+@pytest.mark.parametrize("owner_state", ["absent", "empty", "activated"])
+def test_enrollment_without_flock_refuses_before_owner_changes(tmp_path, monkeypatch, owner_state):
+    repo = _repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
+    monkeypatch.chdir(repo)
+    initialized = runner.invoke(app, ["init", "--with-sample"], catch_exceptions=False)
+    assert initialized.exit_code == 0, initialized.output
+    registry = RootSetRegistry()
+    assert registry.base == home / ".anvil" / "root-sets"
+    if owner_state != "absent":
+        registry.base.mkdir(parents=True)
+    if owner_state == "activated":
+        registry.activation_path.write_text(
+            json.dumps({"schema": "anvil.root-set-activation/v1"}) + "\n", encoding="utf-8",
+        )
+        registry.path.write_text(json.dumps({
+            "schema": "anvil.root-set-registry/v1", "repositories": {}, "reservations": {},
+        }) + "\n", encoding="utf-8")
+        registry.lock_path.write_bytes(b"")
+
+    def snapshot(path):
+        if not path.exists():
+            return None
+        return {
+            str(item.relative_to(path)): item.read_bytes() if item.is_file() else None
+            for item in path.rglob("*")
+        }
+
+    owner_before, project_before = snapshot(registry.base), snapshot(repo)
+    monkeypatch.setattr(root_registry, "fcntl", None)
+    result = runner.invoke(app, [
+        "roots", "enroll", "--repository-id", "repo", "--path", str(repo),
+        "--origin", "local:repo", "--json",
+    ], catch_exceptions=False)
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.output)["error"]["code"] == "root_set_unsupported"
+    assert snapshot(registry.base) == owner_before
+    assert snapshot(repo) == project_before
+    if owner_state == "activated":
+        with pytest.raises(RootSetError) as error:
+            registry.ordinary_claim_allowed(repo)
+        assert error.value.code == "root_set_unsupported"
+    else:
+        registry.ordinary_claim_allowed(repo)
+    assert snapshot(registry.base) == owner_before
+    assert snapshot(repo) == project_before
+
+
 def test_only_proven_prelog_no_claim_reservation_can_be_cancelled(tmp_path, monkeypatch):
     """A false append marker cancels; an uncertain marker remains overheld."""
     home = tmp_path / "home"

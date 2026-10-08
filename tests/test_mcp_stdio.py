@@ -114,7 +114,7 @@ def test_real_stdio_schema_mismatch_stalled_probe_times_out_and_recovers(
     payload = json.loads(error)
     assert payload["error"]["code"] == "schema_probe_failed"
     assert len(error.encode("utf-8")) <= 4_096
-    assert tool_count == 24
+    assert tool_count == 26
     logs = log_path.read_text(encoding="utf-8")
     assert str(state_dir.resolve()) not in error
     assert str(state_dir.resolve()) not in logs

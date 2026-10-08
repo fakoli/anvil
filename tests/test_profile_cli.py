@@ -10,6 +10,7 @@ import pytest
 from anvil.claims.manager import ClaimError
 from anvil.cli import app
 from anvil.cli._helpers import _open_backend
+from anvil.roots import registry as root_registry
 from anvil.state.backend import EventRejected
 from anvil.state.sqlite import SqliteBackend
 from tests.test_profile_planning_cli import _approve, _invoke, _project, runner
@@ -611,6 +612,7 @@ def test_dedicated_profile_refuses_unavailable_identity_or_isolation(
 
 
 @pytest.mark.parametrize("route", ["ordinary", "top_bundle", "dedicated"])
+@pytest.mark.skipif(root_registry.fcntl is None, reason="POSIX owner registry requires flock")
 def test_profile_claim_keeps_registered_root_policy(tmp_path, monkeypatch, route):
     from anvil.roots.registry import RootSetRegistry
 
