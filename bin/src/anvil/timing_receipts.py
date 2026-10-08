@@ -1,6 +1,7 @@
 """Pure command timing observations; never proofs, renewals or authority."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -61,7 +62,7 @@ class CommandTimingReceipt(BaseModel):
     def _revalidate_attribution(cls, value: Any) -> Any:
         # Revalidate raw scalars; JSON serialization can coerce constructed bools.
         material = dict(value) if isinstance(value, HookCommandAttribution) else value
-        if isinstance(material, dict) and type(material.get("schema_version", 1)) is not int:
+        if isinstance(material, Mapping) and type(material.get("schema_version", 1)) is not int:
             raise ValueError("attribution schema version must be an integer")
         return HookCommandAttribution.model_validate(material)
 
