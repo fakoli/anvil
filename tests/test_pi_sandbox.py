@@ -47,6 +47,16 @@ exit 0
 """
 
 
+@pytest.fixture(autouse=True)
+def sandbox_tmp_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Measure only this test's real Node temp directories, including cleanup."""
+    root = tmp_path / "sandbox-tmp"
+    root.mkdir()
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(name, str(root))
+    return root
+
+
 @pytest.fixture()
 def fake_pi(tmp_path: Path) -> Path:
     """An executable fake pi that records argv/stdin/cwd/env into a directory."""
@@ -163,7 +173,9 @@ def _pin_entry(tmp_path: Path, extra_files: dict[str, str] | None = None) -> tup
     return entry, digest
 
 
-def test_launcher_stages_and_loads_staged_bytes(tmp_path: Path, fake_pi: Path) -> None:
+def test_launcher_stages_and_loads_staged_bytes(
+    tmp_path: Path, fake_pi: Path, sandbox_tmp_root: Path,
+) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
     allowlist_dir = tmp_path / "policy"  # allowlist OUTSIDE the workspace
@@ -187,7 +199,8 @@ def test_launcher_stages_and_loads_staged_bytes(tmp_path: Path, fake_pi: Path) -
     argv = (tmp_path / "fake-pi-out" / "argv").read_text().splitlines()
     staged = [a for a in argv if a.endswith("entry.ts")]
     assert staged, argv
-    assert staged[0].startswith("/tmp/pi-sandbox-stage.")
+    staged_relative = Path(staged[0]).relative_to(sandbox_tmp_root)
+    assert staged_relative.parts[0].startswith("pi-sandbox-stage.")
     assert "ws/entry.ts" not in staged[0] and "policy/ext/entry.ts" not in staged[0]
     loaded = (tmp_path / "fake-pi-out" / "staged-ext").read_text()
     assert loaded == "export default function () {}\n"
@@ -343,26 +356,30 @@ def test_launcher_no_duplicate_executable_in_argv(tmp_path: Path, fake_pi: Path)
     assert "--no-extensions" in argv
 
 
-def test_launcher_no_stray_temp_dirs_after_run(tmp_path: Path, fake_pi: Path) -> None:
+def test_launcher_no_stray_temp_dirs_after_run(
+    tmp_path: Path, fake_pi: Path, sandbox_tmp_root: Path,
+) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    before = set(Path("/tmp").glob("pi-sandbox-*"))
+    before = set(sandbox_tmp_root.iterdir())
     r = run_launcher(
         "--profile", "read-only-review", "--workspace", str(workspace),
         "--task", "x", "--allowlist", str(ALLOWLIST), "--pi", str(fake_pi),
     )
     assert r.returncode == 0, r.stdout + r.stderr
-    after = set(Path("/tmp").glob("pi-sandbox-*")) - before
+    after = set(sandbox_tmp_root.iterdir()) - before
     assert not after, f"leaked: {after}"
 
 
 # --- dry run ------------------------------------------------------------------------
 
 
-def test_dry_run_reports_without_launching_or_dirs(tmp_path: Path, fake_pi: Path) -> None:
+def test_dry_run_reports_without_launching_or_dirs(
+    tmp_path: Path, fake_pi: Path, sandbox_tmp_root: Path,
+) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    before = set(Path("/tmp").glob("pi-sandbox-*"))
+    before = set(sandbox_tmp_root.iterdir())
     r = run_launcher(
         "--profile", "unattended-exec", "--workspace", str(workspace),
         "--task", "x", "--allowlist", str(ALLOWLIST), "--pi", str(fake_pi), "--dry-run",
@@ -371,7 +388,27 @@ def test_dry_run_reports_without_launching_or_dirs(tmp_path: Path, fake_pi: Path
     assert "not launching" in r.stdout
     assert '"--mode"' in r.stdout or "--mode" in r.stdout
     assert not (tmp_path / "fake-pi-out" / "argv").exists()
-    assert not set(Path("/tmp").glob("pi-sandbox-*")) - before
+    assert not set(sandbox_tmp_root.iterdir()) - before
+
+
+def test_dry_run_preserves_foreign_sandbox(
+    tmp_path: Path, fake_pi: Path, sandbox_tmp_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    foreign = tmp_path / "other-process" / "pi-sandbox-stage.held"
+    foreign.mkdir(parents=True)
+    target = foreign / "entry.ts"
+    target.write_bytes(b"foreign process bytes\n")
+    launch = run_launcher
+
+    def overlapping_launcher(*args: str):
+        # A foreign process can create a directory during our dry-run check.
+        (foreign / "in-flight").write_bytes(b"still owned elsewhere\n")
+        return launch(*args)
+
+    monkeypatch.setattr(f"{__name__}.run_launcher", overlapping_launcher)
+    test_dry_run_reports_without_launching_or_dirs(tmp_path, fake_pi, sandbox_tmp_root)
+    assert target.read_bytes() == b"foreign process bytes\n"
+    assert (foreign / "in-flight").read_bytes() == b"still owned elsewhere\n"
 
 
 # --- compose report --------------------------------------------------------------------
