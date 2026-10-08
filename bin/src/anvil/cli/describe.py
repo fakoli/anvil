@@ -80,7 +80,8 @@ _COMMAND = "describe"
 # deliberately accept the new response shapes.
 # Bumped to "18" when the local-event repair command expanded the published
 # CLI command surface beyond API 17.
-API_VERSION = "18"
+# Bumped to "19" for advisory preflight/attempt reads and timing ingestion.
+API_VERSION = "19"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -280,14 +281,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "18",
-          "engine_version": "0.6.15",
-          "display_version": "0.6.15",
+          "api_version": "19",
+          "engine_version": "0.6.16",
+          "display_version": "0.6.16",
           "schema_version": 22,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.15",
+          "tag": "v0.6.16",
           "tag_distance": 0,
           "dirty": false,
           "cli": {
@@ -300,7 +301,7 @@ def build_manifest() -> dict[str, Any]:
             "contract_count": 90,
             "count": 79
           },
-          "mcp": {"tools": ["claim_task", ...], "count": 36},
+          "mcp": {"tools": ["claim_task", ...], "count": 38},
           "operation_catalog": {
             "catalog_version": 1,
             "operations": [{"operation_id": "state.prd.content", ...}, ...]
@@ -440,7 +441,7 @@ def mcp_tool_names() -> list[str]:
     list_tools()``) rather than the server-level ``mcp.list_tools()``: the local
     provider applies transforms but does NOT *filter* disabled components (it
     returns them flagged), whereas the server-level call filters them out. So the
-    local provider yields the complete 36-tool surface even when the L2 planning
+    local provider yields the complete 38-tool surface even when the L2 planning
     gate has hidden the 12 planning tools from the per-turn wire
     (``ANVIL_MCP_PLANNING`` unset). ``describe`` answers "what can this engine
     do", which never shrinks; the gate only changes what a default execution

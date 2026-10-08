@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.15 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.16 (schema 22)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1022,7 +1022,19 @@ execute against.
 - `--format {md,json}`, `-f` *(default: `md`)* — output format. `md` writes
   `packets/<TASK_ID>.md`; `json` writes `packets/<TASK_ID>.json`. Stdout
   echoes the rendered content matching the selected format.
+- `--attempt` — read bounded recorded attempt facts without writing a packet,
+  reaping leases or appending an event. With `--bundle`, pass a bundle ID;
+  all members share one frontier and cumulative limits.
+- `--observation-at UTC` — explicit observation for advisory lease/timing facts;
+  requires `--attempt`. Without it, current lease age remains unobserved.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
+
+Attempt output is JSON (`--format md` pretty-prints it). The shared reader caps
+input at 32 MiB / 20,000 events, individual events at 1 MiB, row cells at 256 KiB,
+and responses at 64 KiB. Overflow refuses. Raw output and private paths are absent;
+runner stop, external waits and deployment remain unknown unless recorded.
+Acceptance history and later invalidation remain distinct; execution sums and
+wall-time overlap are separate. Reads grant no mutation or acceptance authority.
 
 **Review tier.** Every packet carries a derived review tier —
 `light` / `standard` / `max` — with one line of reviewer guidance
@@ -1062,6 +1074,16 @@ generating the packet); the rendered packet feeds directly into Claude Code,
 Cursor, or any MCP-aware agent.
 
 ---
+
+### `anvil evidence-preflight` { #evidence-preflight }
+
+`anvil evidence-preflight TASK_ID --json [--prd PRD_ID] [--observation-at UTC]`
+reads advisory command-proof coverage for the current claim. It inspects the
+complete buffer (at most 16 records / 1 MiB), retains failed captures, and reports
+its digest, counts, skips, problems and required-proof coverage. The shared
+attempt-reader limits also apply. It never initializes State, reaps leases,
+writes a packet or submits evidence. Submission independently revalidates the
+buffer at the append boundary. Overflow refuses rather than truncating proof input.
 
 ## Coordinated roots
 
@@ -1606,8 +1628,8 @@ GitHub-specific alias.
 **Synopsis:** Print the paste-ready MCP server config block for a target MCP
 client, with the `anvil` server pointed at this checkout's `bin/anvil-mcp` by
 **absolute path** (not `${CLAUDE_PLUGIN_ROOT}`). Generated config exposes the
-lean 24-tool execution surface by default. Add `ANVIL_MCP_PLANNING=1` to the
-emitted server environment when the client needs all 36 tools. The command is
+lean 26-tool execution surface by default. Add `ANVIL_MCP_PLANNING=1` to the
+emitted server environment when the client needs all 38 tools. The command is
 read-only and project-free (mirrors `anvil describe`):
 it never opens a backend, runs from any directory, and only *prints* config — it
 never mutates the client's own settings file. In text mode the config goes to
@@ -1939,6 +1961,10 @@ for schemas, privacy, provenance, and explicit enable/disable workflows.
   by the next renewal; free-text `progress.noted` events never authorize renewal.
   See [Attesting progress from an external writer](how-to/attesting-external-progress.md)
   for the exact canonical envelope and a reproducible generator.
+  `--timing-file receipt.json` records a bounded canonical command timing
+  observation (16 KiB), requiring the exact active ordinary claim owner and
+  capture lifetime. It cannot accompany `--attestation-file` or `--bundle`.
+  Timing is audit only and grants no command proof, renewal or completion authority.
   `anvil status` shows each active claim's latest phase, elapsed time, and
   lease-expiry countdown.
 - `anvil drift` — Report intent/state/filesystem-git divergence (orphan

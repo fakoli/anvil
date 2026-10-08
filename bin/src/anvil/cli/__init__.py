@@ -30,7 +30,7 @@ from anvil.cli.merge_check import merge_check
 from anvil.cli.migrate import migrate_app, migrate_events
 from anvil.cli.migrate_workspace import migrate_workspace
 from anvil.cli.notify_digest import notify_digest
-from anvil.cli.packet_apply import apply, packet, submit
+from anvil.cli.packet_apply import apply, evidence_preflight, packet, submit
 from anvil.cli.plan import (
     assumptions,
     deps,
@@ -174,6 +174,7 @@ app.command()(release)
 app.command()(renew)
 app.command()(next)
 app.command()(packet)
+app.command("evidence-preflight")(evidence_preflight)
 app.command()(submit)
 app.command()(progress)
 app.command()(apply)
