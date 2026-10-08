@@ -7000,6 +7000,26 @@ class SqliteBackend:
                 f"(current revision is {current}, expected {current + 1})"
             )
         current_status = str(row[1])
+        if row[4] is not None:
+            content = conn.execute(
+                "SELECT payload_json FROM events WHERE id = ?", (row[4],)
+            ).fetchone()
+            previous_bindings = (
+                json.loads(content[0]).get("profile_bindings") if content is not None else None
+            )
+            if previous_bindings is not None:
+                if payload.profile_bindings is None:
+                    raise EventRejected("prd.revised: frozen profile bindings must be explicit.")
+                for task_id, binding in payload.profile_bindings.items():
+                    previous = previous_bindings.get(task_id)
+                    if (
+                        previous is not None
+                        and previous["reference"] == binding.reference.model_dump(mode="json")
+                        and previous != binding.model_dump(mode="json")
+                    ):
+                        raise EventRejected(
+                            "prd.revised: unchanged profile reference cannot rebind."
+                        )
         if (
             payload.expected_status is not None
             and payload.status != payload.expected_status
@@ -14037,6 +14057,13 @@ class SqliteBackend:
             d["source_bytes"] = bytes(d["source_bytes"])
         if "content_available" in d and d["content_available"] is not None:
             d["content_available"] = bool(d["content_available"])
+        if d.get("content_event_id") is not None:
+            content = self._require_conn().execute(
+                "SELECT payload_json FROM events WHERE id = ?",
+                (d["content_event_id"],),
+            ).fetchone()
+            if content is not None:
+                d["profile_bindings"] = json.loads(content[0]).get("profile_bindings")
         # Review #13: created_at / updated_at are backfilled by the v6->v7
         # migration via COALESCE(last_reviewed_at, project.created_at), both of
         # which are stored as tz-aware UTC ISO strings — so the PRD field

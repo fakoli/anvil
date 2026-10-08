@@ -51,6 +51,7 @@ from anvil.state.models import (
     DelegatedAgentObservation,
     EvidenceCategory,
     PRDAssumption,
+    PrdProfileBindings,
     ProofArtifact,
     ReviewDecision,
     RootSetClaimBinding,
@@ -85,6 +86,10 @@ class _PrdSourcePayload(BaseModel):
 
     model_config = _PRD_PAYLOAD_CONFIG
 
+    # Stored in the content event, not reconstructed from current runner files.
+    # None identifies historical absence; {} explicitly freezes no profiles.
+    profile_bindings: PrdProfileBindings | None = None
+
     source_text: StrictStr | None = None
     source_sha256: StrictStr | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
@@ -112,7 +117,11 @@ class _PrdSourcePayload(BaseModel):
             self.source_revision,
         )
         if self.provenance_state == "legacy_unbound":
-            if self.content_available or any(value is not None for value in source_fields):
+            if (
+                self.content_available
+                or self.profile_bindings is not None
+                or any(value is not None for value in source_fields)
+            ):
                 raise ValueError(
                     "legacy-unbound provenance cannot fabricate source metadata"
                 )
