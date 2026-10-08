@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
-import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +13,11 @@ if TYPE_CHECKING:
     from anvil.clock import Clock
     from anvil.state.backend import Backend
 
+from anvil.claims.evidence_import import (
+    CommandProofImportOverflow,
+    inspect_command_buffer,
+    require_buffer_unchanged,
+)
 from anvil.cli._actor_output import (
     actor_identity_data,
     actor_mismatch_data,
@@ -34,14 +37,13 @@ from anvil.cli._helpers import (
     resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
-from anvil.naming import safe_path_component, task_claim_buffer_path
+from anvil.naming import safe_path_component
 from anvil.state.models import (
     MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
     MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
     ClaimCommandProof,
     CommandProof,
     EventDraft,
-    HookCommandAttribution,
     RejectionQualityFinding,
     RejectionQualityFindingCode,
     RejectionReasonCode,
@@ -87,121 +89,13 @@ def _rejection_metrics_block(
     }
 
 
-class CommandProofImportOverflow(ValueError):
-    """The bounded hook buffer cannot be imported completely."""
-
-    code = "command_proof_import_overflow"
-
-
 def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
-    """Reconcile the per-claim evidence buffer into typed CommandProofs.
+    """Compatibility adapter over the complete shared hook-buffer inspector."""
+    return list(inspect_command_buffer(
+        state_dir, claim_id, max_bytes=MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+    ).proofs)
 
-    The capture-evidence hook writes one JSONL record per bash command to
-    ``.anvil/.evidence-buffer/<claim-id>.json``. Each well-formed record
-    becomes a :class:`CommandProof` only when its exact claim attribution and
-    semantic digest validate. ``output_sha256`` is carried through as-is, NOT
-    re-verified here — the proof remains only as trustworthy as the hook that
-    wrote the buffer. Malformed, historical unattributed, or cross-claim lines
-    are skipped. A valid-record or byte overflow refuses the entire import;
-    callers must not turn an incomplete buffer into successful evidence.
-    """
-    import datetime
 
-    buffer_file = task_claim_buffer_path(state_dir / ".evidence-buffer", claim_id)
-    if buffer_file is None:
-        return []
-    descriptor = -1
-    try:
-        before_open = os.stat(buffer_file, follow_symlinks=False)
-        if not stat.S_ISREG(before_open.st_mode) or before_open.st_size < 0:
-            return []
-        if before_open.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
-            raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
-        flags = os.O_RDONLY
-        for flag_name in (
-            "O_BINARY",
-            "O_CLOEXEC",
-            "O_NOINHERIT",
-            "O_NONBLOCK",
-            "O_NOFOLLOW",
-        ):
-            flags |= getattr(os, flag_name, 0)
-        descriptor = os.open(buffer_file, flags)
-        opened = os.fstat(descriptor)
-        after_open = os.stat(buffer_file, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or not stat.S_ISREG(after_open.st_mode)
-            or not os.path.samestat(opened, after_open)
-            or opened.st_size < 0
-        ):
-            return []
-        if opened.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
-            raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
-        stream = os.fdopen(descriptor, "rb")
-        descriptor = -1
-    except FileNotFoundError:
-        if "before_open" in locals():
-            raise CommandProofImportOverflow(
-                "command proof buffer changed before complete import"
-            ) from None
-        return []
-    except OSError as exc:
-        raise CommandProofImportOverflow("command proof buffer cannot be read completely") from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-
-    proofs: list[CommandProof] = []
-    bytes_read = 0
-    try:
-        with stream:
-            while True:
-                remaining = MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES - bytes_read
-                raw_line = stream.readline(remaining + 1)
-                if not raw_line:
-                    break
-                bytes_read += len(raw_line)
-                if len(raw_line) > remaining:
-                    raise CommandProofImportOverflow("command proof buffer exceeds its byte limit")
-                try:
-                    line = raw_line.decode("utf-8").strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    if not isinstance(rec, dict):
-                        continue
-                    if rec.get("claim_id") != claim_id:
-                        continue
-                    attribution = HookCommandAttribution.model_validate(rec["attribution"])
-                    if attribution.claim_id != claim_id:
-                        continue
-                    captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
-                    proof = CommandProof(
-                        command=rec["command"],
-                        exit_code=rec["exit_code"],
-                        output_sha256=rec["output_sha256"],
-                        captured_at=captured_at,
-                        attribution=attribution,
-                        semantic_digest=rec["semantic_digest"],
-                    )
-                except (
-                    UnicodeDecodeError,
-                    json.JSONDecodeError,
-                    KeyError,
-                    RecursionError,
-                    ValueError,
-                    TypeError,
-                ):
-                    continue  # malformed/pre-attribution records never block submit
-                if len(proofs) == MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
-                    raise CommandProofImportOverflow(
-                        "command proof buffer exceeds its record limit"
-                    )
-                proofs.append(proof)
-    except OSError as exc:
-        raise CommandProofImportOverflow("command proof buffer cannot be read completely") from exc
-    return proofs
 def _claim_command_proof_receipts(
     proofs: tuple[ClaimCommandProof, ...] | list[ClaimCommandProof],
 ) -> list[dict[str, object]]:
@@ -1075,7 +969,8 @@ def submit(
         # captured by the PostToolUse hook) into typed CommandProofs — the
         # observed proofs the gate trusts.
         try:
-            command_proofs = _read_command_proofs(state_dir, task_claim.id)
+            buffer_inspection = inspect_command_buffer(state_dir, task_claim.id)
+            command_proofs = list(buffer_inspection.proofs)
         except CommandProofImportOverflow as exc:
             if json_output:
                 fail("submit", str(exc), code=exc.code)
@@ -1162,7 +1057,18 @@ def submit(
             target_id=task_id,
             payload_json=payload,
         )
-        backend.append(draft)
+        try:
+            backend.append(
+                draft,
+                pre_log_check=lambda: require_buffer_unchanged(
+                    state_dir, task_claim.id, buffer_inspection,
+                ),
+            )
+        except CommandProofImportOverflow as exc:
+            if json_output:
+                fail("submit", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         # Fetch the fresh task state and evidence for gates summary.
         fresh_task = backend.get_task(task_id)

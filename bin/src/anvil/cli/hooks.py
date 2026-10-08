@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1163,23 +1164,27 @@ def hook_capture_evidence(
         buffer_dir = state_dir / ".evidence-buffer"
         buffer_dir.mkdir(exist_ok=True)
 
-        matched_claim = None
-        project = None
-        task = None
-        prd = None
-        try:
-            from anvil.clock import SystemClock as _SystemClock
-            from anvil.state.sqlite import SqliteBackend as _SqliteBackend
-
-            db_path = str(state_dir / "state.db")
-            events_path = str(state_dir / "events.jsonl")
-            _backend = _SqliteBackend(
-                db_path=db_path,
-                events_path=events_path,
-                clock=_SystemClock(),
-            )
-            _backend.initialize()
+        with contextlib.ExitStack() as capture_scope:
+            matched_claim = None
+            project = None
+            task = None
+            prd = None
             try:
+                from anvil.clock import SystemClock as _SystemClock
+                from anvil.state.sqlite import SqliteBackend as _SqliteBackend
+
+                db_path = str(state_dir / "state.db")
+                events_path = str(state_dir / "events.jsonl")
+                _backend = _SqliteBackend(
+                    db_path=db_path,
+                    events_path=events_path,
+                    clock=_SystemClock(),
+                )
+                capture_scope.callback(_backend.close)
+                _backend.initialize()
+                capture_scope.enter_context(_backend.claim_operation_lock())
+                now = datetime.datetime.now(datetime.UTC)
+                record["timestamp"] = now.isoformat()
                 pinned_claim_id = os.environ.get("ANVIL_CLAIM_ID")
                 pinned_claim = (
                     _backend.get_claim(pinned_claim_id)
@@ -1201,82 +1206,104 @@ def hook_capture_evidence(
                         if task is not None
                         else None
                     )
-            finally:
-                _backend.close()
-        except Exception:  # noqa: BLE001
-            pass  # if the DB is unavailable, fall through to orphan
+            except Exception:  # noqa: BLE001
+                capture_scope.close()
+                matched_claim = project = task = prd = None
+                # If the native boundary is unavailable, only descriptive orphan capture is allowed.
 
-        context = (
-            matched_claim.attestation_context
-            if matched_claim is not None
-            else None
-        )
-        if (
-            matched_claim is not None
-            and project is not None
-            and (context is not None or (task is not None and prd is not None))
-        ):
-            from anvil.state.models import (
-                HookCommandAttribution,
-                hook_command_semantic_digest,
-                task_snapshot_revision,
+            context = (
+                matched_claim.attestation_context
+                if matched_claim is not None
+                else None
             )
+            if (
+                matched_claim is not None
+                and project is not None
+                and (context is not None or (task is not None and prd is not None))
+            ):
+                from anvil.state.models import (
+                    HookCommandAttribution,
+                    hook_command_semantic_digest,
+                    task_snapshot_revision,
+                )
 
-            attribution = HookCommandAttribution(
-                project_id=project.id,
-                claim_id=matched_claim.id,
-                generation=matched_claim.generation,
-                claimed_by=matched_claim.claimed_by,
-                task_id=matched_claim.task_id,
-                task_revision=(
-                    context.task_revision
-                    if context is not None
-                    else task_snapshot_revision(task)
-                ),
-                prd_id=context.prd_id if context is not None else prd.id,
-                prd_revision=(
-                    context.prd_revision if context is not None else prd.revision
-                ),
-                repository_id=(
-                    context.repository_id if context is not None else None
-                ),
-                claim_start_sha=(
-                    context.claim_start_sha if context is not None else None
-                ),
-            )
-            semantic_digest = hook_command_semantic_digest(
-                attribution=attribution,
-                command=command,
-                exit_code=exit_code,
-                output_sha256=output_sha256,
-                captured_at=now,
-            )
-            record.update(
-                {
-                    "claim_id": matched_claim.id,
-                    "attribution": attribution.model_dump(mode="json"),
-                    "semantic_digest": semantic_digest,
-                }
-            )
-            buffer_file = task_claim_buffer_path(buffer_dir, matched_claim.id)
-            if buffer_file is None:
-                raise ValueError("claim id is not eligible for hook capture")
-        else:
-            # No active claim found — write to orphan buffer. Keep the
-            # diagnostic actionable without implying that a descriptive
-            # output excerpt is a typed command proof.
-            record["note"] = (
-                "orphan — no exact active claim/owner/session hook pin with "
-                "valid task context was found at capture time; "
-                "--output-file can attach it only as a descriptive excerpt and "
-                "cannot satisfy required_proofs; rerun under an explicit claim "
-                "or import a claim-bound command-proof artifact"
-            )
-            buffer_file = buffer_dir / "orphan.json"
+                attribution = HookCommandAttribution(
+                    project_id=project.id,
+                    claim_id=matched_claim.id,
+                    generation=matched_claim.generation,
+                    claimed_by=matched_claim.claimed_by,
+                    task_id=matched_claim.task_id,
+                    task_revision=(
+                        context.task_revision
+                        if context is not None
+                        else task_snapshot_revision(task)
+                    ),
+                    prd_id=context.prd_id if context is not None else prd.id,
+                    prd_revision=(
+                        context.prd_revision if context is not None else prd.revision
+                    ),
+                    repository_id=(
+                        context.repository_id if context is not None else None
+                    ),
+                    claim_start_sha=(
+                        context.claim_start_sha if context is not None else None
+                    ),
+                )
+                semantic_digest = hook_command_semantic_digest(
+                    attribution=attribution,
+                    command=command,
+                    exit_code=exit_code,
+                    output_sha256=output_sha256,
+                    captured_at=now,
+                )
+                record.update(
+                    {
+                        "claim_id": matched_claim.id,
+                        "attribution": attribution.model_dump(mode="json"),
+                        "semantic_digest": semantic_digest,
+                    }
+                )
+                buffer_file = task_claim_buffer_path(buffer_dir, matched_claim.id)
+                if buffer_file is None:
+                    raise ValueError("claim id is not eligible for hook capture")
+            else:
+                # No active claim found — write to orphan buffer. Keep the
+                # diagnostic actionable without implying that a descriptive
+                # output excerpt is a typed command proof.
+                record["note"] = (
+                    "orphan — no exact active claim/owner/session hook pin with "
+                    "valid task context was found at capture time; "
+                    "--output-file can attach it only as a descriptive excerpt and "
+                    "cannot satisfy required_proofs; rerun under an explicit claim "
+                    "or import a claim-bound command-proof artifact"
+                )
+                buffer_file = buffer_dir / "orphan.json"
 
-        # Append the JSON record as a single line (JSONL).
-        with buffer_file.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+            # Append the JSON record as a single line (JSONL).
+            if not stat.S_ISDIR(buffer_dir.stat(follow_symlinks=False).st_mode):
+                raise ValueError("evidence buffer directory must not be a symlink")
+            try:
+                existing = buffer_file.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and not stat.S_ISREG(existing.st_mode):
+                raise ValueError("evidence buffer must be a regular file")
+            flags = os.O_WRONLY | os.O_APPEND
+            flags |= os.O_CREAT | os.O_EXCL if existing is None else 0
+            for name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NONBLOCK", "O_NOFOLLOW"):
+                flags |= getattr(os, name, 0)
+            descriptor = os.open(buffer_file, flags, 0o600)
+            with os.fdopen(descriptor, "ab") as fh:
+                opened = os.fstat(fh.fileno())
+                current = buffer_file.stat(follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or not stat.S_ISREG(current.st_mode)
+                    or not os.path.samestat(opened, current)
+                    or (existing is not None and not os.path.samestat(opened, existing))
+                ):
+                    raise ValueError("evidence buffer changed before append")
+                fh.write((json.dumps(record) + "\n").encode("utf-8"))
 
     except SystemExit:
         raise
