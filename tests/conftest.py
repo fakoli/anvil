@@ -23,14 +23,16 @@ GitRepoFactory = Callable[[Path], Path]
 
 
 @pytest.fixture(autouse=True)
-def isolated_native_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def isolated_native_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Default native state belongs to this test, never the operator's home.
 
     Scoped home settings also reach subprocess CLI calls; pytest restores them
     at teardown. Explicit test overrides retain ordinary platform semantics.
     """
-    test_home = tmp_path / "anvil-home"
-    test_home.mkdir()
+    # Keep tmp_path empty for tests that initialize a repository at its root.
+    test_home = tmp_path_factory.mktemp("anvil-home")
     monkeypatch.setenv("HOME", str(test_home))
     if os.name == "nt":
         monkeypatch.setenv("USERPROFILE", str(test_home))
