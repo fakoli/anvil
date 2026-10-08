@@ -27,10 +27,12 @@ from anvil.cli._actor_output import (
 )
 from anvil.cli._helpers import (
     PRD_OPTION,
+    StateRootError,
     _load_config_optional,
     _open_backend,
     _reap_stale_claims,
     _require_state_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     canonical_prd_id,
     resolve_actor,
@@ -479,6 +481,14 @@ def packet(
         "-f",
         help="Output format: md (default) or json.",
     ),
+    attempt: bool = typer.Option(  # noqa: B008
+        False, "--attempt",
+        help="Read recorded attempt facts without writing a packet or reaping claims.",
+    ),
+    observation_at: str | None = typer.Option(  # noqa: B008
+        None, "--observation-at",
+        help="Explicit UTC observation for advisory lease and timing facts.",
+    ),
     prd: str | None = PRD_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -496,11 +506,32 @@ def packet(
     """
     from anvil.context.packets import fast_lane_packet, render_packet
 
+    if attempt:
+        if fmt not in {"md", "json"}:
+            fail("packet", "Attempt format must be md or json.", code="bad_request")
+        from anvil.attempt_view import read_attempt_view
+        from anvil.project_snapshot import ProjectSnapshotError
+
+        try:
+            result = read_attempt_view(
+                _resolve_state_dir(cwd), task_id, prd_id=prd,
+                observation_at=observation_at, bundle=bundle_mode,
+            )
+        except StateRootError:
+            fail("packet", "Project state is unavailable.", code="state_unavailable")
+        except ProjectSnapshotError as exc:
+            diagnostic = exc.error.model_dump(mode="json")
+            fail_with("packet", diagnostic.pop("message"),
+                      code=diagnostic.pop("code"), extra=diagnostic)
+        typer.echo(json.dumps(result, indent=2 if fmt == "md" else None))
+        return
+    if observation_at is not None:
+        fail("packet", "--observation-at requires --attempt.", code="bad_request")
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir)
 
     root_set_claim = None
-    backend = _open_backend(state_dir)
+    backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
     try:
         _reap_stale_claims(backend)
 
@@ -517,7 +548,7 @@ def packet(
                     backend,
                     SystemClock(),
                     actor=execution_bundle.coordinator,
-                    project_root=Path.cwd(),
+                    project_root=_resolve_project_dir(cwd),
                 ).packet(task_id)
             except BundleError as exc:
                 typer.echo(f"Error: {exc}", err=True)
@@ -642,7 +673,10 @@ def packet(
     # Re-open only for the owner-authorized sidecar write.  The first reader
     # was deliberately closed before this point; the second authoritative read
     # happens under global -> State ordering and defeats stale packet claims.
-    use_backend = _open_backend(state_dir) if root_set_claim is not None else None
+    use_backend = (
+        _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
+        if root_set_claim is not None else None
+    )
     try:
         from contextlib import nullcontext
 
@@ -818,7 +852,7 @@ def submit(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="submit", json_output=json_output)
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
     try:
         clock = SystemClock()
         _reap_stale_claims(backend)
@@ -922,7 +956,6 @@ def submit(
                 load_claim_command_proof,
                 verify_claim_command_proof_batch,
             )
-            from anvil.cli._helpers import _resolve_project_dir
             from anvil.cli.proof import _default_trust_path
 
             try:
@@ -1356,7 +1389,7 @@ def apply(
             typer.echo(json.dumps(data, indent=2))
         return
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
     try:
         _reap_stale_claims(backend)
 
@@ -1896,3 +1929,30 @@ def apply(
                     f"required_floor={rejection_metrics['required_floor']}"
                 )
                 typer.echo(f"  Recovery: {rejection_metrics['guidance']}")
+
+
+def evidence_preflight(
+    task_id: str,
+    prd: str | None = PRD_OPTION,
+    observation_at: str | None = typer.Option(None, "--observation-at"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Read complete advisory command-proof coverage without changing State."""
+    from anvil.attempt_view import read_evidence_preflight
+    from anvil.project_snapshot import ProjectSnapshotError
+
+    try:
+        result = read_evidence_preflight(
+            _resolve_state_dir(cwd), task_id, prd_id=prd, observation_at=observation_at,
+        )
+    except StateRootError:
+        fail("evidence-preflight", "Project state is unavailable.", code="state_unavailable")
+    except ProjectSnapshotError as exc:
+        diagnostic = exc.error.model_dump(mode="json")
+        fail_with("evidence-preflight", diagnostic.pop("message"),
+                  code=diagnostic.pop("code"), extra=diagnostic)
+    if json_output:
+        emit_success("evidence-preflight", result)
+    else:
+        typer.echo(json.dumps(result, indent=2))

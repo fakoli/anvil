@@ -58,6 +58,10 @@ def progress(
             "is consumed once by the next claim renewal; free-text notes never renew."
         ),
     ),
+    timing_file: Path | None = typer.Option(  # noqa: B008
+        None, "--timing-file",
+        help="Bounded command timing observation; audit only, never qualifying progress.",
+    ),
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
@@ -82,6 +86,9 @@ def progress(
     (T012).
     """
     resolved_actor = resolve_actor(actor)
+    if timing_file is not None and (bundle_mode or attestation_file is not None):
+        fail(_COMMAND, "--timing-file cannot be combined with --bundle or --attestation-file.",
+             code="bad_request")
 
     try:
         state_dir = _resolve_state_dir(cwd)
@@ -91,7 +98,15 @@ def progress(
         raise
     _require_state_dir(state_dir, command=_COMMAND, json_output=json_output)
 
-    backend = _open_backend(state_dir)
+    timing = None
+    if timing_file is not None:
+        from anvil.timing_receipts import TimingReceiptError, load_timing_receipt
+
+        try:
+            timing = load_timing_receipt(timing_file)
+        except TimingReceiptError as exc:
+            fail(_COMMAND, str(exc), code=exc.code)
+    backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
     try:
         from anvil.clock import SystemClock
         from anvil.state.models import EventDraft
@@ -116,7 +131,7 @@ def progress(
                     backend,
                     SystemClock(),
                     actor=resolved_actor,
-                    project_root=Path.cwd(),
+                    project_root=_resolve_project_dir(cwd),
                 ).note_progress(task_id, phase=phase, detail=detail)
             except BundleError as exc:
                 if json_output:
@@ -261,15 +276,24 @@ def progress(
                 # here phase is always present by construction.
                 "phase": phase,
                 **({"detail": detail} if detail is not None else {}),
+                **({"timing": timing.model_dump(mode="json")} if timing is not None else {}),
             },
         )
-        if active_claim is None or active_claim.root_set is None:
-            backend.append(draft)
-        else:
-            from anvil.roots.registry import root_set_use_authorized
+        from anvil.state.backend import EventRejected
 
-            with root_set_use_authorized(active_claim.root_set, backend=backend):
+        try:
+            if active_claim is None or active_claim.root_set is None:
                 backend.append(draft)
+            else:
+                from anvil.roots.registry import root_set_use_authorized
+
+                with root_set_use_authorized(active_claim.root_set, backend=backend):
+                    backend.append(draft)
+        except EventRejected:
+            if timing is None:
+                raise
+            fail(_COMMAND, "Timing observation does not match current claim ownership.",
+                 code="timing_receipt_refused")
     finally:
         backend.close()
 
