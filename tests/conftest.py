@@ -26,20 +26,14 @@ GitRepoFactory = Callable[[Path], Path]
 def isolated_native_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Default native state belongs to this test, never the operator's home.
 
-    Explicit environment or Path.home overrides in a test keep their ordinary
-    platform semantics; no default environment variable is reassigned here.
+    Scoped home settings also reach subprocess CLI calls; pytest restores them
+    at teardown. Explicit test overrides retain ordinary platform semantics.
     """
-    native_home = Path.home
-    baseline = {key: os.environ.get(key) for key in ("HOME", "USERPROFILE")}
     test_home = tmp_path / "anvil-home"
     test_home.mkdir()
-
-    def resolve_home(cls: type[Path]) -> Path:
-        if any(os.environ.get(key) != value for key, value in baseline.items()):
-            return native_home()
-        return test_home
-
-    monkeypatch.setattr(Path, "home", classmethod(resolve_home))
+    monkeypatch.setenv("HOME", str(test_home))
+    if os.name == "nt":
+        monkeypatch.setenv("USERPROFILE", str(test_home))
 
 
 @pytest.fixture(scope="session")
