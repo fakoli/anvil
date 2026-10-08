@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -161,6 +162,83 @@ def _capture(tmp_path, *, failed=False):
         )
     except typer.Exit as exc:
         assert exc.exit_code == 0
+
+
+@pytest.mark.parametrize("tail", [b"\n", b"", b'\n{"partial":', None])
+def test_capture_preserves_eof_and_separates_next_record(tmp_path, monkeypatch, tail):
+    _, claim = _claim(tmp_path)
+    monkeypatch.setenv("ANVIL_CLAIM_ID", claim)
+    _capture(tmp_path, failed=True)
+    state = tmp_path / ".anvil"
+    path = state / ".evidence-buffer" / f"{claim}.json"
+    before = path.read_bytes().removesuffix(b"\n") + tail if tail is not None else b""
+    path.write_bytes(before)
+    expected = [1] if before else []
+    assert [proof.exit_code for proof in inspect_command_buffer(state, claim).proofs] == expected
+    _capture(tmp_path)
+    after = path.read_bytes()
+    separator = b"" if not before or before.endswith(b"\n") else b"\n"
+    assert after.startswith(before + separator)
+    added = after[len(before + separator):]
+    assert added.count(b"\n") == 1 and json.loads(added)["exit_code"] == 0
+    result = inspect_command_buffer(state, claim)
+    assert [proof.exit_code for proof in result.proofs] == expected + [0]
+    assert dict(result.skipped) == ({"invalid": 1} if tail and b"partial" in tail else {})
+
+
+@pytest.mark.parametrize("ancestor", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_capture_parent_swap_never_writes_foreign_file(
+    tmp_path, monkeypatch, ancestor, existing,
+):
+    _, claim = _claim(tmp_path)
+    monkeypatch.setenv("ANVIL_CLAIM_ID", claim)
+    directory = tmp_path / ".anvil" / ".evidence-buffer"
+    directory.mkdir()
+    basename = f"{claim}.json"
+    if existing:
+        _capture(tmp_path, failed=True)
+    parent = directory.parent if ancestor else directory
+    preserved = parent.with_name(parent.name + "-preserved")
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    target_dir = foreign / ".evidence-buffer" if ancestor else foreign
+    target_dir.mkdir(exist_ok=True)
+    target = target_dir / basename
+    if existing:
+        target.write_bytes(b"foreign bytes")
+    original_open = hooks.os.open
+    attempted = False
+    refused = False
+
+    def racing(candidate, *args, **kwargs):
+        nonlocal attempted, refused
+        if Path(candidate).name == basename and not attempted:
+            attempted = True
+            try:
+                parent.rename(preserved)
+            except OSError:
+                if os.name != "nt":
+                    raise
+                refused = True
+            else:
+                parent.symlink_to(foreign, target_is_directory=True)
+        return original_open(candidate, *args, **kwargs)
+
+    # POSIX follows the real dir_fd open; Windows attempts a real rename while
+    # the native directory handles must deny it. Neither path fakes custody.
+    monkeypatch.setattr(hooks.os, "open", racing)
+    _capture(tmp_path)
+    assert attempted
+    if existing:
+        assert target.read_bytes() == b"foreign bytes"
+    else:
+        assert not target.exists()
+    if os.name == "nt":
+        assert refused
+        assert [proof.exit_code for proof in inspect_command_buffer(
+            tmp_path / ".anvil", claim,
+        ).proofs] == ([1, 0] if existing else [0])
 
 
 def test_capture_waits_for_native_append_lock_and_keeps_failed_result(tmp_path, monkeypatch):
