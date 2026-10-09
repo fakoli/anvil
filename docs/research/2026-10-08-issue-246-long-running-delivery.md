@@ -2,7 +2,7 @@
 
 Reviewed 2026-10-08 against fetched Anvil main `f7d9f265fd2061da3e1b50f8e80b0e76de237298`. Companion: [delivery plan](../plans/2026-10-08-issue-246-long-running-delivery.md).
 
-**Scope:** issue bodies and comments for the parent, six workstreams, direct historical references, and relevant linked background issues; current source tracing; a disposable evidence-reader reproduction; the cited OpenAI guidance. No live proof repair or state mutation was performed. Incident timings and historical delivery claims below are source-reported unless explicitly identified as reproduced.
+**Initial review scope:** issue bodies and comments for the parent, six workstreams, direct historical references, and relevant linked background issues; current source tracing; a disposable evidence-reader reproduction; the cited OpenAI guidance. No live proof repair or state mutation was performed during the initial review. The authorized build and disposable-project qualification below are subsequent work. Incident timings and historical delivery claims below are source-reported unless explicitly identified as reproduced.
 
 ## Issue inventory
 
@@ -27,7 +27,7 @@ GitHub state observed during this review:
 
 The parent and six new workstreams had no comments when reviewed. Their latest edits were `2026-10-08T07:00:07Z` through `2026-10-08T07:00:26Z`; #242's latest comment was `2026-09-26T20:42:13Z`. Historical PRs and external incident artifacts are background references, not additional implementation workstreams or independently revalidated releases. This is a bounded linked-issue review, not a recursive audit of every historical PR.
 
-## Findings grounded in current source
+## Findings grounded in the initial pinned source
 
 ### F1: the reader returns an incomplete success-shaped prefix
 
@@ -97,7 +97,7 @@ Documentation validation also passed: `git diff --check`, the strict MkDocs buil
 
 ## Research items and decision gates
 
-All items below are **open**. Owners are proposed roles, not claims or assignments. Update this register with the selected decision, pinned evidence, and validation result when resolved; native task state remains authoritative for execution.
+The table preserves the initial questions and proposed owner boundaries. The selected decisions and observed qualification are recorded below; native task state remains authoritative for execution.
 
 | ID / issue | Question and current recommendation | Bounded investigation and required output | Owner / blocks |
 |---|---|---|---|
@@ -110,6 +110,47 @@ All items below are **open**. Owners are proposed roles, not claims or assignmen
 | R7 / #251 | Which confirmations and repeated checks are redundant, and which are mandatory? Prefer one shared policy explanation. | Audit four skills plus installed/package copies, AGENTS and command manifests. Separate routine authorization from immutable acceptance, retained custody and forced-ownership cases. Test actual CLI/MCP and built artifacts, ordinary/bundle paths, and an interrupted/rejected/reworked scenario. Keep model choices optional and harness-owned. | Plugin/harness owner; blocks claiming workflow consistency. |
 | R8 / #252 | Which phase and failed-run intervals are actually derivable? Prefer explicit unknowns over fabricated history. | Map each requested duration/count to event/proof fields and attribution. Cover hook single timestamps, explicit success-only proof intervals, free-form notes, overlapping commands and clock skew. Add a minimal typed observational receipt only for a demonstrated gap; preserve completion and renewal semantics. | Metrics/state owner; blocks complete timing claims. |
 | R9 / #246 | What makes the pilot comparable and worth shipping? Keep the same required checks and review policy. | Predeclare two comparable future cycles, source/environment/runner and reviewer configuration, packet/evidence budgets, cold/warm conditions, retries and external waits. Record raw sanitized receipts, required-fact coverage, handoff size, redundant reads, dispatch delay, failures and total elapsed time. Report limitations; no invented percentage target or model speedup. | Pilot coordinator and independent outcome reviewer; blocks efficiency claims/epic closeout. |
+
+## Selected decisions and observed qualification
+
+Updated 2026-10-09 UTC. The integrated source milestone
+`3952ee2fdb02f0b9ccd7626eee7952624f9626a6` passed 6,219 Linux tests
+(65 skipped), 751 native Windows tests (25 skipped), and 775 native Darwin tests
+(1 skipped). These are separate runs with different platform coverage. Ruff,
+the required mypy checks, strict documentation builds, wheel and sdist-wheel
+checks passed. The isolated installed 0.6.16 candidate exposed API 19, 88 CLI
+leaves, 100 CLI contracts and 38 MCP tools (26 on the default execution surface).
+Three independent whole-task reviews passed before intermediate disposition.
+Final package/CI additions require fresh checks at their own candidate source;
+these milestone results do not substitute for that final qualification.
+
+| Item | Selected decision and observed result |
+|---|---|
+| R1 | Adopt the existing correction's reviewed source after its owner released custody. Preserve its original task and acceptance history; qualify residual preflight, caller and discovery work separately. No competing writer was introduced. |
+| R2 | Use one complete bounded inspection contract with typed refusals, the unchanged 16-record/1-MiB limits, EOF/file-identity/no-follow checks and preserved failures. CLI, MCP and root-set submission revalidate at their append boundary. Preflight remains advisory. Boundary, race and caller regressions pass. |
+| R3 | Stop the actual runner, release the rejected generation through the supported surface, then claim and verify a fresh generation. The Python pilot captured 17 real passing commands; inspection and submission refused the complete oversized buffer without appending submission or changing its bytes. All subprocesses stopped, the old claim released, and the fresh generation began without inherited proof coverage. |
+| R4 | Append exact acceptance invalidation under explicit authority and an independent review, using the frozen acceptance/evidence/revision/claim context. In the controlled pilot, wrong-context refusal appended nothing, exact invalidation retained historical signed bytes, and retries appended nothing. Retrying after fresh acceptance left the newer accepted generation intact. Both historical and current signatures still verified; signature authenticity alone does not establish current native acceptance validity. Custody, dependent-consumer and replay guards are covered by the native suites, not an omniscient cross-project revocation service. |
+| R5 | Extend existing optional Verification metadata with a repository-owned profile and frozen manifest/declared-source digests. Preserve literal commands and legacy no-profile serialization. Two installed-candidate pilots used different Python JSON and Node CSV runners. Source/profile drift, platform boundaries, compensation and replay tests pass. Declared wrapper hashes do not transitively freeze every program input; fresh evidence remains necessary. |
+| R6 | Reuse query-only packet/attempt and preflight entry points, with one State frontier and supported artifact references. Responses are bounded to 64 KiB, scanning to 32 MiB/20,000 events; missing facts and overflow remain explicit. Ordinary and bundle pilot reads preserved all required command outcomes, including failures, without mutating their journals. No extra summary store or causal token-saving claim was added. |
+| R7 | Reuse standing routine authorization, preserve three independent whole-task reviews and protected disposition/custody gates, and leave final project validation with the user. Shipped and installed instructions, manifests and CLI/MCP contracts agree at the qualified milestone. Real ordinary rejection/rework and bundle completion refusal/review/integration/release cycles exercised those boundaries. |
+| R8 | Add a bounded schema-1 observational timing receipt using exact claim attribution, UTC and monotonic measurements. It grants no proof, renewal or ownership. The Python pilot ingested 22 ordinary observations. Its seventeenth overflow-run timing and the Node bundle timings remain private measurements because those native ingestion paths were not supported. Unknown review, coordination and external-wait intervals are not zero. |
+| R9 | Qualify two useful source cycles in distinct disposable projects using the same installed candidate and required review policy. Root observed 26 command executions, including two genuine failing test runs, and a separate controlled Python recovery acceptance. Summed monotonic execution was 17.929740 seconds; the observed UTC execution-interval union was 17.935859 seconds. These different measurements include deliberate overflow qualification. Cache conditions were uncontrolled and no matched model/policy comparison was performed, so there is no percentage, engineer-day or model-speedup claim. |
+
+The Python project completed independent rejection, normal rework, signed
+acceptance, controlled exact invalidation, overflow refusal and fresh acceptance.
+The Node project completed a real failed test, useful rework, refused unproven
+bundle completion, three reviews, strict member acceptance, actual local Git
+integration, and terminal reconciliation releasing its owner. Both projects are
+clean and have no active claims. Reviewer reruns remain separately attributable;
+they are not extra coordinator executions or replacement native proofs.
+
+Raw sanitized receipts, proof and buffer hashes, exact current task contracts,
+review verdicts, source identities, timing limits and delivery status are retained
+in the existing shared Anvil research workspace. Final candidate verification and
+exact-head CI results are attached to native evidence and the delivery PR so that
+recording CI outcomes does not change the source they qualify. Final user project
+validation remains pending; local acceptance and integration are not GitHub merge,
+release publication, installation into live clients or deployment.
 
 ## External guidance and limits
 
@@ -127,7 +168,7 @@ The [#242 pilot report](https://github.com/fakoli/anvil/issues/242#issuecomment-
 
 - Main revision and clean checkout equality were verified by fetch plus `rev-parse` / `rev-list`; the review did not inspect another runner's private working edits.
 - The reported 39-capture incident, roughly 192 KB handoff, and environment-failure timings in the issues were not independently reconstructed. Only the synthetic reader behavior was reproduced here.
-- Future schemas, names, APIs, recovery operations, and timing receipts are proposals until implemented and qualified. Existing tests passing does not make them shipped.
+- Initial proposed contracts are resolved by the selected decisions above. Milestone tests, final candidate checks, GitHub delivery and final user validation remain distinct facts.
 - This register stores only product-level conclusions and identifiers. Raw issue exports containing incidental operational details and local state snapshots are not added to product documentation.
 
 [reader]: https://github.com/fakoli/anvil/blob/f7d9f265fd2061da3e1b50f8e80b0e76de237298/bin/src/anvil/cli/packet_apply.py#L90-L196

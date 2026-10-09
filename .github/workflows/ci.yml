@@ -131,6 +131,7 @@ jobs:
           tests/test_native_evidence_correction.py
           tests/test_surface_contract.py
           tests/test_long_running_delivery.py
+          tests/test_long_running_installation.py
           tests/test_mcp_stdio.py
           tests/test_root_sets.py::test_enrollment_without_flock_refuses_before_owner_changes
           tests/test_root_sets.py::test_shared_json_reader_requires_bounded_regular_utf8

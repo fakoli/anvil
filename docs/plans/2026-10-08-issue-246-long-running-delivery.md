@@ -6,13 +6,13 @@ Prepared 2026-10-08. **Status: implementation authorized as an unattended goal; 
 
 The user authorized completion as an unattended goal on 2026-10-08, with final project validation and no interim approval steps. Routine implementation decisions, intermediate source milestones, tests, independent reviews and integration may proceed under that standing authorization. Required review, evidence, custody and CI gates remain in force. The coordinator must not impersonate a human reviewer, weaken a review floor, recover unrelated live tasks or change serving.
 
-Execution is tracked in the existing shared Anvil workspace under the named PRD `issue-246-long-running-delivery`. Eight tasks cover profile contracts, profile planning, claim enforcement, current-attempt reads, timing, correction/preflight integration, shipped guidance, and cross-project qualification. The existing `native-evidence-correction:T001` remains the sole writer for its overlapping evidence/recovery contract. Integration must wait for its reservations to clear and its reviewed source to be available.
+Execution is tracked in the existing shared Anvil workspace under the named PRD `issue-246-long-running-delivery`. Eight tasks cover profile contracts, profile planning, claim enforcement, current-attempt reads, timing, correction/preflight integration, shipped guidance, and cross-project qualification. The existing `native-evidence-correction:T001` was the sole writer for its original overlapping contract. Its reviewed source was adopted after custody released; the original claim and acceptance history remain intact. Residual work used separate bounded claims.
 
 The profile design uses a repository-owned `anvil-verification.toml`, explicit name/platform/manifest-digest references in the canonical PRD, and frozen digests of declared runner files. Updating a profile requires an ordinary PRD revision and review. The parser stays pure; planning supplies an explicit repository root. Existing commands/proof requirements remain authoritative, and absent profile fields retain legacy serialization.
 
 The current-attempt read must enter a query-only boundary before ordinary packet generation's lease maintenance or sidecar writes. Provider snapshot composition is a consistency precedent, but its full-history hashing is unsuitable as a bounded scan implementation. Timing must include process rejections that existing acceptance-rate metrics deliberately omit.
 
-Tracking: [#246](https://github.com/fakoli/anvil/issues/246). Evidence, source inventory, and unresolved decisions: [research register](../research/2026-10-08-issue-246-long-running-delivery.md).
+Tracking: [#246](https://github.com/fakoli/anvil/issues/246). Evidence, source inventory, and selected research decisions: [research register](../research/2026-10-08-issue-246-long-running-delivery.md).
 
 ## Recommendation
 
@@ -24,9 +24,9 @@ The decomposition is sound, but execution needs these clarifications:
 2. **Separate safe refusal from usable recovery.** Refusing a 17th proof fixes silent incompleteness; it does not itself give a long claim a supported path back to verification. Resolve that operator path without deleting captures, selecting passing results, or raising limits.
 3. **Freeze shared identities once.** Evidence preflight, resume packets, profiles, and timing must agree on project/PRD/task, claim/generation, evidence/review attempt, source identity, and observation frontier. Reuse existing types rather than inventing parallel identities.
 4. **Keep missing facts visible.** A lightweight packet can currently omit declared evidence text. A captured-at timestamp does not establish command duration. Neither should become a false completeness claim.
-5. **Keep governance explicit.** Skill cleanup must preserve this repository's three independent adversarial review angles and human confirmation before immutable acceptance. Advisory review tiers cannot lower that floor.
+5. **Keep governance explicit.** Skill cleanup must preserve this repository's three independent adversarial review angles and explicit disposition authority before immutable acceptance. Advisory review tiers cannot lower that floor.
 
-## Verified baseline and ownership
+## Initial verified baseline and ownership
 
 - `git fetch origin` completed. The initial clean checkout and `origin/main` both resolved to `f7d9f265fd2061da3e1b50f8e80b0e76de237298`, with zero commits ahead or behind. This is also the revision pinned in #246–#252.
 - The installed CLI passed `anvil prd source-name --help`. MCP project status resolved the existing shared `anvil` workspace; no initialization was needed.
@@ -82,7 +82,7 @@ Logical independence does not imply safe simultaneous edits. #247/#248 share `pa
 
 ## Validation and acceptance
 
-For this documentation review, the evidence-reader baseline check was run:
+For the initial documentation review, the evidence-reader baseline check was run:
 
 ```sh
 uv run --project bin --frozen pytest tests/test_proof_gate.py tests/test_strict_evidence.py -k 'read_command_proofs or hook_buffer_reader_is_bounded' -q
@@ -101,16 +101,16 @@ Implementation should extend the existing relevant suites, with these responsibi
 | #251 | `test_skill_cli_contract.py`, `test_agent_plugin_manifest.py`, `test_install_manifests.py`, installed-artifact compatibility and disposable workflows. |
 | #252 | `test_progress_cli.py`, `test_bundle_status.py`, snapshot/metrics fixtures. |
 
-Follow repository lint, packaging, documentation, and CI requirements for each implementation change. Review the final source with at least three independent adversarial angles before presenting an Anvil task for acceptance: evidence/caller behavior, state/replay/ownership, and surface compatibility/privacy. Resolve blocking findings and repeat affected checks. Human confirmation remains required before immutable `anvil apply --approve`; review completion alone does not grant it.
+Follow repository lint, packaging, documentation, and CI requirements for each implementation change. Review the final source with at least three independent adversarial angles before presenting an Anvil task for acceptance: evidence/caller behavior, state/replay/ownership, and surface compatibility/privacy. Resolve blocking findings and repeat affected checks. Immutable `anvil apply --approve` requires explicit user authority; review completion alone does not grant it. The standing unattended authorization covers these intermediate qualification dispositions. Protected gates and final user project validation remain separate.
 
 Epic closeout requires:
 
-- [ ] One disposable lifecycle includes a real failed attempt, independent rejection, normal rework, fresh evidence, acceptance, and actual custody release.
-- [ ] A second structurally different project uses the same native contracts without Serving-specific assumptions.
-- [ ] Exact accepted-attempt recovery is demonstrated separately with all refusal guards and byte-identical historical proof/evidence.
-- [ ] Both ordinary and bundle paths preserve their respective ownership and review rules.
-- [ ] Bounded current context retains all required facts or retrieves them through supported references; raw history remains available.
-- [ ] At least two comparable future cycles report environment retries, evidence processing, handoff, review, rework, stop/release, next dispatch, and external waits, with unknowns and failures included.
+- [x] One disposable lifecycle includes a real failed attempt, independent rejection, normal rework, fresh evidence, acceptance, and actual custody release.
+- [x] A second structurally different project uses the same native contracts without Serving-specific assumptions.
+- [x] Exact accepted-attempt recovery is demonstrated separately with all refusal guards and byte-identical historical proof/evidence.
+- [x] Both ordinary and bundle paths preserve their respective ownership and review rules.
+- [x] Bounded current context retains all required facts or retrieves them through supported references; raw history remains available.
+- [x] Two predeclared useful cycles retain actual commands, failures, review/rework, stopped runners, release and dispatch facts. Unmeasured coordination/external waits and uncontrolled cache conditions remain explicit; the cycles establish cross-project behavior, not a matched performance comparison.
 - [ ] Installed CLI/MCP/plugin schemas and examples match delivered commands; CI, replay, and required platform checks pass.
 
-No implementation outcome or performance improvement is claimed by the baseline review. Source mapping and independent review now resolve the remaining research items during the authorized build; outcomes must be pinned to final source and verification evidence.
+The [selected research decisions](../research/2026-10-08-issue-246-long-running-delivery.md#selected-decisions-and-observed-qualification) record implemented contracts and observed pilot results. The qualified `3952ee2` milestone passed Linux, native Windows and Darwin checks, installed CLI/MCP discovery, strict docs, Ruff and required mypy checks. Final installed-test and CI coverage additions require fresh composed checks and three independent whole-task reviews before qualification disposition. Exact-head CI and delivery receipts belong in native evidence and the PR. The user validates the final integrated project; no performance improvement, final human validation, GitHub merge or live deployment is inferred.

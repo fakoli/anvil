@@ -24,6 +24,13 @@ refuses overflow instead of selecting a passing suffix. Its proof ceilings are
 one State frontier and cumulative bounds. Default `anvil packet T001` still
 writes the ordinary packet.
 
+If complete inspection reports overflow, observe that the repository runner has
+stopped before releasing the rejected generation with `anvil release T001`.
+Preserve the original buffer and historical evidence. Inspect readiness and
+claim a fresh eligible generation; capture its literal required checks again.
+Do not trim, choose passing records, raise limits or relabel old captures. Bundle
+custody and replacement-generation rules remain coordinator-owned.
+
 The repository owns its verification runner, prerequisites, environment checks,
 timeouts and process cleanup. [Verification profiles](verification-profiles.md)
 freeze metadata and declared source bytes; Anvil does not execute a runner or
@@ -61,7 +68,10 @@ an explicit `--observation-at` UTC timestamp. Unknown runner stop, reservation
 release and external waits stay unknown; the view supplies no forecast.
 
 Accepted-attempt correction records exact invalidation provenance while retaining
-historical acceptance and evidence bytes. Replay does not consult current profile
+historical acceptance and evidence bytes. An old signed proof may still verify
+cryptographically after native acceptance has been invalidated; consult the
+current State for acceptance validity. Exact retries cannot reopen a newer
+accepted generation. Replay does not consult current profile
 files. A new claim generation inherits no old proof coverage. Integration,
 PR/merge and deployment facts require recorded delivery evidence. Installed
 artifact checks, native platform checks, actual project pilots and final user

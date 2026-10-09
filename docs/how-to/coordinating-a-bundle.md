@@ -59,6 +59,10 @@ anvil bundle review B001 --round 1 --angle integration \
   --decision approve --actor reviewer-c
 anvil bundle finalize-review B001 --actor lead
 
+# Apply each member only under explicit disposition authority and satisfied gates.
+anvil apply T001 --approve --strict --actor lead
+anvil apply T002 --approve --strict --actor lead
+
 anvil bundle checkpoint B001 --commit "$COMMIT_SHA" --actor lead
 anvil bundle reconcile B001 --commit "$COMMIT_SHA" --actor lead
 ```
@@ -69,6 +73,14 @@ On MCP, the equivalent operations are `create_bundle`, `claim_bundle`,
 `record_bundle_review` calls, `finalize_bundle_review`, `checkpoint_bundle`, and
 `reconcile_bundle`. Renew or release a coordinator lease through `renew_claim` or
 `release_task` with `target_kind="bundle"`.
+
+`bundle finalize-review` records the bundle review result; it does not apply
+member acceptance or merge Git branches. Apply each member separately under
+established explicit disposition authority after its evidence and three
+independent reviews pass. Protected gates and final human project validation
+remain separate. A checkpoint or reconciliation records delivery facts; perform
+the authorized Git integration and observe its actual commit before recording
+`--merged` reconciliation and releasing coordinator custody.
 
 ## Bounded delegation
 
@@ -145,6 +157,7 @@ to checkpoint after the review gate passes, when a commit or PR exists. At least
 ```bash
 anvil bundle checkpoint B001 --commit "$COMMIT_SHA" --pr-url "$PR_URL" --actor lead
 anvil bundle reconcile B001 --commit "$COMMIT_SHA" --pr-url "$PR_URL" --actor lead
+# Only after observing the authorized Git integration at this actual commit:
 anvil bundle reconcile B001 --commit "$COMMIT_SHA" --pr-url "$PR_URL" --merged --actor lead
 ```
 
