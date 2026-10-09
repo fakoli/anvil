@@ -104,6 +104,42 @@ jobs:
           -q
           --basetemp "${{ runner.temp }}/anvil-timing-harness"
 
+      - name: Verify long-running delivery contracts
+        env:
+          _TYPER_FORCE_DISABLE_TERMINAL: "1"
+        run: >-
+          uv run --project bin --locked --python 3.11 pytest
+          tests/test_verification_profiles.py
+          tests/test_command_proof_artifact.py
+          tests/test_proof_gate.py
+          tests/test_profile_cli.py
+          tests/test_profile_mcp.py
+          tests/test_profile_live_boundaries.py
+          tests/test_profile_roots.py
+          tests/test_profile_workflows.py
+          tests/test_attempt_view.py
+          tests/test_attempt_timing.py
+          tests/test_attempt_bundle.py
+          tests/test_attempt_surfaces.py
+          tests/test_attempt_surfaces_mcp.py
+          tests/test_evidence_preflight_cli.py
+          tests/test_evidence_preflight_mcp.py
+          tests/test_evidence_preflight_common.py
+          tests/test_timing_receipts.py
+          tests/test_timing_ingestion.py
+          tests/test_progress_cli.py
+          tests/test_native_evidence_correction.py
+          tests/test_surface_contract.py
+          tests/test_long_running_delivery.py
+          tests/test_long_running_installation.py
+          tests/test_mcp_stdio.py
+          tests/test_root_sets.py::test_enrollment_without_flock_refuses_before_owner_changes
+          tests/test_root_sets.py::test_shared_json_reader_requires_bounded_regular_utf8
+          tests/test_root_sets.py::test_mcp_root_lifecycle_refuses_without_changing_custody
+          -n 4
+          -q
+          --basetemp "${{ runner.temp }}/anvil-long-running-contracts"
+
   test:
     name: test (python 3.11)
     runs-on: ubuntu-latest

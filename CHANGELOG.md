@@ -6,6 +6,32 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.16] - 2026-10-08
+
+### Added
+
+- Advisory command-proof preflight and bounded ordinary/bundle attempt reads
+  through CLI and MCP, with retained failure and invalidation history.
+- Literal verification profiles bound to reviewed content and prepared Git
+  targets, plus command timing observations that carry no completion authority.
+
+### Changed
+
+- Public API advances to 19 for the new advisory commands and tools; MCP exposes
+  26 execution tools by default and 38 with planning enabled.
+- Profiled claims prepare Git before State publication and compensate only
+  changes they own. Evidence submission rechecks the complete buffer at append.
+- Unsupported profiled workflow creation refuses before creating State records.
+
+## [0.6.15] - 2026-10-08
+
+### Changed
+
+- Complete command-proof buffer inspection refuses oversized, nonregular,
+  replaced, or incomplete input before submission and preserves recorded failures.
+- Candidate package and harness versions include a new installed-wheel CLI
+  contract snapshot for the staged evidence-correction surface.
+
 ## [0.6.14] - 2026-09-29
 
 ### Changed

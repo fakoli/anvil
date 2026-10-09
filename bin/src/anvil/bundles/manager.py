@@ -26,9 +26,11 @@ from anvil.state.models import (
     ClaimGitMetadata,
     EventDraft,
     ExecutionBundle,
+    Task,
     TaskStatus,
 )
 from anvil.state.schema import SCHEMA_VERSION
+from anvil.verification_profiles import ProfileError, require_profile_current
 
 
 class BundleError(Exception):
@@ -120,6 +122,22 @@ class BundleManager:
             raise BundleError("Bundle member disappeared after preflight.")
         typed_tasks = [task for task in tasks if task is not None]
 
+        if any(task.verification.profile is not None for task in typed_tasks):
+            caller_check = pre_log_check
+
+            def check_profiles_before_log() -> None:
+                if caller_check is not None:
+                    caller_check()
+                if self._backend.get_bundle(bundle_id) != bundle:
+                    raise BundleError("verification profile refused: binding_mismatch")
+                for task in typed_tasks:
+                    current = self._backend.get_task(task.id)
+                    if current != task:
+                        raise BundleError("verification profile refused: binding_mismatch")
+                    self._require_profile_current(current)
+
+            pre_log_check = check_profiles_before_log
+
         expected_files: list[str] = []
         for task in typed_tasks:
             for path in task.likely_files:
@@ -199,6 +217,7 @@ class BundleManager:
             task = self._backend.get_task(task_id)
             if task is None:
                 raise BundleError(f"Bundle member task '{task_id}' not found.")
+            self._require_profile_current(task)
             tasks.append(task)
         members = set(bundle.task_ids)
         graph = analyze_bundle_graph(
@@ -255,6 +274,16 @@ class BundleManager:
                     f"Bundle conflicts with active claims: ['{active.id}']."
                 )
         return bundle
+
+    def _require_profile_current(self, task: Task) -> None:
+        if task.verification.profile is None:
+            return
+        if self._project_root is None:
+            raise BundleError("verification profile refused: invalid_path")
+        try:
+            require_profile_current(task.verification, self._project_root)
+        except ProfileError as exc:
+            raise BundleError(str(exc)) from None
 
     def note_progress(
         self,

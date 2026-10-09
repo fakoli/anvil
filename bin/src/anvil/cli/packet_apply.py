@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
-import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +13,11 @@ if TYPE_CHECKING:
     from anvil.clock import Clock
     from anvil.state.backend import Backend
 
+from anvil.claims.evidence_import import (
+    CommandProofImportOverflow,
+    inspect_command_buffer,
+    require_buffer_unchanged,
+)
 from anvil.cli._actor_output import (
     actor_identity_data,
     actor_mismatch_data,
@@ -24,24 +27,25 @@ from anvil.cli._actor_output import (
 )
 from anvil.cli._helpers import (
     PRD_OPTION,
+    StateRootError,
     _load_config_optional,
     _open_backend,
     _reap_stale_claims,
     _require_state_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     canonical_prd_id,
     resolve_actor,
     resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
-from anvil.naming import safe_path_component, task_claim_buffer_path
+from anvil.naming import safe_path_component
 from anvil.state.models import (
     MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
     MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
     ClaimCommandProof,
     CommandProof,
     EventDraft,
-    HookCommandAttribution,
     RejectionQualityFinding,
     RejectionQualityFindingCode,
     RejectionReasonCode,
@@ -88,105 +92,10 @@ def _rejection_metrics_block(
 
 
 def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
-    """Reconcile the per-claim evidence buffer into typed CommandProofs.
-
-    The capture-evidence hook writes one JSONL record per bash command to
-    ``.anvil/.evidence-buffer/<claim-id>.json``. Each well-formed record
-    becomes a :class:`CommandProof` only when its exact claim attribution and
-    semantic digest validate. ``output_sha256`` is carried through as-is, NOT
-    re-verified here — the proof remains only as trustworthy as the hook that
-    wrote the buffer. Malformed, historical unattributed, or cross-claim lines
-    are skipped, never fatal: ``submit`` must still succeed.
-    """
-    import datetime
-
-    buffer_file = task_claim_buffer_path(state_dir / ".evidence-buffer", claim_id)
-    if buffer_file is None:
-        return []
-    descriptor = -1
-    try:
-        before_open = os.stat(buffer_file, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(before_open.st_mode)
-            or before_open.st_size < 0
-            or before_open.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
-        ):
-            return []
-        flags = os.O_RDONLY
-        for flag_name in (
-            "O_BINARY",
-            "O_CLOEXEC",
-            "O_NOINHERIT",
-            "O_NONBLOCK",
-            "O_NOFOLLOW",
-        ):
-            flags |= getattr(os, flag_name, 0)
-        descriptor = os.open(buffer_file, flags)
-        opened = os.fstat(descriptor)
-        after_open = os.stat(buffer_file, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or not stat.S_ISREG(after_open.st_mode)
-            or not os.path.samestat(opened, after_open)
-            or opened.st_size < 0
-            or opened.st_size > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
-        ):
-            return []
-        stream = os.fdopen(descriptor, "rb")
-        descriptor = -1
-    except OSError:
-        return []
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-
-    proofs: list[CommandProof] = []
-    bytes_read = 0
-    with stream:
-        while (
-            len(proofs) < MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS
-            and bytes_read < MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
-        ):
-            remaining = MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES - bytes_read
-            raw_line = stream.readline(remaining + 1)
-            if not raw_line:
-                break
-            bytes_read += len(raw_line)
-            if len(raw_line) > remaining:
-                break
-            try:
-                line = raw_line.decode("utf-8").strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("claim_id") != claim_id:
-                    continue
-                attribution = HookCommandAttribution.model_validate(rec["attribution"])
-                if attribution.claim_id != claim_id:
-                    continue
-                captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
-                proofs.append(
-                    CommandProof(
-                        command=rec["command"],
-                        exit_code=rec["exit_code"],
-                        output_sha256=rec["output_sha256"],
-                        captured_at=captured_at,
-                        attribution=attribution,
-                        semantic_digest=rec["semantic_digest"],
-                    )
-                )
-            except (
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                KeyError,
-                RecursionError,
-                ValueError,
-                TypeError,
-            ):
-                continue  # malformed/pre-attribution records never block submit
-    return proofs
+    """Compatibility adapter over the complete shared hook-buffer inspector."""
+    return list(inspect_command_buffer(
+        state_dir, claim_id, max_bytes=MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+    ).proofs)
 
 
 def _claim_command_proof_receipts(
@@ -572,6 +481,14 @@ def packet(
         "-f",
         help="Output format: md (default) or json.",
     ),
+    attempt: bool = typer.Option(  # noqa: B008
+        False, "--attempt",
+        help="Read recorded attempt facts without writing a packet or reaping claims.",
+    ),
+    observation_at: str | None = typer.Option(  # noqa: B008
+        None, "--observation-at",
+        help="Explicit UTC observation for advisory lease and timing facts.",
+    ),
     prd: str | None = PRD_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -589,11 +506,32 @@ def packet(
     """
     from anvil.context.packets import fast_lane_packet, render_packet
 
+    if attempt:
+        if fmt not in {"md", "json"}:
+            fail("packet", "Attempt format must be md or json.", code="bad_request")
+        from anvil.attempt_view import read_attempt_view
+        from anvil.project_snapshot import ProjectSnapshotError
+
+        try:
+            result = read_attempt_view(
+                _resolve_state_dir(cwd), task_id, prd_id=prd,
+                observation_at=observation_at, bundle=bundle_mode,
+            )
+        except StateRootError:
+            fail("packet", "Project state is unavailable.", code="state_unavailable")
+        except ProjectSnapshotError as exc:
+            diagnostic = exc.error.model_dump(mode="json")
+            fail_with("packet", diagnostic.pop("message"),
+                      code=diagnostic.pop("code"), extra=diagnostic)
+        typer.echo(json.dumps(result, indent=2 if fmt == "md" else None))
+        return
+    if observation_at is not None:
+        fail("packet", "--observation-at requires --attempt.", code="bad_request")
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir)
 
     root_set_claim = None
-    backend = _open_backend(state_dir)
+    backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
     try:
         _reap_stale_claims(backend)
 
@@ -610,7 +548,7 @@ def packet(
                     backend,
                     SystemClock(),
                     actor=execution_bundle.coordinator,
-                    project_root=Path.cwd(),
+                    project_root=_resolve_project_dir(cwd),
                 ).packet(task_id)
             except BundleError as exc:
                 typer.echo(f"Error: {exc}", err=True)
@@ -735,7 +673,10 @@ def packet(
     # Re-open only for the owner-authorized sidecar write.  The first reader
     # was deliberately closed before this point; the second authoritative read
     # happens under global -> State ordering and defeats stale packet claims.
-    use_backend = _open_backend(state_dir) if root_set_claim is not None else None
+    use_backend = (
+        _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
+        if root_set_claim is not None else None
+    )
     try:
         from contextlib import nullcontext
 
@@ -911,7 +852,7 @@ def submit(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="submit", json_output=json_output)
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
     try:
         clock = SystemClock()
         _reap_stale_claims(backend)
@@ -1015,7 +956,6 @@ def submit(
                 load_claim_command_proof,
                 verify_claim_command_proof_batch,
             )
-            from anvil.cli._helpers import _resolve_project_dir
             from anvil.cli.proof import _default_trust_path
 
             try:
@@ -1061,7 +1001,14 @@ def submit(
         # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
         # captured by the PostToolUse hook) into typed CommandProofs — the
         # observed proofs the gate trusts.
-        command_proofs = _read_command_proofs(state_dir, task_claim.id)
+        try:
+            buffer_inspection = inspect_command_buffer(state_dir, task_claim.id)
+            command_proofs = list(buffer_inspection.proofs)
+        except CommandProofImportOverflow as exc:
+            if json_output:
+                fail("submit", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         # Refresh time only after all artifact and compatibility-buffer I/O.
         # The backend repeats the lease check under its append lock; this early
@@ -1143,7 +1090,18 @@ def submit(
             target_id=task_id,
             payload_json=payload,
         )
-        backend.append(draft)
+        try:
+            backend.append(
+                draft,
+                pre_log_check=lambda: require_buffer_unchanged(
+                    state_dir, task_claim.id, buffer_inspection,
+                ),
+            )
+        except CommandProofImportOverflow as exc:
+            if json_output:
+                fail("submit", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         # Fetch the fresh task state and evidence for gates summary.
         fresh_task = backend.get_task(task_id)
@@ -1323,6 +1281,16 @@ def apply(
         "--reviewer",
         help="Reviewer identity; defaults to $USER or 'human'.",
     ),
+    invalidate_accepted: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--invalidate-accepted",
+        help="Reviewed exact accepted-attempt invalidation JSON; requires --reviewer.",
+    ),
+    invalidation_preview: bool = typer.Option(  # noqa: B008
+        False,
+        "--invalidation-preview",
+        help="Read the exact accepted-attempt CAS binding without mutation.",
+    ),
     strict: bool | None = typer.Option(  # noqa: B008
         None,
         "--strict/--no-strict",
@@ -1378,7 +1346,50 @@ def apply(
 
     resolved_reviewer = reviewer or os.environ.get("USER") or "human"
 
-    backend = _open_backend(state_dir)
+    if invalidation_preview:
+        from anvil.clock import SystemClock
+        from anvil.state.backend import EventRejected
+        from anvil.state.sqlite import (
+            SchemaMismatch,
+            SchemaProbeFailed,
+            SqliteBackend,
+            query_only_transaction,
+        )
+
+        try:
+            if (
+                approve
+                or reject
+                or reason
+                or reason_code
+                or quality_finding
+                or invalidate_accepted is not None
+            ):
+                raise EventRejected(
+                    "invalidation mode cannot be combined with ordinary review flags"
+                )
+            with query_only_transaction(state_dir / "state.db", state_dir / "events.jsonl") as (
+                conn,
+                _,
+            ):
+                reader = SqliteBackend(
+                    db_path=str(state_dir / "state.db"),
+                    events_path=str(state_dir / "events.jsonl"),
+                    clock=SystemClock(),
+                )
+                data = reader.acceptance_invalidation_binding(task_id, connection=conn)
+        except (OSError, ValueError, SchemaMismatch, SchemaProbeFailed, EventRejected) as exc:
+            if json_output:
+                fail("apply", str(exc), code="acceptance_invalidation_refused")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if json_output:
+            emit_success("apply", data)
+        else:
+            typer.echo(json.dumps(data, indent=2))
+        return
+
+    backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
     try:
         _reap_stale_claims(backend)
 
@@ -1389,6 +1400,58 @@ def apply(
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
             raise typer.Exit(code=1)
 
+        if invalidation_preview or invalidate_accepted is not None:
+            from anvil.clock import SystemClock
+            from anvil.roots.registry import RootSetError, RootSetRegistry
+            from anvil.state.backend import EventRejected
+            from anvil.state.payloads import AcceptedAttemptInvalidation
+
+            try:
+                if (
+                    approve
+                    or reject
+                    or reason
+                    or reason_code
+                    or quality_finding
+                    or (invalidation_preview and invalidate_accepted is not None)
+                ):
+                    raise EventRejected(
+                        "invalidation mode cannot be combined with ordinary review flags"
+                    )
+                if invalidation_preview:
+                    data = backend.acceptance_invalidation_binding(task_id)
+                else:
+                    if reviewer is None or not reviewer.strip():
+                        raise EventRejected("invalidation requires an explicit --reviewer")
+                    assert invalidate_accepted is not None
+                    reference = AcceptedAttemptInvalidation.model_validate(
+                        RootSetRegistry()._read_json_regular(invalidate_accepted, limit=65_536)
+                    )
+                    applied = backend.invalidate_task_acceptance(
+                        task_id=task_id,
+                        reviewer=reviewer,
+                        reference=reference,
+                        timestamp=SystemClock().now(),
+                    )
+                    result = backend.get_task(task_id)
+                    assert result is not None
+                    data = {
+                        "task_id": task_id,
+                        "status": result.status.value,
+                        "invalidation": reference.model_dump(mode="json"),
+                        "event_id": applied.id if applied is not None else None,
+                        "already_retained": applied is None,
+                    }
+            except (OSError, ValueError, RootSetError, EventRejected) as exc:
+                if json_output:
+                    fail("apply", str(exc), code="acceptance_invalidation_refused")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success("apply", data)
+            else:
+                typer.echo(json.dumps(data, indent=2))
+            return
         if task.status.value != "needs_review":
             if json_output:
                 fail(
@@ -1866,3 +1929,30 @@ def apply(
                     f"required_floor={rejection_metrics['required_floor']}"
                 )
                 typer.echo(f"  Recovery: {rejection_metrics['guidance']}")
+
+
+def evidence_preflight(
+    task_id: str,
+    prd: str | None = PRD_OPTION,
+    observation_at: str | None = typer.Option(None, "--observation-at"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Read complete advisory command-proof coverage without changing State."""
+    from anvil.attempt_view import read_evidence_preflight
+    from anvil.project_snapshot import ProjectSnapshotError
+
+    try:
+        result = read_evidence_preflight(
+            _resolve_state_dir(cwd), task_id, prd_id=prd, observation_at=observation_at,
+        )
+    except StateRootError:
+        fail("evidence-preflight", "Project state is unavailable.", code="state_unavailable")
+    except ProjectSnapshotError as exc:
+        diagnostic = exc.error.model_dump(mode="json")
+        fail_with("evidence-preflight", diagnostic.pop("message"),
+                  code=diagnostic.pop("code"), extra=diagnostic)
+    if json_output:
+        emit_success("evidence-preflight", result)
+    else:
+        typer.echo(json.dumps(result, indent=2))

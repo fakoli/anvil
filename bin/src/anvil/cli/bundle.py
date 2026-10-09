@@ -42,7 +42,7 @@ def _fail(
 def _state(cwd: Path | None, command: str, json_output: bool):  # type: ignore[no-untyped-def]
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command=command, json_output=json_output)
-    return state_dir, _open_backend(state_dir)
+    return state_dir, _open_backend(state_dir, project_root=_resolve_project_root(cwd))
 
 
 @bundle_app.command("create")
@@ -196,10 +196,17 @@ def claim_bundle(
 ) -> None:
     """Claim a bundle without Git side effects (use top-level claim for Git)."""
     from anvil.bundles.manager import BundleActorMismatch, BundleError
+    from anvil.git_ops import (
+        ClaimPlanError,
+        claim_git_metadata,
+        resolve_claim_plan,
+        revalidate_claim_plan,
+    )
     from anvil.planning.prd_persistence import (
         PrdClaimBindingError,
         require_canonical_prd_claim_binding,
     )
+    from anvil.roots.registry import RootSetError
 
     command = "bundle claim"
     state_dir, backend = _state(cwd, command, json_output)
@@ -231,8 +238,41 @@ def claim_bundle(
         bundle = backend.get_bundle(bundle_id)
         if bundle is None:
             _fail(command, f"Bundle '{bundle_id}' not found.", json_output)
-        manager = _manager(backend, state_dir, resolve_actor(actor), cwd=cwd)
         project_dir = _resolve_project_root(cwd)
+        profiled = any(
+            member is not None and member.verification.profile is not None
+            for member in (backend.get_task(task_id) for task_id in bundle.task_ids)
+        )
+        plan = None
+        metadata = None
+        if profiled:
+            plan = resolve_claim_plan(
+                bundle_id, f"Bundle {bundle_id}", cwd=project_dir,
+                shared_tree=shared_tree, ignored_worktree_paths=(state_dir,),
+            )
+            if not plan.caller_head_ref or not plan.caller_head_ref.startswith("refs/heads/"):
+                raise ClaimPlanError(
+                    "caller_head_unavailable",
+                    "A profiled bundle requires an existing attached Git branch",
+                )
+            plan = resolve_claim_plan(
+                bundle_id, f"Bundle {bundle_id}", cwd=project_dir,
+                branch=plan.caller_head_ref.removeprefix("refs/heads/"),
+                shared_tree=shared_tree, ignored_worktree_paths=(state_dir,),
+            )
+            if (
+                not plan.branch_exists
+                or plan.caller_head_ref != f"refs/heads/{plan.branch}"
+                or plan.claim_start_sha != plan.caller_head_sha
+            ):
+                raise ClaimPlanError(
+                    "claim_plan_changed", "The caller's existing branch identity changed",
+                )
+            metadata = claim_git_metadata(plan)
+        manager = _manager(
+            backend, state_dir, resolve_actor(actor),
+            cwd=Path(metadata.target_path) if metadata is not None else cwd,
+        )
         from anvil.roots.registry import RootSetRegistry
         with RootSetRegistry().ordinary_claim_coordinator(project_dir):
             with backend.claim_operation_lock():
@@ -240,8 +280,12 @@ def claim_bundle(
                     state_dir,
                     backend.get_prd(bundle.prd_id),
                 )
+                if plan is not None:
+                    revalidate_claim_plan(plan, cwd=project_dir)
                 result = manager.claim(
                     bundle_id,
+                    branch=metadata.branch if metadata is not None else None,
+                    git_metadata=metadata,
                     pre_log_check=lambda: require_canonical_prd_claim_binding(
                         state_dir,
                         backend.get_prd(bundle.prd_id),
@@ -258,6 +302,10 @@ def claim_bundle(
         _fail(command, str(exc), json_output)
     except PrdClaimBindingError as exc:
         _fail(command, str(exc), json_output, code="prd_source_unapproved")
+    except ClaimPlanError as exc:
+        _fail(command, str(exc), json_output, code=exc.code)
+    except RootSetError as exc:
+        _fail(command, str(exc), json_output, code=exc.code)
     except BundleError as exc:
         _fail(command, str(exc), json_output)
     finally:

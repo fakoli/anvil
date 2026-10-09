@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1075,6 +1076,32 @@ def _resolve_capture_claim(
     )
 
 
+def _capture_windows_directory(path: Path) -> int:
+    """Hold an ancestor without following reparse points or sharing rename/write."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                       wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING,
+    # FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS.
+    handle = create(str(path), 0x80000000, 1, None, 3, 0x02200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise OSError("cannot safely open evidence buffer directory")
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        close(handle)
+        raise
+
+
 @hook_app.command("capture-evidence")
 def hook_capture_evidence(
     command: str = typer.Option(..., "--command", help="Full bash command string that was run."),  # noqa: B008
@@ -1163,23 +1190,27 @@ def hook_capture_evidence(
         buffer_dir = state_dir / ".evidence-buffer"
         buffer_dir.mkdir(exist_ok=True)
 
-        matched_claim = None
-        project = None
-        task = None
-        prd = None
-        try:
-            from anvil.clock import SystemClock as _SystemClock
-            from anvil.state.sqlite import SqliteBackend as _SqliteBackend
-
-            db_path = str(state_dir / "state.db")
-            events_path = str(state_dir / "events.jsonl")
-            _backend = _SqliteBackend(
-                db_path=db_path,
-                events_path=events_path,
-                clock=_SystemClock(),
-            )
-            _backend.initialize()
+        with contextlib.ExitStack() as capture_scope:
+            matched_claim = None
+            project = None
+            task = None
+            prd = None
             try:
+                from anvil.clock import SystemClock as _SystemClock
+                from anvil.state.sqlite import SqliteBackend as _SqliteBackend
+
+                db_path = str(state_dir / "state.db")
+                events_path = str(state_dir / "events.jsonl")
+                _backend = _SqliteBackend(
+                    db_path=db_path,
+                    events_path=events_path,
+                    clock=_SystemClock(),
+                )
+                capture_scope.callback(_backend.close)
+                _backend.initialize()
+                capture_scope.enter_context(_backend.claim_operation_lock())
+                now = datetime.datetime.now(datetime.UTC)
+                record["timestamp"] = now.isoformat()
                 pinned_claim_id = os.environ.get("ANVIL_CLAIM_ID")
                 pinned_claim = (
                     _backend.get_claim(pinned_claim_id)
@@ -1201,82 +1232,154 @@ def hook_capture_evidence(
                         if task is not None
                         else None
                     )
-            finally:
-                _backend.close()
-        except Exception:  # noqa: BLE001
-            pass  # if the DB is unavailable, fall through to orphan
+            except Exception:  # noqa: BLE001
+                capture_scope.close()
+                matched_claim = project = task = prd = None
+                # If the native boundary is unavailable, only descriptive orphan capture is allowed.
 
-        context = (
-            matched_claim.attestation_context
-            if matched_claim is not None
-            else None
-        )
-        if (
-            matched_claim is not None
-            and project is not None
-            and (context is not None or (task is not None and prd is not None))
-        ):
-            from anvil.state.models import (
-                HookCommandAttribution,
-                hook_command_semantic_digest,
-                task_snapshot_revision,
+            context = (
+                matched_claim.attestation_context
+                if matched_claim is not None
+                else None
             )
+            if (
+                matched_claim is not None
+                and project is not None
+                and (context is not None or (task is not None and prd is not None))
+            ):
+                from anvil.state.models import (
+                    HookCommandAttribution,
+                    hook_command_semantic_digest,
+                    task_snapshot_revision,
+                )
 
-            attribution = HookCommandAttribution(
-                project_id=project.id,
-                claim_id=matched_claim.id,
-                generation=matched_claim.generation,
-                claimed_by=matched_claim.claimed_by,
-                task_id=matched_claim.task_id,
-                task_revision=(
-                    context.task_revision
-                    if context is not None
-                    else task_snapshot_revision(task)
-                ),
-                prd_id=context.prd_id if context is not None else prd.id,
-                prd_revision=(
-                    context.prd_revision if context is not None else prd.revision
-                ),
-                repository_id=(
-                    context.repository_id if context is not None else None
-                ),
-                claim_start_sha=(
-                    context.claim_start_sha if context is not None else None
-                ),
-            )
-            semantic_digest = hook_command_semantic_digest(
-                attribution=attribution,
-                command=command,
-                exit_code=exit_code,
-                output_sha256=output_sha256,
-                captured_at=now,
-            )
-            record.update(
-                {
-                    "claim_id": matched_claim.id,
-                    "attribution": attribution.model_dump(mode="json"),
-                    "semantic_digest": semantic_digest,
-                }
-            )
-            buffer_file = task_claim_buffer_path(buffer_dir, matched_claim.id)
-            if buffer_file is None:
-                raise ValueError("claim id is not eligible for hook capture")
-        else:
-            # No active claim found — write to orphan buffer. Keep the
-            # diagnostic actionable without implying that a descriptive
-            # output excerpt is a typed command proof.
-            record["note"] = (
-                "orphan — no exact active claim/owner/session hook pin with "
-                "valid task context was found at capture time; "
-                "--output-file can attach it only as a descriptive excerpt and "
-                "cannot satisfy required_proofs; rerun under an explicit claim "
-                "or import a claim-bound command-proof artifact"
-            )
-            buffer_file = buffer_dir / "orphan.json"
+                attribution = HookCommandAttribution(
+                    project_id=project.id,
+                    claim_id=matched_claim.id,
+                    generation=matched_claim.generation,
+                    claimed_by=matched_claim.claimed_by,
+                    task_id=matched_claim.task_id,
+                    task_revision=(
+                        context.task_revision
+                        if context is not None
+                        else task_snapshot_revision(task)
+                    ),
+                    prd_id=context.prd_id if context is not None else prd.id,
+                    prd_revision=(
+                        context.prd_revision if context is not None else prd.revision
+                    ),
+                    repository_id=(
+                        context.repository_id if context is not None else None
+                    ),
+                    claim_start_sha=(
+                        context.claim_start_sha if context is not None else None
+                    ),
+                )
+                semantic_digest = hook_command_semantic_digest(
+                    attribution=attribution,
+                    command=command,
+                    exit_code=exit_code,
+                    output_sha256=output_sha256,
+                    captured_at=now,
+                )
+                record.update(
+                    {
+                        "claim_id": matched_claim.id,
+                        "attribution": attribution.model_dump(mode="json"),
+                        "semantic_digest": semantic_digest,
+                    }
+                )
+                buffer_file = task_claim_buffer_path(buffer_dir, matched_claim.id)
+                if buffer_file is None:
+                    raise ValueError("claim id is not eligible for hook capture")
+            else:
+                # No active claim found — write to orphan buffer. Keep the
+                # diagnostic actionable without implying that a descriptive
+                # output excerpt is a typed command proof.
+                record["note"] = (
+                    "orphan — no exact active claim/owner/session hook pin with "
+                    "valid task context was found at capture time; "
+                    "--output-file can attach it only as a descriptive excerpt and "
+                    "cannot satisfy required_proofs; rerun under an explicit claim "
+                    "or import a claim-bound command-proof artifact"
+                )
+                buffer_file = buffer_dir / "orphan.json"
 
-        # Append the JSON record as a single line (JSONL).
-        with buffer_file.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+            # Pin every ancestor before opening the basename. A final-component
+            # O_NOFOLLOW alone cannot prevent a parent swap redirecting creation.
+            if not buffer_dir.is_absolute() or ".." in buffer_dir.parts:
+                raise ValueError("evidence buffer directory must be absolute")
+            parent_fd = None
+            current_dir = Path(buffer_dir.anchor)
+            parents = []
+            for index, part in enumerate(buffer_dir.parts):
+                if index:
+                    current_dir /= part
+                if os.name == "nt":
+                    directory_fd = _capture_windows_directory(current_dir)
+                else:
+                    directory_fd = os.open(
+                        part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                        | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd,
+                    )
+                capture_scope.callback(os.close, directory_fd)
+                if os.name == "nt":
+                    path_info = current_dir.stat(follow_symlinks=False)
+                else:
+                    path_info = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
+                directory_info = os.fstat(directory_fd)
+                if (
+                    not stat.S_ISDIR(directory_info.st_mode)
+                    or not stat.S_ISDIR(path_info.st_mode)
+                    or getattr(path_info, "st_file_attributes", 0) & 0x400
+                    or not os.path.samestat(directory_info, path_info)
+                ):
+                    raise ValueError("evidence buffer directory is unsafe")
+                parents.append((current_dir, directory_info))
+                parent_fd = directory_fd
+            relative = {} if os.name == "nt" else {"dir_fd": parent_fd}
+            candidate = buffer_file if os.name == "nt" else buffer_file.name
+            try:
+                existing = os.stat(candidate, follow_symlinks=False, **relative)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                not stat.S_ISREG(existing.st_mode)
+                or getattr(existing, "st_file_attributes", 0) & 0x400
+            ):
+                raise ValueError("evidence buffer must be a regular file")
+            flags = os.O_RDWR | os.O_APPEND
+            flags |= os.O_CREAT | os.O_EXCL if existing is None else 0
+            for name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NONBLOCK", "O_NOFOLLOW"):
+                flags |= getattr(os, name, 0)
+            descriptor = os.open(candidate, flags, 0o600, **relative)
+            capture_scope.callback(os.close, descriptor)
+            opened = os.fstat(descriptor)
+            current = os.stat(candidate, follow_symlinks=False, **relative)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or getattr(current, "st_file_attributes", 0) & 0x400
+                or not os.path.samestat(opened, current)
+                or (existing is not None and not os.path.samestat(opened, existing))
+            ):
+                raise ValueError("evidence buffer changed before append")
+            for directory, held in parents:
+                current = directory.stat(follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(current.st_mode)
+                    or getattr(current, "st_file_attributes", 0) & 0x400
+                    or not os.path.samestat(held, current)
+                ):
+                    raise ValueError("evidence buffer directory changed before append")
+            separator = b""
+            if os.lseek(descriptor, 0, os.SEEK_END):
+                os.lseek(descriptor, -1, os.SEEK_END)
+                if os.read(descriptor, 1) != b"\n":
+                    separator = b"\n"
+            payload = separator + (json.dumps(record) + "\n").encode("utf-8")
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError("incomplete evidence buffer append")
 
     except SystemExit:
         raise

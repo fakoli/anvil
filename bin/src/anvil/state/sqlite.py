@@ -114,6 +114,7 @@ from anvil.state.models import (
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
+    AcceptedAttemptInvalidation,
     BundleAgentObservedPayload,
     BundleCheckpointRecordedPayload,
     BundleClaimedPayload,
@@ -895,6 +896,7 @@ class SqliteBackend:
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
         schema_probe_fn: Callable[[str | os.PathLike[str]], int] | None = None,
+        project_root: str | os.PathLike[str] | None = None,
     ) -> None:
         self._db_path = db_path
         self._events_path = events_path
@@ -904,6 +906,7 @@ class SqliteBackend:
         self._sleep_fn = sleep_fn
         self._monotonic_fn = monotonic_fn
         self._schema_probe_fn = schema_probe_fn
+        self._project_root = Path(project_root) if project_root is not None else None
         self._conn: sqlite3.Connection | None = None
         # In-memory monotonic counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
@@ -1149,6 +1152,28 @@ class SqliteBackend:
         *,
         pre_log_check: Callable[[], None] | None = None,
     ) -> Event | None:
+        if draft.action == "task.applied" and draft.payload_json.get("invalidation") is not None:
+            try:
+                payload = TaskAppliedPayload.model_validate(draft.payload_json)
+            except ValueError as exc:
+                raise EventRejected("acceptance_invalidation: invalid typed decision") from exc
+            # Hold the owner lock before the append lock. Replay never consults
+            # today's registry; it rechecks the persisted exact binding instead.
+            from anvil.roots.registry import RootSetError, RootSetRegistry
+
+            try:
+                with RootSetRegistry().locked(require_active=False) as registry:
+                    self._check_invalidation_root_custody(registry, payload)
+                    return self._append(draft, pre_log_check=pre_log_check)
+            except RootSetError as exc:
+                raise EventRejected(f"{exc.code}: {exc}") from exc
+        return self._append(draft, pre_log_check=pre_log_check)
+    def _append(
+        self,
+        draft: EventDraft,
+        *,
+        pre_log_check: Callable[[], None] | None = None,
+    ) -> Event | None:
         """Validate, assign id from log-authority counter, log-first, then apply.
 
         This is the sole production write entry point (SL1-RR-1). The entire
@@ -1351,12 +1376,51 @@ class SqliteBackend:
                 self._append_audit_line("idempotent_no_op", materialized_draft, reason)
                 return None
 
+            prepared_profiles = None
+            if action in {"claim.created", "bundle.claimed", "evidence.submitted"} or (
+                action == "task.applied" and typed_payload.decision == "accepted"
+            ):
+                task_ids = (
+                    [member.task_id for member in typed_payload.member_claims]
+                    if action == "bundle.claimed" else [typed_payload.task_id]
+                )
+                prepared_profiles = {}
+                for task_id in task_ids:
+                    task = self.get_task(task_id)
+                    prd = self.get_prd(task.prd_id) if task and task.verification.profile else None
+                    prepared_profiles[task_id] = (task, prd.revision if prd else None)
+
             # Final caller-supplied invariant at the append linearization
             # point. This runs after authoritative state validation and before
             # id assignment or log mutation, so refusal cannot leave a usable
             # partial claim that must be compensated afterward.
             if pre_log_check is not None:
                 pre_log_check()
+
+            if action == "progress.noted" and typed_payload.timing is not None:
+                try:
+                    self._check_timing_noted(conn, typed_payload, materialized_draft)
+                except EventRejected as exc:
+                    self._append_audit_line("rejection", materialized_draft, str(exc))
+                    raise
+
+            if prepared_profiles is not None:
+                try:
+                    if pre_log_check is not None and any(
+                        task is not None and task.verification.profile is not None
+                        for task, _ in prepared_profiles.values()
+                    ):
+                        # A reentrant callback cannot change custody after its first check.
+                        try:
+                            spec.check(conn, typed_payload, materialized_draft)
+                        except IdempotentNoOp:
+                            raise EventRejected(
+                                "verification profile refused: binding_mismatch"
+                            ) from None
+                    self._check_live_profiles(conn, action, typed_payload, prepared_profiles)
+                except EventRejected as exc:
+                    self._append_audit_line("rejection", materialized_draft, str(exc))
+                    raise
 
             # ---- Phase 2: id assignment ----
             if self._events_storage == "git":
@@ -3376,13 +3440,13 @@ class SqliteBackend:
             ).fetchone()
         if row is None:
             return None
-        return self._row_to_prd(row)
+        return self._row_to_prd(row, conn)
 
     def list_prds(self) -> list[PRD]:
         """Return every PRD ordered by ``id`` ASC (deterministic for replay)."""
         conn = self._require_conn()
         rows = conn.execute("SELECT * FROM prds ORDER BY id").fetchall()
-        return [self._row_to_prd(row) for row in rows]
+        return [self._row_to_prd(row, conn) for row in rows]
 
     def default_prd_id(self) -> str | None:
         """Return the ``is_default = 1`` PRD's id, or None if no PRD exists."""
@@ -3720,6 +3784,251 @@ class SqliteBackend:
             counts_toward_accept_rate=(category is RejectionCategory.quality),
         )
 
+    def acceptance_invalidation_binding(
+        self, task_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
+        """Read the complete exact accepted-attempt CAS identity."""
+        return self._acceptance_invalidation_binding(
+            connection if connection is not None else self._require_conn(), task_id
+        )
+
+    def _acceptance_invalidation_binding(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+    ) -> dict[str, Any]:
+        task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        accepted = conn.execute(
+            "SELECT id, payload_json FROM events WHERE action = 'task.applied' "
+            "AND target_id = ? AND json_extract(payload_json, '$.decision') = 'accepted' "
+            "ORDER BY rowid DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        evidence_row = self._latest_evidence_row(conn, task_id)
+        if task_row is None or accepted is None or evidence_row is None:
+            raise EventRejected("acceptance_invalidation: exact accepted attempt unavailable")
+        task = self._row_to_task(task_row, conn)
+        evidence = self._row_to_evidence(evidence_row)
+        accepted_payload = json.loads(accepted[1])
+        if accepted_payload.get("review_attempt_id") != evidence.id:
+            raise EventRejected(
+                "acceptance_invalidation: latest evidence differs from accepted attempt"
+            )
+        claim_row = conn.execute(
+            "SELECT * FROM claims WHERE id = ?", (evidence.claim_id,)
+        ).fetchone()
+        if claim_row is None:
+            raise EventRejected("acceptance_invalidation: accepted claim unavailable")
+        claim = self._row_to_claim(claim_row)
+        latest_claim = conn.execute(
+            "SELECT id FROM claims WHERE task_id = ? ORDER BY generation DESC, rowid DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if latest_claim is None or latest_claim[0] != claim.id:
+            raise EventRejected("acceptance_invalidation: newer claim generation exists")
+        evidence_event = conn.execute(
+            "SELECT payload_json FROM events WHERE action = 'evidence.submitted' "
+            "AND target_id = ? AND json_extract(payload_json, '$.evidence_id') = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (task_id, evidence.id),
+        ).fetchone()
+        if evidence_event is None:
+            raise EventRejected("acceptance_invalidation: accepted evidence event unavailable")
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        prd_row = (
+            conn.execute("SELECT * FROM prds WHERE id = ? LIMIT 1", (task.prd_id,)).fetchone()
+            if task.prd_id
+            else conn.execute(
+                "SELECT * FROM prds WHERE is_default = 1 ORDER BY id LIMIT 1"
+            ).fetchone()
+        )
+        prd = self._row_to_prd(prd_row, conn) if prd_row is not None else None
+        if project is None or prd is None:
+            raise EventRejected("acceptance_invalidation: canonical project/PRD unavailable")
+        material = {
+            "project_id": project[0],
+            "task": task.model_dump(mode="json"),
+            "prd": prd.model_dump(mode="json"),
+            "accepted_event_id": accepted[0],
+            "accepted_payload": accepted_payload,
+            "evidence": evidence.model_dump(mode="json"),
+            "evidence_payload": json.loads(evidence_event[0]),
+            "claim": claim.model_dump(mode="json"),
+        }
+        return {
+            "accepted_event_id": accepted[0],
+            "review_attempt_id": evidence.id,
+            "claim_id": claim.id,
+            "generation": claim.generation,
+            "actor": claim.claimed_by,
+            "session_id": claim.session_id,
+            "supporting_evidence_digest": supporting_evidence_digest(evidence),
+            "root_set": claim.root_set.model_dump(mode="json") if claim.root_set else None,
+            "binding_digest": hashlib.sha256(canonical_json_bytes(material)).hexdigest(),
+        }
+
+
+    def _retained_invalidation(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        reference: AcceptedAttemptInvalidation,
+    ) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = conn.execute(
+            "SELECT id, payload_json FROM events WHERE action = 'task.applied' "
+            "AND target_id = ? "
+            "AND json_extract(payload_json, '$.invalidation.accepted_event_id') = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (task_id, reference.accepted_event_id),
+        ).fetchone()
+        return row
+
+
+    def _check_invalidation_root_custody(
+        self,
+        registry: dict[str, Any],
+        payload: TaskAppliedPayload,
+    ) -> None:
+        assert payload.invalidation is not None
+        # An exact retained retry is harmless even after a new successful claim.
+        if self._retained_invalidation(self._require_conn(), payload.task_id, payload.invalidation):
+            return
+        attempt = self.get_latest_evidence(payload.task_id)
+        claim = self.get_claim(attempt.claim_id) if attempt is not None else None
+        if claim is None or claim.root_set is None:
+            return
+        roots = claim.root_set
+        reservation = registry["reservations"].get(roots.request_id)
+        if reservation is None or (
+            reservation.get("reservation_id") != roots.reservation_id
+            or reservation.get("digest") != roots.request_digest
+            or reservation.get("actor") != claim.claimed_by
+            or reservation.get("claim_id") != claim.id
+            or reservation.get("state_identity") != str(Path(self._db_path).parent.resolve())
+            or reservation.get("state") != "released"
+        ):
+            raise EventRejected(
+                "acceptance_invalidation: original owner root custody is not released"
+            )
+
+
+    def _check_acceptance_invalidation(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskAppliedPayload,
+        event: EventDraft | Event,
+    ) -> None:
+        reference = payload.invalidation
+        assert reference is not None
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("acceptance_invalidation: event/task binding mismatch")
+        if (
+            event.actor != payload.reviewer
+            or payload.reviewer != reference.evidence_gap_reviewed_by
+        ):
+            raise EventRejected("acceptance_invalidation: explicit independent reviewer required")
+        retained = self._retained_invalidation(conn, payload.task_id, reference)
+        if retained is not None:
+            if json.loads(retained[1]) != payload.model_dump(mode="json", exclude_unset=True):
+                raise EventRejected("acceptance_invalidation: conflicting invalidation decision")
+            raise IdempotentNoOp("acceptance invalidation already retained")
+        binding = self._acceptance_invalidation_binding(conn, payload.task_id)
+        if (
+            binding["accepted_event_id"] != reference.accepted_event_id
+            or binding["binding_digest"] != reference.binding_digest
+        ):
+            raise EventRejected("acceptance_invalidation: exact accepted binding changed")
+        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
+        if row is None or row[0] != "done":
+            raise EventRejected("acceptance_invalidation: task must be done")
+        if conn.execute(
+            "SELECT 1 FROM claims WHERE task_id = ? AND claimed_by = ?",
+            (payload.task_id, payload.reviewer),
+        ).fetchone():
+            raise EventRejected(
+                "acceptance_invalidation: reviewer must differ from evidence producer"
+            )
+        if conn.execute(
+            "SELECT 1 FROM claims WHERE task_id = ? AND status = 'active'",
+            (payload.task_id,),
+        ).fetchone():
+            raise EventRejected("acceptance_invalidation: active claim exists")
+        # Refuse every active or completed transitive consumer; do not infer
+        # independence or silently reset a successor. Declared safe disposition
+        # is intentionally left to separately reviewed normal lifecycle work.
+        tasks = self.list_tasks()
+        consumers = {payload.task_id}
+        while True:
+            expanded = consumers | {
+                task.id for task in tasks if consumers.intersection(task.dependencies)
+            }
+            if expanded == consumers:
+                break
+            consumers = expanded
+        active_consumers = {
+            row[0]
+            for row in conn.execute("SELECT task_id FROM claims WHERE status = 'active'").fetchall()
+            if row[0] in consumers and row[0] != payload.task_id
+        }
+        blocked = sorted(
+            task.id
+            for task in tasks
+            if task.id != payload.task_id
+            and task.id in consumers
+            and (
+                task.id in active_consumers
+                or task.status.value
+                not in {"proposed", "drafted", "reviewed", "ready", "blocked", "rejected"}
+            )
+        )
+        if blocked:
+            raise EventRejected(
+                "acceptance_invalidation: dependent consumers require reviewed disposition: "
+                + ", ".join(blocked)
+            )
+
+
+    def invalidate_task_acceptance(
+        self,
+        *,
+        task_id: str,
+        reviewer: str,
+        reference: AcceptedAttemptInvalidation,
+        timestamp: datetime.datetime,
+    ) -> Event | None:
+        retained = self._retained_invalidation(self._require_conn(), task_id, reference)
+        if retained is not None:
+            payload = json.loads(retained[1])
+            if (
+                payload.get("invalidation") != reference.model_dump(mode="json")
+                or payload.get("reviewer") != reviewer
+            ):
+                raise EventRejected("acceptance_invalidation: conflicting invalidation decision")
+        else:
+            provenance = self.derive_task_rejection_provenance(
+                task_id,
+                reason_code=RejectionReasonCode.unspecified_quality,
+                quality_findings=[],
+            )
+            payload = {
+                "schema_version": 1,
+                "task_id": task_id,
+                "reviewer": reviewer,
+                "decision": "rejected",
+                "notes": reference.reason,
+                "rejection": provenance.model_dump(mode="json"),
+                "invalidation": reference.model_dump(mode="json"),
+            }
+        return self.append(
+            EventDraft(
+                timestamp=timestamp,
+                actor=reviewer,
+                action="task.applied",
+                target_kind="task",
+                target_id=task_id,
+                payload_json=payload,
+            )
+        )
     # ------------------------------------------------------------------
     # Phase 8 — sync mapping query helpers
     # ------------------------------------------------------------------
@@ -5483,6 +5792,11 @@ class SqliteBackend:
             and draft.payload_json.get("expected_prd_source_sha256") != cached[2]
         ):
             return None
+        if draft.action == "prd.approved" and draft.payload_json.get("binding_version") == 1:
+            # append has validated this exact review against the current content.
+            review_event_id = draft.payload_json.get("review_event_id")
+            return review_event_id if isinstance(review_event_id, str) else None
+
         operation = self._planning_batch_prd_content_operation(draft)
         action = operation.get("action") if operation is not None else draft.action
         graph_only = draft.action == "planning.batch_applied" and operation is None
@@ -6203,6 +6517,164 @@ class SqliteBackend:
             raise EventRejected(
                 "progress.noted: only the exact active claim owner may record progress."
             )
+
+    def _check_live_profiles(
+        self, conn: sqlite3.Connection, action: str, payload: Any,
+        prepared: dict[str, tuple[Task | None, int | None]],
+    ) -> None:
+        """Inspect the exact execution checkout at final live append, never replay."""
+        for task_id, (original, revision) in prepared.items():
+            task = self.get_task(task_id)
+            if (
+                (original is None or original.verification.profile is None)
+                and (task is None or task.verification.profile is None)
+            ):
+                continue
+            current_prd = conn.execute(
+                "SELECT revision FROM prds WHERE id = ?", (task.prd_id if task else None,),
+            ).fetchone()
+            if task != original or current_prd is None or current_prd[0] != revision:
+                raise EventRejected("verification profile refused: binding_mismatch")
+            refusal = "verification profile refused: identity_unavailable"
+            if self._project_root is None:
+                raise EventRejected(refusal)
+            if action in {"claim.created", "bundle.claimed"}:
+                origin = payload
+            else:
+                claim_id = payload.claim_id if action == "evidence.submitted" else None
+                if action == "task.applied":
+                    evidence = conn.execute(
+                        "SELECT claim_id FROM evidence WHERE id = ? AND task_id = ?",
+                        (payload.review_attempt_id, task_id),
+                    ).fetchone()
+                    if evidence is not None:
+                        claim_id = evidence[0]
+                origin = self.get_claim(claim_id) if claim_id is not None else None
+                if origin is None or origin.task_id != task_id:
+                    raise EventRejected(refusal)
+                if action == "evidence.submitted" and (
+                    origin.status != ClaimStatus.active
+                    or origin.released_at is not None
+                    or origin.claimed_by != payload.submitted_by
+                    or origin.lease_expires_at <= self._clock.now()
+                ):
+                    raise EventRejected(refusal)
+            metadata = origin.git_metadata
+            root_set = getattr(origin, "root_set", None)
+            context = getattr(origin, "attestation_context", None)
+            if (
+                action == "claim.created" and context is not None
+                and context.task_revision != task_snapshot_revision(task)
+            ):
+                raise EventRejected("verification profile refused: binding_mismatch")
+            if root_set is not None:
+                from anvil.roots.registry import _LIVE_APPEND_AUTH, root_set_claim_authorized
+
+                if action == "claim.created":
+                    authorization = _LIVE_APPEND_AUTH.get()
+                    if (
+                        not isinstance(authorization, tuple)
+                        or not root_set_claim_authorized(root_set, authorization[1])
+                    ):
+                        raise EventRejected(refusal)
+                primary = next(fact for fact in root_set.root_facts
+                               if fact.root_id == root_set.primary_root_id)
+                target = Path(primary.claim_worktree)
+                baseline = primary.baseline_sha
+                canonical = Path(primary.canonical_root)
+                if primary.verification_commands != tuple(task.verification.commands):
+                    raise EventRejected(refusal)
+                if metadata is not None and (
+                    Path(metadata.target_path) != target or metadata.claim_start_sha != baseline
+                ):
+                    raise EventRejected(refusal)
+            elif metadata is not None:
+                target = Path(metadata.target_path)
+                canonical = Path(metadata.canonical_root)
+                baseline = metadata.claim_start_sha
+            else:
+                raise EventRejected(refusal)
+            from anvil.claims.progress_attestation import (
+                ProgressAttestationError,
+                inspect_local_repository,
+            )
+            from anvil.verification_profiles import ProfileError, require_profile_current
+
+            try:
+                project = self.get_project()
+                if project is None or not target.is_absolute() or not canonical.is_absolute():
+                    raise EventRejected(refusal)
+                selected = inspect_local_repository(self._project_root, project_id=project.id)
+                actual = inspect_local_repository(target, project_id=project.id)
+                recorded = inspect_local_repository(canonical, project_id=project.id)
+                if (
+                    actual.root != target.resolve(strict=True)
+                    or actual.common_dir != selected.common_dir
+                    or recorded.common_dir != selected.common_dir
+                    or (action in {"claim.created", "bundle.claimed"}
+                        and actual.head_oid != baseline)
+                    or (context is not None and actual.repository_id != context.repository_id)
+                ):
+                    raise EventRejected(refusal)
+                require_profile_current(task.verification, target)
+            except ProfileError as exc:
+                raise EventRejected(f"verification profile refused: {exc.code}") from None
+            except (ProgressAttestationError, OSError, RuntimeError, ValueError):
+                raise EventRejected(refusal) from None
+
+    def _check_timing_noted(
+        self,
+        conn: sqlite3.Connection,
+        payload: ProgressNotedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Bind observations at the final live append boundary, never replay."""
+        receipt = payload.timing
+        assert receipt is not None
+        attribution = receipt.attribution
+        refusal = "progress.noted: timing ownership, binding or lifetime mismatch."
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?", (attribution.claim_id,),
+        ).fetchone()
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        if (
+            event.target_kind != "task" or event.target_id != payload.task_id
+            or event.actor != payload.actor or payload.actor != attribution.claimed_by
+            or payload.task_id != attribution.task_id or project is None
+            or attribution.project_id != project[0] or row is None
+            or row[0] != attribution.task_id or row[1] != attribution.claimed_by
+            or row[2] != "active" or row[3] is not None
+            or row[4] != attribution.generation or row[5] is None or row[8] is not None
+        ):
+            raise EventRejected(refusal)
+        try:
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            parse = datetime.datetime.fromisoformat
+            created, expires = parse(row[6]), parse(row[7])
+            noted = parse(payload.noted_at)
+            start = parse(receipt.started_at)
+            end = parse(receipt.ended_at) if receipt.ended_at is not None else None
+            now = self._clock.now()
+            if (
+                any(getattr(context, field) != getattr(attribution, field) for field in (
+                    "repository_id", "claim_start_sha", "prd_id", "prd_revision", "task_revision",
+                ))
+                or noted != event.timestamp or not created <= noted <= now < expires
+                or not created <= start <= noted
+                or (end is not None and not created <= end <= noted)
+            ):
+                raise EventRejected(refusal)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise EventRejected(refusal) from None
+        task = conn.execute("SELECT prd_id FROM tasks WHERE id = ?", (row[0],)).fetchone()
+        prd = conn.execute("SELECT revision FROM prds WHERE id = ?", (context.prd_id,)).fetchone()
+        if (
+            task is None or task[0] != context.prd_id
+            or prd is None or prd[0] != context.prd_revision
+        ):
+            raise EventRejected(refusal)
 
     @staticmethod
     def _progress_attestation_proof_is_valid(
@@ -7000,6 +7472,25 @@ class SqliteBackend:
                 f"(current revision is {current}, expected {current + 1})"
             )
         current_status = str(row[1])
+        if row[4] is not None:
+            content = conn.execute(
+                "SELECT payload_json FROM events WHERE id = ?", (row[4],)
+            ).fetchone()
+            previous_bindings = (
+                json.loads(content[0]).get("profile_bindings") if content is not None else None
+            )
+            if previous_bindings is not None:
+                if payload.profile_bindings is None:
+                    raise EventRejected("prd.revised: frozen profile bindings must be explicit.")
+                for binding in payload.profile_bindings.values():
+                    if any(
+                        previous["reference"] == binding.reference.model_dump(mode="json")
+                        and previous != binding.model_dump(mode="json")
+                        for previous in previous_bindings.values()
+                    ):
+                        raise EventRejected(
+                            "prd.revised: unchanged profile reference cannot rebind."
+                        )
         if (
             payload.expected_status is not None
             and payload.status != payload.expected_status
@@ -9662,6 +10153,8 @@ class SqliteBackend:
             ).fetchall()
             member_ids = [member[0] for member in member_rows]
             supplied_ids = [member.task_id for member in payload.member_claims]
+            for member_id in member_ids:
+                self._check_invalidation_claim_actor(conn, member_id, payload.claimed_by)
             if supplied_ids != member_ids:
                 raise EventRejected(
                     "bundle.claimed: member claims must match stored member order."
@@ -9861,6 +10354,11 @@ class SqliteBackend:
             tuple(member_ids),
         ).fetchone():
             return
+        try:
+            for member_id in member_ids:
+                self._check_invalidation_claim_actor(conn, member_id, payload.claimed_by)
+        except EventRejected as exc:
+            raise TransactionAborted(str(exc)) from exc
         member_claim_ids = {
             member.task_id: member.id for member in payload.member_claims
         }
@@ -11225,6 +11723,23 @@ class SqliteBackend:
                 "descendant events are quarantined."
             )
 
+    def _check_invalidation_claim_actor(
+        self, conn: sqlite3.Connection, task_id: str, actor: str,
+    ) -> None:
+        review = conn.execute(
+            "SELECT json_extract(payload_json, '$.reviewer') FROM events "
+            "WHERE action = 'task.applied' AND target_id = ? "
+            "AND json_extract(payload_json, '$.invalidation') IS NOT NULL "
+            "AND rowid > COALESCE((SELECT MAX(rowid) FROM events "
+            "WHERE action = 'task.applied' AND target_id = ? "
+            "AND json_extract(payload_json, '$.decision') = 'accepted'), 0) "
+            "ORDER BY rowid DESC LIMIT 1", (task_id, task_id),
+        ).fetchone()
+        if review is not None and review[0] == actor:
+            raise EventRejected(
+                "acceptance_invalidation: gap reviewer cannot produce the fresh evidence attempt"
+            )
+
     def _check_claim_created(
         self,
         conn: sqlite3.Connection,
@@ -11260,6 +11775,7 @@ class SqliteBackend:
         defaults to False, but replay applies via ``_write_*`` only and never
         runs this check, so the default is irrelevant on the replay path.
         """
+        self._check_invalidation_claim_actor(conn, payload.task_id, payload.claimed_by)
         if event.target_kind != "claim" or event.target_id != payload.id:
             raise EventRejected(
                 "claim.created: event target must be claim "
@@ -11635,6 +12151,11 @@ class SqliteBackend:
                     (claim_id,),
                 )
             return
+
+        try:
+            self._check_invalidation_claim_actor(conn, task_id, claimed_by)
+        except EventRejected as exc:
+            raise TransactionAborted(str(exc)) from exc
 
         # Replay is write-only. Preserve first-writer exclusion when a prior
         # standalone or internal bundle authorization already owns this task;
@@ -12987,6 +13508,9 @@ class SqliteBackend:
         decision: str = payload.decision
         task_id: str = payload.task_id
 
+        if payload.invalidation is not None:
+            self._check_acceptance_invalidation(conn, payload, event)
+
         if payload.schema_version != 1:
             raise EventRejected("task.applied: live event requires schema_version 1")
         if decision not in ("accepted", "rejected"):
@@ -13029,8 +13553,10 @@ class SqliteBackend:
         if row is None:
             raise EventRejected(f"task.applied: task '{task_id}' not found.")
         actual_status = row[0]
-        if actual_status == "needs_review":
-            return  # fresh apply — proceed.
+        if actual_status == "needs_review" or (
+            payload.invalidation is not None and actual_status == "done"
+        ):
+            return  # fresh apply or fully checked invalidation — proceed.
         if decision == "rejected" and payload.rejection is not None:
             # Replay bypasses ``_check`` and is handled idempotently by the
             # writer. A second live event would classify the same persisted
@@ -13259,6 +13785,14 @@ class SqliteBackend:
                     "task.applied: unversioned review provenance is invalid"
                 )
 
+        if payload.invalidation is not None:
+            try:
+                self._check_acceptance_invalidation(conn, payload, event)
+            except IdempotentNoOp:
+                return
+            except EventRejected as exc:
+                raise TransactionAborted(str(exc)) from exc
+
         legacy_evidence = self._legacy_claimed_apply_evidence(conn, payload)
         if legacy_evidence is not None:
             self._restore_legacy_evidence_submission(
@@ -13361,9 +13895,12 @@ class SqliteBackend:
                    SET status = 'rejected',
                        updated_at = ?
                  WHERE id = ?
-                   AND status = 'needs_review'
+                   AND status = ?
                 """,
-                (timestamp, task_id),
+                (
+                    timestamp, task_id,
+                    "done" if payload.invalidation is not None else "needs_review",
+                ),
             )
             if conn.execute("SELECT changes()").fetchone()[0] == 0:
                 row = conn.execute(
@@ -14004,7 +14541,7 @@ class SqliteBackend:
             submitted_by=row[11],
         )
 
-    def _row_to_prd(self, row: Any) -> PRD:
+    def _row_to_prd(self, row: Any, conn: sqlite3.Connection) -> PRD:
         """Deserialise a prds row into a PRD model instance.
 
         Maps the v7 identity/release columns (id / title / target_version /
@@ -14037,6 +14574,13 @@ class SqliteBackend:
             d["source_bytes"] = bytes(d["source_bytes"])
         if "content_available" in d and d["content_available"] is not None:
             d["content_available"] = bool(d["content_available"])
+        if d.get("content_event_id") is not None:
+            content = conn.execute(
+                "SELECT payload_json FROM events WHERE id = ?",
+                (d["content_event_id"],),
+            ).fetchone()
+            if content is not None:
+                d["profile_bindings"] = json.loads(content[0]).get("profile_bindings")
         # Review #13: created_at / updated_at are backfilled by the v6->v7
         # migration via COALESCE(last_reviewed_at, project.created_at), both of
         # which are stored as tz-aware UTC ISO strings — so the PRD field

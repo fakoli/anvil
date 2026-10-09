@@ -978,7 +978,7 @@ class TestTypedProofGateEndToEnd:
     def test_hook_buffer_reader_is_bounded_by_item_count_and_bytes(
         self, tmp_path: Path
     ) -> None:
-        from anvil.cli.packet_apply import _read_command_proofs
+        from anvil.cli.packet_apply import CommandProofImportOverflow, _read_command_proofs
         from anvil.state.models import MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
 
         _init_git_repo(tmp_path)
@@ -993,10 +993,20 @@ class TestTypedProofGateEndToEnd:
         )
         line = buffer_file.read_bytes()
         buffer_file.write_bytes(line * 17)
-        assert len(_read_command_proofs(tmp_path / ".anvil", claim["id"])) == 16
+        with pytest.raises(CommandProofImportOverflow, match="record limit"):
+            _read_command_proofs(tmp_path / ".anvil", claim["id"])
+        before = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
+        refused = _invoke(tmp_path, ["submit", task_id, "--commands", _PLANNED_VERIFY_CMD,
+                                    "--files-changed", "src/app/converter.py",
+                                    "--actor", "agent-test", "--json"])
+        assert refused.exit_code == 1
+        assert _json.loads(refused.stdout)["error"]["code"] == "command_proof_import_overflow"
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == before
+        assert buffer_file.read_bytes() == line * 17
 
         buffer_file.write_bytes(b"x" * (MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES + 1))
-        assert _read_command_proofs(tmp_path / ".anvil", claim["id"]) == []
+        with pytest.raises(CommandProofImportOverflow, match="byte limit"):
+            _read_command_proofs(tmp_path / ".anvil", claim["id"])
 
     def test_hook_capture_attribution_strict_refuses_nonzero_exit(
         self, tmp_path: Path

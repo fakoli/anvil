@@ -1814,6 +1814,7 @@ def _open_backend(
     state_dir: Path,
     *,
     schema_probe: BoundedSchemaProbe | None = None,
+    project_root: Path | None = None,
 ) -> SqliteBackend:
     """Instantiate a SqliteBackend, call initialize(), and return it.
 
@@ -1837,6 +1838,14 @@ def _open_backend(
         # future database always reaches the one closed schema boundary, even
         # when config.yaml is malformed or declares an invalid storage mode.
         _SqliteBackend.validate_schema_compatibility(bounded_probe(db_path))
+        if project_root is None:
+            try:
+                # Pair the same original implicit invocation argument, never
+                # reverse-map HOME State or reinterpret ANVIL_ROOT precedence.
+                if _resolve_state_dir(None) == state_dir:
+                    project_root = _resolve_project_dir(None)
+            except (OSError, StateRootError):
+                pass
         backend = _SqliteBackend(
             db_path=db_path,
             events_path=events_path,
@@ -1845,6 +1854,7 @@ def _open_backend(
             # replay strategy, so it must be resolved BEFORE the backend opens.
             events_storage=read_events_storage(state_dir / "config.yaml"),
             schema_probe_fn=bounded_probe,
+            project_root=project_root,
         )
         backend.initialize()
     finally:

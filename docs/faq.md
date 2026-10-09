@@ -69,8 +69,8 @@ Two surfaces are always available:
 
 - **CLI** (`anvil <cmd>`) — runtime-agnostic; any shell-capable agent
   can call it via Bash, and humans use it directly.
-- **MCP server** — 36 registered tools over FastMCP stdio; the lean
-  execution default serves 24 on the wire (set `ANVIL_MCP_PLANNING=1` to
+- **MCP server** — 38 registered tools over FastMCP stdio; the lean
+  execution default serves 26 on the wire (set `ANVIL_MCP_PLANNING=1` to
   add the 12 planning tools). Any MCP client connects; tool responses are
   structured JSON with explicit error envelopes.
 

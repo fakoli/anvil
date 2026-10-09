@@ -15,7 +15,7 @@ Nothing moves to `claimed` without going through here.
 ## When to Use
 
 - Starting work on a task after `/anvil:plan` has produced a ready queue.
-- When resuming after an interrupted session — check `anvil status` first, then re-claim if the previous lease has expired and the task returned to `ready`.
+- When resuming after an interrupted session — follow [Native resume and frozen handoff](../../AGENTS.md#native-resume-and-frozen-handoff) before taking new ownership.
 - When coordinating parallel agents — each agent claims a separate task; `claim` enforces the conflict gate.
 
 **Do not use this skill to inspect the queue without taking work**; use `/anvil:state-ops` for that. Do not use this skill to submit completed work; that is the `finish` skill.
@@ -27,11 +27,10 @@ Nothing moves to `claimed` without going through here.
 anvil must be initialized, and a ready task is claimable **iff its OWNING PRD is in `reviewed` or `approved` status**. A project can hold several release-scoped PRDs, each gated separately — the task id names its PRD (e.g. `v0.2:T001` is owned by the `v0.2` PRD; a bare `T001` by the default PRD), and the gate keys on that PRD, not on any single project-wide status. Confirm before proceeding:
 
 ```bash
-anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
-anvil status
+anvil status --json
 ```
 
-`anvil status` prints one block per PRD with its status. The claim gate enforces per-PRD: `anvil claim` raises `ClaimError` when the task's owning PRD is `draft`, `rejected`, or absent; `reviewed` and `approved` both pass. So a `default` task can be claimable while a `v0.2` task is gated, and vice versa. If the owning PRD is still `draft`, run `anvil prd review --prd <prd_id>` (or `--approve`) first, or proceed to `/anvil:prd`. (`claim`/`release`/`renew` take no `--prd` flag — the task id already names its PRD.)
+Resolve unavailable State and existing history through the shared workflow before any initialization. The claim gate enforces per-PRD: `anvil claim` raises `ClaimError` when the task's owning PRD is `draft`, `rejected`, or absent; `reviewed` and `approved` both pass. A `default` task can be claimable while a `v0.2` task is gated. If the owning PRD is still `draft`, use `/anvil:prd` for its review and approval authority. `anvil claim TASK_ID --prd PRD_ID` is supported; a qualified task ID also identifies its PRD. `release` and `renew` accept a claim ID and have no `--prd` flag.
 
 Commands used in this skill (all ship today; confirm any with `anvil <cmd> --help`):
 
@@ -44,7 +43,10 @@ Commands used in this skill (all ship today; confirm any with `anvil <cmd> --hel
 | `anvil show TASK_ID` | Print full task detail |
 | `anvil list --status ready` | List the ready queue |
 
-Git is optional. When a git repo is present in the project root, `claim` automatically creates the branch `agent/<task_id_lower>-<slug>`. Without git, claim still succeeds: the record is written to state and the branch field is left `null`.
+For tasks without a verification profile, Git is optional: a claim outside a
+Git repository can leave the branch field `null`. Profile-bound claims require
+Git metadata and fail closed without it. In Git, use the actual branch and
+worktree location echoed by `claim`; the configured branch prefix may vary.
 
 ---
 
@@ -84,17 +86,13 @@ Audit the result inline and surface anything that should give the user pause bef
 - The **review tier** (`light`/`standard`/`max`, also on `anvil next` and the work packet) tells you up front how deep the eventual review will go — a `max`-tier task deserves a stronger executor and incremental commits, since `/anvil:finish` will dispatch an adversarial critic pass against it.
 - `Likely Files` does not include files that look like they belong to a different subsystem, which would be a sign the task scope drifted during authoring.
 
-Present the inspection summary and ask:
-
-> T012 looks claimable: acceptance criteria concrete, complexity 3, agent_suitability 4, likely files scoped to `src/retry/`. Proceed to claim? (yes / show me more / pick a different task)
-
-This step costs nothing and prevents the most common source of wasted claims.
+Present material scope or suitability concerns. Existing user authorization permits a routine eligible claim without another confirmation; ask only when the choice or authority is unresolved.
 
 ---
 
 ### Step 3 — Check for conflicts
 
-Invoke `anvil claim TASK_ID` yourself once the user confirms. The command performs the conflict check before writing anything:
+Invoke `anvil claim TASK_ID` within existing authorization. The command performs the conflict check before writing anything:
 
 ```bash
 anvil claim T012
@@ -140,7 +138,9 @@ Claimed task 'T012' as 'agent'.
 Run `anvil renew C0FCF72C8` to extend the lease before it expires.
 ```
 
-The actor defaults to `$USER` (or `agent`); pass `--actor` to override. The task transitions from `ready` to `claimed`, and two events are appended to the event log: `claim.created` and `task.status_changed`.
+The actor defaults to `$USER` (or `agent`); pass `--actor` to override. The
+`claim.created` event atomically projects the claim and the task's transition
+from `ready` to `claimed`; no separate `task.status_changed` event is emitted.
 
 If the user wants a separate git worktree (useful when running two agents in parallel from the same repo without checkout conflicts), invoke `--worktree` yourself:
 
@@ -211,11 +211,7 @@ Only the owning actor can renew a claim. To release another actor's stale claim,
 
 ### Step 7 — Submit when complete
 
-Once verification passes and the work is ready to leave the agent's hands, drive the submit yourself. Read the verification output, summarize what was completed, and ask the user to acknowledge before submitting:
-
-> T012 verification passed: 14 tests added, retry-backoff implemented in `src/retry/backoff.py`, no other files touched. Ready to submit? Submitting transitions T012 to `needs_review` and auto-releases the claim. (yes / not yet / let me re-check)
-
-On `yes`, invoke `anvil submit TASK_ID` yourself. `submit` requires `--commands` (the verification command(s) that were run) and `--files-changed` (the files modified); both are repeatable, so pass each flag once per value:
+Once required verification and the frozen handoff are complete, submit within existing authorization. Summarize actual results without adding a routine acknowledgment gate. `submit` requires `--commands` (the verification command(s) that were run) and `--files-changed` (the files modified); both are repeatable, so pass each flag once per value:
 
 ```bash
 anvil submit T012 --commands "pytest tests/test_backoff.py -v" --files-changed "src/retry/backoff.py"
@@ -235,19 +231,15 @@ Task 'T012' status → needs_review.
 Run `anvil apply T012` when ready for human review.
 ```
 
-Tell the user the task is now in `needs_review` and ask whether to hand off to `/anvil:finish` for the apply gate.
+Report the actual `needs_review` state and proceed to `/anvil:finish` within existing authorization.
 
-**The hard handoff lives in `finish`, not here.** `anvil apply TASK_ID --approve` is the only command in this leg of the lifecycle that requires explicit user confirmation before the agent runs it. That gate lives in `/anvil:finish`; invoke that skill rather than running `apply --approve` from here.
+**The approval gate lives in `finish`.** `anvil apply TASK_ID --approve` requires explicit user authority for that immutable disposition, with any human-only and final project gates preserved. Invoke `/anvil:finish`; never infer approval from tool availability or successful verification.
 
 ---
 
 ### Step 8 — Release explicitly when abandoning
 
-When work must stop before completion — blocked on an upstream issue, deprioritized, or handed off — invoke release yourself so the task returns to the pool. Always ask the user for a reason first so the audit trail is informative:
-
-> Releasing C0FCF72C8. What's the reason? (e.g., "blocked: upstream T009 not merged")
-
-Then run:
+When authorized ordinary work must stop before completion, stop its writers and release your claim with the observed reason. Ask if the reason or authority is unknown. Bundle child and root-set custody require their coordinator recovery path in the shared workflow; this ordinary example does not release those owners:
 
 ```bash
 anvil release C0FCF72C8 --reason "blocked: upstream T009 not merged"
@@ -267,7 +259,7 @@ anvil release C0FCF72C8 --force
 
 ## Anti-pattern to avoid
 
-The agent drives commands inline; it does not hand the user a numbered CLI to-do list. See `/anvil:plan` for the canonical statement. The only command that requires explicit user confirmation before the agent runs it is `apply --approve` (which lives in `/anvil:finish`).
+The agent drives commands inline within existing authorization; it does not hand the user a numbered CLI to-do list. See `/anvil:plan` for the canonical statement. Immutable approval requires explicit user authority in `/anvil:finish`; force and custody exceptions retain their own gates.
 
 **When to actually hand off CLI commands:** if the user explicitly opts out ("just give me the commands"), or if the runtime lacks the tool needed to execute them. In those cases, a CLI list is the right output. Otherwise, drive.
 

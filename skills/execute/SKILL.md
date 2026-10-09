@@ -26,7 +26,11 @@ An active claim by the current actor on `TASK_ID`. Verify before proceeding:
 anvil list --status claimed
 ```
 
-If the task does not appear, claim it first via `/anvil:claim`. Commands used in this skill:
+Follow [Native resume and frozen handoff](../../AGENTS.md#native-resume-and-frozen-handoff)
+before reclaiming or writing. For an ordinary eligible task without an active
+claim, use `/anvil:claim`. A bundle delegate instead returns work to its
+coordinator, who owns all member mutations; do not claim a bundle member
+independently. Commands used in this skill:
 
 | Command | Role |
 |---|---|
@@ -58,8 +62,9 @@ When present, read the packet’s **Active PRD assumptions** section as a
 declared constraint. An explicit autonomous delegation permits work within
 those bounded premises; it does not permit inventing new scope, obtaining
 external authority, or bypassing approval/evidence gates. If execution exposes
-an unstated premise with no bounded safe default, release the claim and surface
-it rather than silently broadening the work.
+an unstated premise with no bounded safe default, stop and surface it to the
+owner. Release an ordinary claim only after writers stop; bundle delegates
+leave release and recovery to their coordinator.
 
 Read the packet immediately after fetching it. The acceptance criteria in the packet are the contract that `submit` validates against. Skipping the packet and working from memory or from `show TASK_ID` output risks submitting evidence that misses a required item.
 
@@ -77,13 +82,16 @@ Before touching any file, confirm:
 
 1. The acceptance criteria are concrete and independently verifiable — not aspirational descriptions.
 2. The `likely_files` list in the packet does not overlap with files another active claim owns. If overlap exists, resolve it via `/anvil:state-ops` before editing.
-3. All acceptance criteria are unambiguous. If any are unclear, release the claim now rather than discovering the problem at submit time:
+3. All acceptance criteria are unambiguous. If any are unclear, stop writers and
+   surface the unresolved choice. For an ordinary claim, release with the actual
+   reason; for a bundle member, return the blocker to the coordinator:
 
 ```bash
 anvil release CLAIM_ID --reason "acceptance criteria ambiguous on T012 item 3"
 ```
 
-Ask the user to clarify, update the PRD, re-parse, and re-claim once the criteria are concrete.
+Resolve the choice with the authorized owner, update the owning PRD and re-parse
+with its selection. Resume only under the current native ownership rules.
 
 This check costs one minute. A wrong interpretation discovered at submit costs the full lease window plus rework.
 
@@ -169,6 +177,12 @@ The output includes `lease_expires_at` for each active claim.
 
 ### Step 5 — Run verification before submitting
 
+Use the shared workflow's environment and evidence preflight before costly
+verification. Read optional `verification.profile` metadata as frozen runner,
+command and file bindings; Anvil validates them but does not execute the runner.
+`anvil evidence-preflight TASK_ID --json` reports advisory capture readiness and
+cannot qualify a proof or grant authority.
+
 Apply the work packet's structured `hook_environment` in the process that
 invokes tools, then execute the task's `verification.commands`. The shell-free
 `capture-evidence` dispatcher (PostToolUse Bash) captures stdout, stderr, and
@@ -183,7 +197,10 @@ The verification commands are the objective acceptance gate. Submit only when al
 2. Fix the code.
 3. Re-run the verification command.
 
-Do not submit failing evidence. The Review engine checks `evidence_complete` against the task's `required_evidence` list — missing or failed verification commands are flagged and block `apply`.
+Retain failed captures when fixing and rerunning; never erase them or relabel
+old proof attribution. The Review engine checks evidence against the task's
+requirements. Advisory required-evidence warnings and enforceable typed-proof
+gates have different approval behavior; `/anvil:finish` inspects both.
 
 For tasks with expensive verification (integration tests, linting over a full codebase), run the cheap unit tests first to catch obvious failures before the slow gate.
 
@@ -205,7 +222,7 @@ anvil submit T012 \
   --pr-url https://github.com/org/repo/pull/42
 ```
 
-`--commands` and `--files-changed` are both **required** and **repeatable**: pass the flag once per value (one occurrence == one value, so commands or paths with embedded commas survive intact), or pass a single comma-separated occurrence for the simple case shown above. `--output-file` attaches up to 8000 characters as a descriptive excerpt; it never creates a typed proof or satisfies `required_proofs`. For an external/subagent run, repeat `--command-proof-file ARTIFACT` to import a bounded claim-bound proof batch. Every proof must match the explicit claim owner/context and an exact `--commands` value or the whole submission is refused. `--pr-url` links the branch's PR if one exists.
+`--commands` and `--files-changed` are both **required** and **repeatable**: pass the flag once per value (one occurrence == one value, so commands or paths with embedded commas survive intact), or pass a single comma-separated occurrence for the simple case shown above. `--output-file` attaches up to 8000 characters as a descriptive excerpt; it never creates a typed proof or satisfies `required_proofs`. For an external/subagent run under an ordinary claim, repeat `--command-proof-file ARTIFACT` to import a bounded claim-bound proof batch. Every proof must match the explicit claim owner/context and an exact `--commands` value or the whole submission is refused. Bundle members use the coordinator's member-bound capture described in [bundle coordination](../../docs/how-to/coordinating-a-bundle.md#invariants). `--pr-url` links the branch's PR if one exists.
 
 Signed command proofs also depend on current issuer membership in
 `ANVIL_TRUST_LIST` or `~/.anvil/trust.txt` during both append and replay. Back up
@@ -216,8 +233,11 @@ independent.
 `submit` does the following atomically:
 
 1. Writes an `Evidence` row to `state.db` with the commands run, files changed, and output excerpt.
-2. Auto-releases the claim (`claim.released` event).
-3. Transitions the task from `claimed` to `needs_review` (`task.status_changed` event).
+2. Auto-releases the task claim, including a bundle member authorization. The
+   bundle coordinator lease and bundle custody remain until their lifecycle
+   releases them; a submitted member cannot be reclaimed independently.
+3. Transitions the task from `claimed` to `needs_review` through the
+   `evidence.submitted` projection.
 
 The CLI prints the evidence summary immediately:
 
@@ -235,13 +255,21 @@ Run `anvil apply T012` when ready for human review.
 
 If the task declares `required_evidence` that the submission does not satisfy, the CLI appends an `Evidence gate: INCOMPLETE` block listing the missing items. That is advisory at submit time but blocks a strict `apply`.
 
-Review the printed evidence summary before walking away. If a field looks wrong (wrong file list, missing command), inspect with `anvil show T012` and coordinate with the human reviewer before they invoke `apply`.
+Review the printed evidence summary and freeze the shared workflow's handoff
+before review. If a field looks wrong, inspect with `anvil show T012` and return
+the blocker to the owner; do not retarget old evidence. Repair of a submitted
+bundle member requires the documented replacement-generation flow.
 
 ---
 
 ### Step 7 — Wait for apply
 
-`anvil apply TASK_ID` is a human-only step. The task stays in `needs_review` until the human reviewer invokes it. The `/anvil:finish` skill drives that decision — surfacing the evidence, picking a disposition (accept, reject, hold, discard), and running `apply`.
+The task stays in `needs_review` until an authorized disposition. The
+`/anvil:finish` skill validates the independent reviews and explicit user
+authority before running `anvil apply TASK_ID` with a disposition. Existing
+authority may cover routine intermediate dispositions; never infer approval
+from unattended execution or green checks. Preserve human-only, protected and
+final user project-validation gates from the shared workflow.
 
 Until `apply` is called:
 
@@ -249,7 +277,9 @@ Until `apply` is called:
 - The task is visible in `anvil list --status needs_review`.
 - No other agent can re-claim the task.
 
-No action required here. Proceed to the next task in the queue:
+After returning the frozen handoff and stopping its writers, continue authorized
+independent work. A bundle delegate returns to the coordinator; an ordinary
+worker can inspect the next task:
 
 ```bash
 anvil next
@@ -261,15 +291,19 @@ anvil next
 
 **Verification fails mid-work**: do not submit. Fix and re-run. The packet's `verification.commands` are the contract; submit only when they all exit 0.
 
-**Claim went stale mid-work**: the task has returned to `ready`. Re-claim it:
+**Claim went stale mid-work**: stop writers and follow the shared native resume
+workflow. Inspect current readiness and custody before an ordinary fresh claim:
 
 ```bash
 anvil claim T012
 ```
 
-The branch's commits are preserved on `agent/t012-<slug>`. Continue work on the same branch; the new claim ID replaces the expired one. If another agent claimed the task in the window between expiry and re-claim, coordinate via `anvil show T012` to check the current holder.
+The old branch, claim and evidence remain history. A new claim has fresh
+attribution and may select a different worktree; use its actual packet and
+location. Bundle or root custody requires its owner's recovery flow.
 
-**Need to abandon**: release the claim so the task returns to the pool:
+**Need to abandon**: stop writers before releasing an ordinary claim. Bundle
+delegates return the blocker to their coordinator:
 
 ```bash
 anvil release CLAIM_ID --reason "blocked on upstream T009 — not merged yet"
@@ -315,7 +349,7 @@ Every command in this loop ships in the current engine. The execution surface is
 | Surface | Where |
 |---|---|
 | `anvil packet TASK_ID` | renders the packet; `--format json` for the machine form |
-| `anvil submit TASK_ID` | records evidence and auto-releases the claim |
+| `anvil submit TASK_ID` | records evidence and auto-releases the task claim; bundle coordinator custody remains |
 | `anvil apply TASK_ID` | human review gate (accept / reject) |
 | `anvil conflicts` | persisted conflict groups (overlapping likely_files) |
 | `hook dispatch capture-evidence` | PostToolUse Bash; buffers verification output |

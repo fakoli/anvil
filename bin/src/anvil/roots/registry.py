@@ -557,10 +557,15 @@ class RootSetRegistry:
 
     @staticmethod
     def _read_json_regular(path: Path, *, limit: int) -> object:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        if os.name == "nt":
+            from anvil.verification_profiles import _windows_open
+            fd = _windows_open(path, directory=False)
+        else:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size < 0 or info.st_size > limit:
+            if (not stat.S_ISREG(info.st_mode) or info.st_size < 0 or info.st_size > limit
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
                 raise ValueError("unsafe registry file")
             chunks: list[bytes] = []
             remaining = limit + 1
@@ -632,6 +637,8 @@ class RootSetRegistry:
         repository_id = _require_id(repository_id, "repository id")
         live = live_repository_identity(path, declared_origin=str(origin))
         commands = _validate_commands(verification_commands or [])
+        if fcntl is None:
+            raise _error("root_set_unsupported", "this platform cannot lock the owner root registry.")
         # Enrollment is the explicit activation action, so it may create the
         # owner directory after legacy callers deliberately avoided doing so.
         self.base.mkdir(mode=0o700, parents=True, exist_ok=True)

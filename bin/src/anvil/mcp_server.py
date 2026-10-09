@@ -29,7 +29,8 @@ from anvil.cli._actor_output import (
     bundle_continuation_data,
     continuation_data,
 )
-from anvil.read_contracts import PrdScopedRefV1
+from anvil.cli._helpers import _resolve_project_dir
+from anvil.read_contracts import PrdScopedRefV1, ReadErrorCode
 from anvil.state.models import (
     RejectionQualityFinding,
     RejectionQualityFindingCode,
@@ -55,16 +56,16 @@ _MAX_MCP_SCHEMA_ERROR_BYTES = 4_096
 # Planning vs execution surface split (audit item L2)
 # ---------------------------------------------------------------------------
 #
-# The 36 tools fall into two groups:
+# Registered tools fall into two groups:
 #
-#   EXECUTION (24) — the turn-to-turn loop an agent runs while doing work:
+#   EXECUTION — the turn-to-turn loop an agent runs while doing work:
 #       get_next_task, claim_task, release_task, renew_claim, submit_progress,
 #       submit_completion_evidence, update_task_status, get_task,
 #       get_project_status, get_project_summary, list_tasks, check_conflicts,
 #       generate_work_packet, get_dependency_graph
-#       plus 10 coordinator-bundle execution/read tools
+#       plus coordinator-bundle and advisory read tools
 #
-#   PLANNING (12) — one-shot bootstrap/plan/review operations run rarely (often
+#   PLANNING — one-shot bootstrap/plan/review operations run rarely (often
 #       once per project), tagged ``planning`` below:
 #       init_project, parse_prd, assess_prd, review_prd, plan_tasks, score_tasks,
 #       review_tasks, apply_review_decision, edit_dependencies, find_decisions,
@@ -73,16 +74,16 @@ _MAX_MCP_SCHEMA_ERROR_BYTES = 4_096
 # Every planning tool carries the ``planning`` tag. The live stdio server hides
 # the planning surface BY DEFAULT (``apply_surface_gate`` at startup) so a steady-
 # state execution client never pays the ~1.2k-token planning schema cost on every
-# turn. Setting ``ANVIL_MCP_PLANNING`` (truthy) keeps all 36 tools on the wire —
+# turn. Setting ``ANVIL_MCP_PLANNING`` (truthy) keeps all tools on the wire —
 # use it for the planning phase, or run a second server entry with the flag set.
 #
 # IMPORTANT: the gate is applied ONLY when the live server starts (see
 # ``apply_surface_gate``), never at import time. So ``from anvil.mcp_server import
-# mcp`` still sees all 36 registered tools, and every introspection surface that
+# mcp`` still sees all registered tools, and every introspection surface that
 # reports "what the engine can do" — ``describe_surface``, ``anvil describe``,
 # ``mcp_tool_names()``, the ``--help`` tool list, the Docker catalog smoke test —
 # is unchanged. Only the per-turn wire surface of the *default* execution server
-# shrinks. No tool is removed; all 36 remain reachable.
+# shrinks. No tool is removed; all remain reachable.
 
 PLANNING_TAG = "planning"
 
@@ -118,7 +119,7 @@ def _validate_risk_ceiling(value: object, *, field: str) -> int | None:
         raise ToolError(f"{field} must be an integer from 1 to 5")
     return value
 
-# Env flag that opts a live server back into the full 36-tool surface.
+# Env flag that opts a live server back into the full tool surface.
 _PLANNING_ENV = "ANVIL_MCP_PLANNING"
 
 
@@ -126,7 +127,7 @@ def _planning_surface_enabled(env: dict[str, str] | None = None) -> bool:
     """Return True when the planning surface should be exposed on the wire.
 
     Resolves from the ``ANVIL_MCP_PLANNING`` env var. Truthy values
-    (``1``/``true``/``yes``/``on``, case-insensitive) enable the full 36-tool
+    (``1``/``true``/``yes``/``on``, case-insensitive) enable the full tool
     surface; anything else (incl. unset) yields the lean execution-only default.
     """
     import os
@@ -772,7 +773,7 @@ def _resolve_prd_id(backend: Any, prd_id: str | None = None) -> str:
         raise ToolError(exc.message) from exc
 
 
-def _open_backend(state_dir: Path):  # type: ignore[return]
+def _open_backend(state_dir: Path, project_root: Path | None = None):  # type: ignore[return]
     """Open a fresh SqliteBackend for the given state_dir.
 
     Raises ToolError if the project is uninitialized or its schema is
@@ -781,6 +782,7 @@ def _open_backend(state_dir: Path):  # type: ignore[return]
     """
     from anvil.cli._helpers import (
         BoundedSchemaProbe,
+        StateRootError,
         schema_diagnostic_from_exception,
     )
     from anvil.clock import SystemClock
@@ -833,6 +835,12 @@ def _open_backend(state_dir: Path):  # type: ignore[return]
         # Match the CLI boundary: compatibility wins over fallible config, and
         # the same cumulative worker budget covers preflight plus initialize.
         SqliteBackend.validate_schema_compatibility(schema_probe(db_path))
+        if project_root is None:
+            try:
+                if _resolve_state_dir(None) == state_dir:
+                    project_root = _resolve_project_dir(None)
+            except (OSError, ToolError, StateRootError):
+                pass
         backend = SqliteBackend(
             db_path=db_path,
             events_path=events_path,
@@ -841,6 +849,7 @@ def _open_backend(state_dir: Path):  # type: ignore[return]
             # replay strategy, so it must be resolved BEFORE the backend opens.
             events_storage=read_events_storage(state_dir / "config.yaml"),
             schema_probe_fn=schema_probe,
+            project_root=project_root,
         )
         backend.initialize()
     except BaseException as exc:
@@ -1345,7 +1354,9 @@ def claim_task(
     # ClaimManager owns new-identity canonicalization. Passing the exact input
     # preserves actor_input for SQLite's locked normalized-collision check.
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
@@ -1366,7 +1377,7 @@ def claim_task(
 
         # worktree_isolation parity with the CLI (review finding: the policy
         # lived only in cli/claim.py, so MCP claims silently bypassed it).
-        from anvil.cli._helpers import _load_config_optional, _resolve_project_dir
+        from anvil.cli._helpers import _load_config_optional
 
         cfg = _load_config_optional(state_dir)
         isolation = cfg.worktree_isolation if cfg is not None else "advisory"
@@ -1438,7 +1449,7 @@ def claim_task(
             )
             metadata = claim_git_metadata(plan)
             mutation_tracker = ClaimGitMutationTracker(plan)
-            from anvil.roots.registry import RootSetRegistry
+            from anvil.roots.registry import RootSetError, RootSetRegistry
             with RootSetRegistry().ordinary_claim_coordinator(project_dir):
                 with backend.claim_operation_lock():
                     require_canonical_prd_claim_binding(
@@ -1446,33 +1457,56 @@ def claim_task(
                         backend.get_prd(task.prd_id),
                     )
                     revalidate_claim_plan(plan, cwd=project_dir)
-                    result = manager.claim(
-                        task_id,
-                        expected_files=files,
-                        branch=metadata.branch if metadata is not None else None,
-                        worktree_path=(
-                            metadata.worktree_path if metadata is not None else None
-                        ),
-                        git_metadata=metadata,
-                        operation_locked=True,
-                        pre_log_check=lambda: require_canonical_prd_claim_binding(
-                            state_dir,
-                            backend.get_prd(task.prd_id),
-                        ),
-                    )
+                    profiled = task.verification.profile is not None
                     try:
-                        apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
-                    except BaseException:
-                        try:
-                            manager.release(
-                                result.claim.id,
-                                reason="transactional Git claim failed",
+                        if profiled:
+                            if metadata is None:
+                                raise ClaimError("verification profile requires Git metadata")
+                            apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                            manager = ClaimManager(
+                                backend, SystemClock(), actor=claimed_by,
+                                default_lease_minutes=lease_minutes,
+                                project_root=Path(metadata.target_path),
                             )
-                        finally:
+                        result = manager.claim(
+                            task_id,
+                            expected_files=files,
+                            branch=metadata.branch if metadata is not None else None,
+                            worktree_path=(
+                                metadata.worktree_path if metadata is not None else None
+                            ),
+                            git_metadata=metadata,
+                            operation_locked=True,
+                            pre_log_check=lambda: (
+                                mutation_tracker.check_before_publication(
+                                    lambda: require_canonical_prd_claim_binding(
+                                        state_dir, backend.get_prd(task.prd_id),
+                                    )
+                                ) if profiled else require_canonical_prd_claim_binding(
+                                    state_dir, backend.get_prd(task.prd_id),
+                                )
+                            ),
+                        )
+                    except BaseException as exc:
+                        if profiled:
                             compensate_claim_plan_tracker(
-                                mutation_tracker, cwd=project_dir
+                                mutation_tracker, cwd=project_dir, failure=exc,
                             )
                         raise
+                    if not profiled:
+                        try:
+                            apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                        except BaseException:
+                            try:
+                                manager.release(
+                                    result.claim.id,
+                                    reason="transactional Git claim failed",
+                                )
+                            finally:
+                                compensate_claim_plan_tracker(
+                                    mutation_tracker, cwd=project_dir
+                                )
+                            raise
                     finalize_claim_plan_tracker(
                         mutation_tracker, cwd=project_dir
                     )
@@ -1480,6 +1514,8 @@ def claim_task(
             raise ToolError(f"{exc.code}: {exc}") from exc
         except PrdClaimBindingError as exc:
             raise ToolError(f"prd_source_unapproved: {exc}") from None
+        except RootSetError as exc:
+            raise ToolError(f"{exc.code}: {exc}") from exc
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -1542,7 +1578,9 @@ def release_task(
     """Release a task claim, or an explicit target_kind=bundle coordinator claim."""
     actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
@@ -1578,11 +1616,11 @@ def release_task(
             raise _actor_mismatch_tool_error(
                 owner=active_claim.claimed_by, actual=actor, action="release the claim"
             )
-            if active_claim.root_set is not None:
-                raise ToolError(
-                    "root_set_unsupported: release coordinated root-set claims through "
-                    "`anvil release` so the owner reservation is reconciled."
-                )
+        if active_claim.root_set is not None:
+            raise ToolError(
+                "root_set_unsupported: release coordinated root-set claims through "
+                "`anvil release` so the owner reservation is reconciled."
+            )
 
         manager = ClaimManager(
             backend,
@@ -1620,7 +1658,9 @@ def renew_claim(
     """Renew a task claim, or an explicit target_kind=bundle coordinator claim."""
     actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
@@ -1668,11 +1708,11 @@ def renew_claim(
             raise _actor_mismatch_tool_error(
                 owner=active_claim.claimed_by, actual=actor, action="renew the claim"
             )
-            if active_claim.root_set is not None:
-                raise ToolError(
-                    "root_set_unsupported: renew coordinated root-set claims through "
-                    "`anvil renew` so the owner reservation is extended first."
-                )
+        if active_claim.root_set is not None:
+            raise ToolError(
+                "root_set_unsupported: renew coordinated root-set claims through "
+                "`anvil renew` so the owner reservation is extended first."
+            )
 
         lease_minutes = max(1, extend_seconds // 60)
         manager = ClaimManager(
@@ -1815,6 +1855,7 @@ def submit_progress(
     detail: str | None = None,
     attestation_base64: str | None = None,
     cwd: str | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> ProgressResponse:
     """Record a progress note for task_id as a 'progress.noted' audit event.
     Does NOT change task status. Reaps stale claims first.
@@ -1823,14 +1864,36 @@ def submit_progress(
     "tests", "review-fixes", ...) for the heartbeat bus — status surfaces
     read the latest phase back so operators can see where a long run is
     without asking. ``detail`` is free-text elaboration for the phase."""
+    receipt = None
+    if timing is not None:
+        if attestation_base64 is not None:
+            raise ToolError(
+                "timing_receipt_invalid: timing cannot be combined with attestation_base64"
+            )
+        from anvil.state.hashing import canonical_json_bytes
+        from anvil.timing_receipts import MAX_TIMING_RECEIPT_BYTES, CommandTimingReceipt
+
+        try:
+            canonical_json_bytes(
+                timing, max_bytes=MAX_TIMING_RECEIPT_BYTES,
+                max_string_bytes=MAX_TIMING_RECEIPT_BYTES,
+            )
+            receipt = CommandTimingReceipt.model_validate(timing)
+        except (ValueError, TypeError, RecursionError):
+            raise ToolError(
+                "timing_receipt_invalid: invalid bounded command timing receipt"
+            ) from None
     actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         from anvil.clock import SystemClock
         from anvil.state.models import EventDraft
 
-        _reap_stale(backend)
+        if receipt is None:
+            _reap_stale(backend)
 
         task = backend.get_task(task_id)
         if task is None:
@@ -1853,7 +1916,6 @@ def submit_progress(
                 ProgressAttestationError,
                 load_progress_attestation_base64,
             )
-            from anvil.cli._helpers import _resolve_project_dir
             from anvil.cli.proof import _default_trust_path
 
             try:
@@ -1889,6 +1951,8 @@ def submit_progress(
                 ),
             )
 
+        if notes is None and receipt is not None:
+            notes = "Command timing observation"
         if notes is None:
             raise ToolError("notes is required when attestation_base64 is not provided")
 
@@ -1906,6 +1970,7 @@ def submit_progress(
                 "actor": actor,
                 "notes": notes,
                 "noted_at": now.isoformat(),
+                **({"timing": receipt.model_dump(mode="json")} if receipt is not None else {}),
                 # T010 — omit the keys when unused: a no-phase row stays
                 # byte-identical to the pre-T010 shape, so an OLDER anvil
                 # sharing the same HOME-workspace state dir (installed
@@ -1916,7 +1981,14 @@ def submit_progress(
                 **({"detail": detail} if detail is not None else {}),
             },
         )
-        backend.append(draft)
+        from anvil.state.backend import EventRejected
+
+        try:
+            backend.append(draft)
+        except EventRejected:
+            if receipt is None:
+                raise
+            raise ToolError("timing_receipt_refused: timing observation rejected") from None
         return ProgressResponse(
             recorded=True, actor_identity=actor_identity_data(actor)
         )
@@ -1960,9 +2032,15 @@ def submit_completion_evidence(
             )
     actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
-        from anvil.cli.packet_apply import _read_command_proofs
+        from anvil.cli.packet_apply import (
+            CommandProofImportOverflow,
+            inspect_command_buffer,
+            require_buffer_unchanged,
+        )
         from anvil.clock import SystemClock
         from anvil.state.backend import EventRejected
         from anvil.state.models import EventDraft
@@ -2003,7 +2081,6 @@ def submit_completion_evidence(
                 load_claim_command_proof_base64,
                 verify_claim_command_proof_batch,
             )
-            from anvil.cli._helpers import _resolve_project_dir
             from anvil.cli.proof import _default_trust_path
             from anvil.state.models import (
                 MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
@@ -2056,69 +2133,79 @@ def submit_completion_evidence(
 
         evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
 
-        # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
-        # the PostToolUse hook observed) into typed CommandProofs, so an
-        # MCP-driven submit carries the same observed proofs as the CLI path.
-        command_proofs = _read_command_proofs(state_dir, active_claim.id)
-
-        # Refresh after every artifact/buffer read, then revalidate the exact
-        # lease window immediately before drafting. SQLite repeats this check
-        # against its authoritative clock while holding the append lock.
-        now = clock.now()
-        if command_proof_artifacts_base64:
-            if proof_project is None or proof_project_root is None:
-                raise ToolError("command_proof_error[context_missing]: project context missing")
+        with backend.claim_operation_lock():
+            # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
+            # the PostToolUse hook observed) into typed CommandProofs, so an
+            # MCP-driven submit carries the same observed proofs as the CLI path.
             try:
-                claim_bound_proofs = verify_claim_command_proof_batch(
-                    loaded_claim_proofs,
-                    claim=active_claim,
-                    task=task,
-                    project_id=proof_project.id,
-                    project_root=proof_project_root,
-                    actor=actor,
-                    declared_commands=commands_run,
-                    now=now,
+                buffer_inspection = inspect_command_buffer(state_dir, active_claim.id)
+                command_proofs = list(buffer_inspection.proofs)
+            except CommandProofImportOverflow as exc:
+                raise ToolError(f"{exc.code}: {exc}") from exc
+
+            # Refresh after every artifact/buffer read, then revalidate the exact
+            # lease window immediately before drafting. SQLite repeats this check
+            # against its authoritative clock while holding the append lock.
+            now = clock.now()
+            if command_proof_artifacts_base64:
+                if proof_project is None or proof_project_root is None:
+                    raise ToolError("command_proof_error[context_missing]: project context missing")
+                try:
+                    claim_bound_proofs = verify_claim_command_proof_batch(
+                        loaded_claim_proofs,
+                        claim=active_claim,
+                        task=task,
+                        project_id=proof_project.id,
+                        project_root=proof_project_root,
+                        actor=actor,
+                        declared_commands=commands_run,
+                        now=now,
+                    )
+                except ClaimCommandProofError as exc:
+                    raise ToolError(
+                        f"command_proof_error[{exc.code}]: {exc}"
+                    ) from exc
+
+            draft = EventDraft(
+                timestamp=now,
+                actor=actor,
+                action="evidence.submitted",
+                target_kind="task",
+                target_id=task_id,
+                payload_json={
+                    "task_id": task_id,
+                    "claim_id": active_claim.id,
+                    "submitted_by": actor,
+                    "evidence_id": evidence_id,
+                    # T006 — omit-when-default keeps the pre-v9 byte shape.
+                    **(
+                        {"category": category}
+                        if category and category != "completion"
+                        else {}
+                    ),
+                    "commands_run": commands_run,
+                    "files_changed": files_changed,
+                    "output_excerpt": output_excerpt,
+                    "pr_url": pr_url,
+                    "commit_sha": commit_sha,
+                    "screenshots": [],
+                    "known_limitations": None,
+                    "proofs": [
+                        p.model_dump(mode="json")
+                        for p in [*command_proofs, *claim_bound_proofs]
+                    ],
+                },
+            )
+
+            try:
+                backend.append(
+                    draft,
+                    pre_log_check=lambda: require_buffer_unchanged(
+                        state_dir, active_claim.id, buffer_inspection,
+                    ),
                 )
-            except ClaimCommandProofError as exc:
-                raise ToolError(
-                    f"command_proof_error[{exc.code}]: {exc}"
-                ) from exc
-
-        draft = EventDraft(
-            timestamp=now,
-            actor=actor,
-            action="evidence.submitted",
-            target_kind="task",
-            target_id=task_id,
-            payload_json={
-                "task_id": task_id,
-                "claim_id": active_claim.id,
-                "submitted_by": actor,
-                "evidence_id": evidence_id,
-                # T006 — omit-when-default keeps the pre-v9 byte shape.
-                **(
-                    {"category": category}
-                    if category and category != "completion"
-                    else {}
-                ),
-                "commands_run": commands_run,
-                "files_changed": files_changed,
-                "output_excerpt": output_excerpt,
-                "pr_url": pr_url,
-                "commit_sha": commit_sha,
-                "screenshots": [],
-                "known_limitations": None,
-                "proofs": [
-                    p.model_dump(mode="json")
-                    for p in [*command_proofs, *claim_bound_proofs]
-                ],
-            },
-        )
-
-        try:
-            backend.append(draft)
-        except EventRejected as exc:
-            raise ToolError(str(exc)) from exc
+            except (EventRejected, CommandProofImportOverflow) as exc:
+                raise ToolError(str(exc)) from exc
 
         fresh_task = backend.get_task(task_id)
         task_status = fresh_task.status.value if fresh_task is not None else "needs_review"
@@ -2402,7 +2489,9 @@ def edit_dependencies(
     from anvil.cli._helpers import canonical_prd_id
 
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         clock = SystemClock()
         selected_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
@@ -2917,7 +3006,7 @@ def parse_prd(
             path when ``file`` is given (but still honoured for the partition).
         cwd:  Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _DEFAULT_PRD_IDS
+    from anvil.cli._helpers import _DEFAULT_PRD_IDS, _resolve_project_root
     from anvil.clock import SystemClock
     from anvil.planning.diagnostics import parse_diagnostic_report
     from anvil.planning.prd_persistence import (
@@ -2970,7 +3059,9 @@ def parse_prd(
             prd_path=source_identity,
         )
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         clock = SystemClock()
         project = backend.get_project()
@@ -2987,6 +3078,7 @@ def parse_prd(
                 is_default=is_default_prd,
                 actor="anvil-mcp",
                 clock=clock,
+                project_root=_resolve_project_root(Path(cwd) if cwd else None),
             )
         except PrdRevisionError as exc:
             raise ToolError(str(exc)) from None
@@ -3071,7 +3163,9 @@ def review_prd(
             "Call init_project first.",
         )
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         # T019: resolve which PRD this review targets (explicit > $ANVIL_PRD >
         # single/default), then read THAT PRD's status. Collapse the default
@@ -3422,7 +3516,9 @@ def plan_tasks(
         llm_generated = True
         llm_provider = gen_result.provider_used
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         # T019: the partition this plan run owns. ``result.prd.id`` is the MODEL
         # prd_id ('default' for the default PRD, else the named id) already
@@ -3449,6 +3545,23 @@ def plan_tasks(
                 "planning graph is emitted."
             )
 
+        from anvil.planning._plan_helpers import build_prd_revision_draft
+
+        clock = SystemClock()
+        try:
+            prd_revision_draft = build_prd_revision_draft(
+                backend,
+                result,
+                source,
+                actor="anvil-mcp",
+                clock=clock,
+                project_root=project_root,
+            )
+        except ValueError:
+            raise ToolError(
+                "Planning source could not be bound to the persisted PRD."
+            ) from None
+
         # Validate and infer the complete parsed task set before any event is
         # appended. Native path identity failures must surface as ToolError
         # and leave both the projection and append-only log byte-identical.
@@ -3459,8 +3572,6 @@ def plan_tasks(
             )
         except BundlePlanningError as exc:
             raise ToolError(f"Planning inference refused: {exc}") from None
-
-        clock = SystemClock()
 
         def _with_prd_id(payload: dict[str, Any], model_prd_id: str) -> dict[str, Any]:
             # prd_id is Field(exclude=True) on Feature/Task, so model_dump drops
@@ -3477,7 +3588,6 @@ def plan_tasks(
         # was missing the TransactionAborted catch that the MCP had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
-            build_prd_revision_draft,
             build_prune_event_drafts,
             classify_orphans,
             emit_planning_batch,
@@ -3504,19 +3614,6 @@ def plan_tasks(
                 "prune_force=True to delete despite the status (audit "
                 "history is preserved either way)."
             )
-
-        try:
-            prd_revision_draft = build_prd_revision_draft(
-                backend,
-                result,
-                source,
-                actor="anvil-mcp",
-                clock=clock,
-            )
-        except ValueError:
-            raise ToolError(
-                "Planning source could not be bound to the persisted PRD."
-            ) from None
 
         operations, prune_result = build_prune_event_drafts(
             classification,
@@ -3756,7 +3853,9 @@ def score_tasks(
                 file=sys.stderr,
             )
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         if all_prds and prd_id is not None:
             raise ToolError("prd_id and all_prds are mutually exclusive")
@@ -3924,7 +4023,9 @@ def review_tasks(
             "Call init_project first.",
         )
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         clock = SystemClock()
         if all_prds and prd_id is not None:
@@ -4120,7 +4221,9 @@ def apply_review_decision(
     if quality_findings and len(quality_findings) != len(set(quality_findings)):
         raise ToolError("quality_findings must not contain duplicate codes")
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         task = backend.get_task(task_id)
         if task is None:
@@ -4540,7 +4643,9 @@ def create_bundle(
     from anvil.state.models import BundleReviewPolicy, BundleThroughputBudget
 
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             bundle = BundleCatalog(
@@ -4622,7 +4727,6 @@ def claim_bundle(
 ) -> BundleClaimResponse:
     """Atomically claim a bundle and create internal member authorizations."""
     from anvil.bundles.manager import BundleError
-    from anvil.cli._helpers import _resolve_project_dir
     from anvil.git_ops import (
         ClaimGitMutationTracker,
         ClaimPlanError,
@@ -4635,7 +4739,9 @@ def claim_bundle(
     )
 
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         _reap_stale(backend)
         from anvil.cli._helpers import _load_config_optional
@@ -4708,31 +4814,60 @@ def claim_bundle(
                         backend.get_prd(bundle.prd_id),
                     )
                     revalidate_claim_plan(plan, cwd=project_dir)
-                    result = manager.claim(
-                        bundle_id,
-                        branch=metadata.branch if metadata is not None else None,
-                        worktree_path=(
-                            metadata.worktree_path if metadata is not None else None
-                        ),
-                        git_metadata=metadata,
-                        pre_log_check=lambda: require_canonical_prd_claim_binding(
-                            state_dir,
-                            backend.get_prd(bundle.prd_id),
-                        ),
+                    profiled = any(
+                        member is not None and member.verification.profile is not None
+                        for member in (backend.get_task(task_id) for task_id in bundle.task_ids)
                     )
                     try:
-                        apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
-                    except BaseException:
-                        try:
-                            manager.release(
-                                bundle_id,
-                                reason="transactional Git claim failed",
+                        if profiled:
+                            if metadata is None:
+                                raise BundleError("verification profile requires Git metadata")
+                            apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                            from anvil.bundles.manager import BundleManager
+                            from anvil.clock import SystemClock
+
+                            manager = BundleManager(
+                                backend, SystemClock(), actor=_require_actor(actor),
+                                project_root=Path(metadata.target_path),
+                                lease_minutes=lease_minutes,
                             )
-                        finally:
+                        result = manager.claim(
+                            bundle_id,
+                            branch=metadata.branch if metadata is not None else None,
+                            worktree_path=(
+                                metadata.worktree_path if metadata is not None else None
+                            ),
+                            git_metadata=metadata,
+                            pre_log_check=lambda: (
+                                mutation_tracker.check_before_publication(
+                                    lambda: require_canonical_prd_claim_binding(
+                                        state_dir, backend.get_prd(bundle.prd_id),
+                                    )
+                                ) if profiled else require_canonical_prd_claim_binding(
+                                    state_dir, backend.get_prd(bundle.prd_id),
+                                )
+                            ),
+                        )
+                    except BaseException as exc:
+                        if profiled:
                             compensate_claim_plan_tracker(
-                                mutation_tracker, cwd=project_dir
+                                mutation_tracker, cwd=project_dir, failure=exc,
                             )
                         raise
+                    if not profiled:
+                        try:
+                            apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                        except BaseException:
+                            try:
+                                manager.release(
+                                    bundle_id,
+                                    reason="transactional Git claim failed",
+                                )
+                            finally:
+                                compensate_claim_plan_tracker(
+                                    mutation_tracker, cwd=project_dir
+                                )
+                            raise
                     finalize_claim_plan_tracker(
                         mutation_tracker, cwd=project_dir
                     )
@@ -4766,7 +4901,9 @@ def generate_bundle_packet(
     from anvil.bundles.manager import BundleError
 
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             packet = _bundle_manager(backend, state_dir, actor, cwd=cwd).packet(
@@ -4796,7 +4933,9 @@ def submit_bundle_progress(
     from anvil.bundles.manager import BundleError
 
     state_dir = _resolve_state_dir(cwd)
-    backend = _open_backend(state_dir)
+    backend = _open_backend(
+        state_dir, project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             manager = _bundle_manager(backend, state_dir, actor, cwd=cwd)
@@ -4851,7 +4990,9 @@ def record_bundle_review(
     from anvil.clock import SystemClock
     from anvil.state.models import ReviewDecision
 
-    backend = _open_backend(_resolve_state_dir(cwd))
+    backend = _open_backend(
+        _resolve_state_dir(cwd), project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             gate = BundleReviewManager(
@@ -4882,7 +5023,9 @@ def finalize_bundle_review(
     from anvil.bundles.review import BundleReviewError, BundleReviewManager
     from anvil.clock import SystemClock
 
-    backend = _open_backend(_resolve_state_dir(cwd))
+    backend = _open_backend(
+        _resolve_state_dir(cwd), project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             gate = BundleReviewManager(
@@ -4911,7 +5054,9 @@ def checkpoint_bundle(
     from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
     from anvil.clock import SystemClock
 
-    backend = _open_backend(_resolve_state_dir(cwd))
+    backend = _open_backend(
+        _resolve_state_dir(cwd), project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             checkpoint = BundleDeliveryManager(
@@ -4942,7 +5087,9 @@ def reconcile_bundle(
     from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
     from anvil.clock import SystemClock
 
-    backend = _open_backend(_resolve_state_dir(cwd))
+    backend = _open_backend(
+        _resolve_state_dir(cwd), project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             BundleDeliveryManager(
@@ -4970,7 +5117,9 @@ def supersede_bundle(
     from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
     from anvil.clock import SystemClock
 
-    backend = _open_backend(_resolve_state_dir(cwd))
+    backend = _open_backend(
+        _resolve_state_dir(cwd), project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
     try:
         try:
             BundleDeliveryManager(
@@ -5045,19 +5194,64 @@ def _help_text() -> str:
         "                     host project here, e.g. -v \"$PWD:/project\" -e",
         "                     ANVIL_ROOT=/project.",
         "  ANVIL_MCP_PLANNING  When truthy (1/true/yes/on), the live server",
-        "                     exposes the full 36-tool surface. By DEFAULT the 12",
+        "                     exposes the full tool surface. By default the",
         "                     one-shot planning tools (init_project, parse_prd, assess_prd,",
         "                     review_prd, plan_tasks, score_tasks, review_tasks,",
         "                     apply_review_decision, edit_dependencies,",
         "                     find_decisions, describe_surface, create_bundle) are hidden from the",
         "                     per-turn wire surface to cut always-on context; the",
-        "                     24 execution tools remain. All 36 are always",
+        "                     execution tools remain. All tools are always",
         "                     registered (this list reflects the full surface).",
         "",
         f"Registered tools ({len(tools)}):",
     ]
     lines += [f"  {name}" for name in tools]
     return "\n".join(lines)
+
+
+
+@mcp.tool
+def get_attempt_view(
+    task_id: str, prd_id: str | None = None, limits: dict[str, Any] | None = None,
+    observation_at: str | None = None,
+    bundle: Annotated[bool, Field(strict=True)] = False, cwd: str | None = None,
+) -> dict[str, Any]:
+    """Read a bounded advisory attempt view at one canonical state frontier."""
+    from anvil.attempt_view import AttemptViewRefusal, read_attempt_view
+    from anvil.project_snapshot import ProjectSnapshotError
+
+    try:
+        return read_attempt_view(
+            _resolve_state_dir(cwd), task_id, prd_id=prd_id, limits=limits,
+            observation_at=observation_at, bundle=bundle,
+        )
+    except ProjectSnapshotError as exc:
+        raise ToolError(json.dumps(exc.error.model_dump(mode="json"))) from None
+    except (ToolError, OSError):
+        error = AttemptViewRefusal(code=ReadErrorCode.state_unavailable, field="state")
+        raise ToolError(json.dumps(error.model_dump(mode="json"))) from None
+
+
+@mcp.tool
+def read_evidence_preflight(
+    task_id: str, prd_id: str | None = None, limits: dict[str, Any] | None = None,
+    observation_at: str | None = None, cwd: str | None = None,
+) -> dict[str, Any]:
+    """Read complete bounded evidence facts without granting mutation authority."""
+    from anvil.attempt_view import AttemptViewRefusal
+    from anvil.attempt_view import read_evidence_preflight as read_preflight
+    from anvil.project_snapshot import ProjectSnapshotError
+
+    try:
+        return read_preflight(
+            _resolve_state_dir(cwd), task_id, prd_id=prd_id, limits=limits,
+            observation_at=observation_at,
+        )
+    except ProjectSnapshotError as exc:
+        raise ToolError(json.dumps(exc.error.model_dump(mode="json"))) from None
+    except (ToolError, OSError):
+        error = AttemptViewRefusal(code=ReadErrorCode.state_unavailable, field="state")
+        raise ToolError(json.dumps(error.model_dump(mode="json"))) from None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5093,13 +5287,13 @@ def main(argv: list[str] | None = None) -> int:
     # L2: hide the one-shot planning tool surface on the live wire UNLESS the
     # operator opts back in via ANVIL_MCP_PLANNING. This shrinks the always-on
     # per-turn cost for the common execution client without removing any tool —
-    # all 36 stay registered (introspection/--help/describe unchanged) and the
+    # all tools stay registered (introspection/--help/describe unchanged) and the
     # planning 12 return the moment the flag is set. Applied here, not at import,
     # so only the live server's wire surface is affected.
     if not apply_surface_gate(mcp):
         print(
             "anvil-mcp: planning tools hidden (execution surface only). "
-            f"Set {_PLANNING_ENV}=1 to expose the full 36-tool surface for "
+            f"Set {_PLANNING_ENV}=1 to expose the full tool surface for "
             "planning.",
             file=sys.stderr,
         )

@@ -528,6 +528,44 @@ def plan(
             new_markdown = (
                 current_markdown.rstrip() + "\n\n" + gen_result.markdown + "\n"
             )
+            prospective = parse_prd(new_markdown, prd_id=parse_prd_id, provider=provider)
+            if any(task.verification.profile is not None for task in prospective.tasks) or any(
+                error.section == "verification_profile" for error in prospective.errors
+            ):
+                # Generated profiles cross the same source boundary as ordinary
+                # planning. Validate before CAS; a refusal must not rewrite PRD.
+                import hashlib
+
+                from anvil.cli._helpers import IngestedPrdSource
+                from anvil.planning._plan_helpers import build_prd_revision_draft
+
+                try:
+                    prospective_bytes = new_markdown.encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    message = "PRD source is not valid UTF-8"
+                    if json_output:
+                        fail("plan", message, code="source_invalid_utf8")
+                    typer.echo(f"Error: {message}", err=True)
+                    raise typer.Exit(code=1) from None
+                prospective_source = IngestedPrdSource(
+                    source_bytes=prospective_bytes, markdown=new_markdown,
+                    source_sha256=hashlib.sha256(prospective_bytes).hexdigest(),
+                    source_size_bytes=len(prospective_bytes),
+                )
+                validation_backend = _open_backend(state_dir)
+                try:
+                    build_prd_revision_draft(
+                        validation_backend, prospective, prospective_source,
+                        actor="anvil-cli", clock=SystemClock(), project_root=project_root,
+                    )
+                except ValueError:
+                    message = "Planning source could not be bound to the persisted PRD."
+                    if json_output:
+                        fail("plan", message, code="invalid_prd_revision")
+                    typer.echo(f"Error: {message}", err=True)
+                    raise typer.Exit(code=1) from None
+                finally:
+                    validation_backend.close()
             try:
                 updated_source = replace_prd_source_for_id(
                     state_dir,
@@ -550,10 +588,11 @@ def plan(
                 raise typer.Exit(code=1) from exc
             markdown = updated_source.markdown
             source = updated_source
+            parsed = prospective
         else:
             markdown = current_markdown
+            parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
 
-        parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
         llm_generated_count = len(parsed.tasks)
         llm_tier_used = gen_result.provider_used
 
@@ -708,6 +747,23 @@ def plan(
             )
             raise typer.Exit(code=1)
 
+        # Freeze verification before inference copies tasks or any event lands.
+        try:
+            prd_revision_draft = build_prd_revision_draft(
+                backend,
+                parsed,
+                source,
+                actor="anvil-cli",
+                clock=clock,
+                project_root=project_root,
+            )
+        except ValueError:
+            message = "Planning source could not be bound to the persisted PRD."
+            if json_output:
+                fail("plan", message, code="invalid_prd_revision")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from None
+
         # Complete every path-sensitive inference pass before the first event
         # append. A host path API failure must refuse atomically: no prune,
         # acknowledgement, feature, task, or conflict-group event may land.
@@ -766,28 +822,6 @@ def plan(
                     },
                 )
             )
-
-        # Surface TransactionAborted as a clean CLI error rather than a
-        # raw Python traceback. The handler's message is user-actionable
-        # as-is (names the blocking IDs and the resolution). Greptile MUST
-        # FIX from PR #63 review — previously this catch was missing and
-        # the most accessible trigger was "user removes a feature heading
-        # from prd.md while keeping its referencing tasks": the feature
-        # becomes an orphan, the handler refuses, the CLI crashed.
-        try:
-            prd_revision_draft = build_prd_revision_draft(
-                backend,
-                parsed,
-                source,
-                actor="anvil-cli",
-                clock=clock,
-            )
-        except ValueError:
-            message = "Planning source could not be bound to the persisted PRD."
-            if json_output:
-                fail("plan", message, code="invalid_prd_revision")
-            typer.echo(f"Error: {message}", err=True)
-            raise typer.Exit(code=1) from None
 
         operations, prune_result = build_prune_event_drafts(
             classification,

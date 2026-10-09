@@ -25,19 +25,19 @@ State-ops is NOT for authoring or reviewing PRDs — use the `prd` skill. State-
 
 ## Prerequisites
 
-The project must have run `anvil init` at least once. State lives in the layout anvil chose (the HOME workspace by default, `~/.anvil/workspaces/<key>/.anvil/...`), not in the repo, so check init through the CLI rather than a literal path:
+Resolve the intended project first. State uses the CLI-selected layout (the HOME workspace by default), so a missing in-repo `.anvil/` does not establish missing history:
 
 ```bash
-anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
+anvil status --json
 ```
 
-If it reports `MISSING`, refuse to proceed and tell the caller to run:
+If State is unavailable, inspect checkout identity, existing worktrees and recovery records before initializing another project. A query-only read can confirm available history:
 
 ```bash
-anvil init --name "<project-name>"
+anvil project snapshot --json
 ```
 
-Do not attempt to read state, list tasks, or call any other `anvil` command until `anvil status` confirms the project is initialized.
+Follow [Native resume and frozen handoff](../../AGENTS.md#native-resume-and-frozen-handoff). Initialize only after establishing that this is a new project with no existing State to recover.
 
 ---
 

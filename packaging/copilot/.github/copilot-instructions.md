@@ -12,7 +12,7 @@ complementary surfaces:
 
 - **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
   after `uv tool install anvil-state`).
-- **MCP** — `anvil-mcp` (FastMCP stdio; 24 execution tools by default, all 36
+- **MCP** — `anvil-mcp` (FastMCP stdio; 26 execution tools by default, all 38
   with `ANVIL_MCP_PLANNING=1`). Run `anvil mcp-config <your-client>` to print
   client-specific config.
 
@@ -22,6 +22,37 @@ envelope. **Prefer the MCP tool if your harness has MCP; otherwise use the CLI
 command in the same row.** The two provider-read operations are intentionally
 CLI-only execution surfaces; MCP clients discover their versioned contracts and
 schemas through `describe_surface`, then execute the documented CLI command.
+
+## Native resume and frozen handoff
+
+1. Resolve the intended checkout and CLI-selected State before acting. Inspect
+   `anvil status --json` and available `anvil project snapshot --json` history.
+   Unavailable State in a worktree is not proof of absent history: check project
+   identity, other worktrees and recovery records before initializing. Preserve
+   named PRD selection, including `anvil prd parse --prd PRD_ID`.
+2. Resume from `anvil packet TASK_ID --attempt --format json` (add `--bundle`
+   for a bundle ID), then read the actual work packet. Match task, claim, actor,
+   generation and custody before edits. Released/expired ownership needs current
+   readiness and a fresh claim; never reuse its old proof attribution. One bundle
+   coordinator owns child mutations; released/stale bundles require replan, and
+   root reservations require owner reconciliation. Never infer force authority.
+3. Inspect `verification.profile` and the environment before costly verification;
+   Anvil validates frozen literal commands/file bindings but does not run the
+   repository runner. `anvil evidence-preflight TASK_ID --json` is advisory and
+   grants no submission, renewal or approval authority. Retain failed captures;
+   do not trim buffers or retarget old evidence to pass a new claim.
+4. Existing user authorization permits routine claim/work/submit without repeated
+   confirmation. Immutable approval requires explicit user authority for that
+   disposition; tool availability and green checks do not grant it. Preserve
+   protected acceptance, human-only and final user project-validation gates.
+5. Freeze source and actual proof attribution after required checks pass. Hand
+   off task/claim/generation/commit, exact commands/results, authoritative evidence
+   references, remaining risks, and observed writer-stop/custody facts. Obtain
+   three independent adversarial reviews with distinct angles for each whole
+   task. Authors are not independent reviewers. The coordinator validates these
+   bindings/verdicts and stopped custody rather than repeating the source review.
+   Repair blockers and repeat affected checks/reviews; repeat broader checks only
+   for changes, failures or unresolved risks. Unknown runner stop stays unknown.
 
 ## The standalone loop
 
@@ -66,6 +97,8 @@ anvil apply T001           # apply the review verdict
 | Release claim | `release_task` | `anvil release <id>` |
 | Renew claim lease | `renew_claim` | `anvil renew <id>` |
 | Work packet | `generate_work_packet` | `anvil packet <id>` |
+| Attempt history (read-only) | `get_attempt_view` | `anvil packet <id> --attempt --format json` |
+| Evidence preflight (advisory, read-only) | `read_evidence_preflight` | `anvil evidence-preflight <id> --json` |
 | Submit progress | `submit_progress` | `anvil progress <id> <phase>` |
 | Submit evidence | `submit_completion_evidence` | `anvil submit <id> --commands … --files-changed …` |
 | Update task status | `update_task_status` | (via claim/submit/apply flow) |
@@ -98,7 +131,7 @@ See `docs/how-to/coordinating-a-bundle.md` for the complete recovery and review 
 
 ### Execution vs planning surface (MCP)
 
-To keep the per-turn context lean, the MCP server exposes only the **24
+To keep the per-turn context lean, the MCP server exposes only the **26
 execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
 status/conflicts/deps plus coordinator-bundle operations). The **12 one-shot planning tools** (`init_project`,
 `parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
@@ -106,7 +139,7 @@ status/conflicts/deps plus coordinator-bundle operations). The **12 one-shot pla
 `describe_surface`, `create_bundle`) are **hidden by default** and re-appear when the server is
 started with **`ANVIL_MCP_PLANNING=1`** (or `true`/`yes`/`on`). Nothing is
 removed — every capability stays reachable via the CLI command in the same row,
-and the full 36-tool surface returns the moment the env flag is set. Use it for
+and the full 38-tool surface returns the moment the env flag is set. Use it for
 the planning phase; the steady-state execution loop needs none of the 12.
 
 ## Notes
@@ -115,8 +148,9 @@ the planning phase; the steady-state execution loop needs none of the 12.
   reviews with distinct angles. Treat any unresolved blocking finding as a
   failed gate; fix it and repeat the affected reviews. Record the reviewers,
   angles, verdicts, and supporting commands in the task or PR evidence. This
-  review gate is automatic for every task, but it does not replace the human
-  confirmation required before the immutable `anvil apply --approve` event.
+  review gate is automatic for every task, but it does not replace explicit human
+  authority required before the immutable `anvil apply --approve` event or the
+  final user project-validation gate.
 - Claude Code and Codex can run Anvil's non-blocking
   SessionStart/PreToolUse/PostToolUse **hooks** from `hooks/hooks.json`; the
   manifest uses a shell-free `uv run --quiet ... anvil.cli hook dispatch ...`

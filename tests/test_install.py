@@ -863,8 +863,8 @@ def test_pi_native_commands_generated(sandbox: dict[str, Path]) -> None:
     install_cmd = next(c for c in sandbox["native_cmds"] if c[:2] == ["pi", "install"])
     assert install_cmd[2] == "-l", install_cmd  # project scope (matches anvil's manifest)
     spec = install_cmd[3]
-    assert spec.startswith("/"), f"spec must be an absolute path: {spec}"
-    assert spec.endswith("packaging/pi/anvil-pi"), spec
+    assert Path(spec).is_absolute(), f"spec must be an absolute path: {spec}"
+    assert Path(spec).parts[-3:] == ("packaging", "pi", "anvil-pi"), spec
     # No MCP config, no instruction splice — pi reads AGENTS.md natively and has
     # no MCP client.
     assert not (sandbox["project"] / "AGENTS.md").exists()

@@ -184,7 +184,7 @@ def claim(
     cfg = _load_config_optional(state_dir)
     lease_kwargs = _lease_manager_kwargs(cfg, lease_override=lease_minutes)
 
-    backend = _open_backend(state_dir)
+    backend = _open_backend(state_dir, project_root=resolved_cwd)
     try:
         clock = SystemClock()
 
@@ -246,8 +246,15 @@ def claim(
                 project_root=resolved_cwd,
                 lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
             )
+            profiled = any(
+                member is not None and member.verification.profile is not None
+                for member in (
+                    backend.get_task(member_id) for member_id in execution_bundle.task_ids
+                )
+            )
             try:
-                bundle_manager.preflight(task_id)
+                if not profiled:
+                    bundle_manager.preflight(task_id)
             except BundleActorMismatch as exc:
                 if json_output:
                     fail_with(
@@ -300,33 +307,55 @@ def claim(
                             backend.get_prd(execution_bundle.prd_id),
                         )
                         revalidate_claim_plan(plan, cwd=resolved_cwd)
-                        bundle_result = bundle_manager.claim(
-                            task_id,
-                            branch=metadata.branch if metadata is not None else branch,
-                            worktree_path=(
-                                metadata.worktree_path if metadata is not None else None
-                            ),
-                            git_metadata=metadata,
-                            pre_log_check=lambda: require_canonical_prd_claim_binding(
-                                state_dir,
-                                backend.get_prd(execution_bundle.prd_id),
-                            ),
-                        )
                         try:
-                            apply_claim_plan(
-                                plan, cwd=resolved_cwd, tracker=mutation_tracker
-                            )
-                        except BaseException:
-                            try:
-                                bundle_manager.release(
-                                    task_id,
-                                    reason="transactional Git claim failed",
+                            if profiled:
+                                if metadata is None:
+                                    raise BundleError("verification profile requires Git metadata")
+                                apply_claim_plan(
+                                    plan, cwd=resolved_cwd, tracker=mutation_tracker
                                 )
-                            finally:
+                                bundle_manager = BundleManager(
+                                    backend, clock, actor=resolved_actor,
+                                    project_root=Path(metadata.target_path),
+                                    lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
+                                )
+                            bundle_result = bundle_manager.claim(
+                                task_id,
+                                branch=metadata.branch if metadata is not None else branch,
+                                worktree_path=(
+                                    metadata.worktree_path if metadata is not None else None
+                                ),
+                                git_metadata=metadata,
+                                pre_log_check=lambda: mutation_tracker.check_before_publication(
+                                    lambda: require_canonical_prd_claim_binding(
+                                        state_dir,
+                                        backend.get_prd(execution_bundle.prd_id),
+                                    ),
+                                ) if profiled else require_canonical_prd_claim_binding(
+                                    state_dir, backend.get_prd(execution_bundle.prd_id),
+                                ),
+                            )
+                        except BaseException as exc:
+                            if profiled:
                                 compensate_claim_plan_tracker(
-                                    mutation_tracker, cwd=resolved_cwd
+                                    mutation_tracker, cwd=resolved_cwd, failure=exc
                                 )
                             raise
+                        if not profiled:
+                            try:
+                                apply_claim_plan(
+                                    plan, cwd=resolved_cwd, tracker=mutation_tracker
+                                )
+                            except BaseException:
+                                try:
+                                    bundle_manager.release(
+                                        task_id, reason="transactional Git claim failed",
+                                    )
+                                finally:
+                                    compensate_claim_plan_tracker(
+                                        mutation_tracker, cwd=resolved_cwd
+                                    )
+                                raise
                         finalize_claim_plan_tracker(
                             mutation_tracker, cwd=resolved_cwd
                         )
@@ -338,6 +367,14 @@ def claim(
             except PrdClaimBindingError as exc:
                 if json_output:
                     fail("claim", str(exc), code="prd_source_unapproved")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            except BundleActorMismatch as exc:
+                if json_output:
+                    fail_with(
+                        "claim", str(exc), code="actor_mismatch",
+                        extra={"owner": exc.owner, "resolved_actor": exc.actual},
+                    )
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             except BundleError as exc:
@@ -568,6 +605,7 @@ def claim(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
+        profiled = task.verification.profile is not None
         try:
             from anvil.roots.registry import RootSetRegistry
             with RootSetRegistry().ordinary_claim_coordinator(resolved_cwd):
@@ -577,34 +615,53 @@ def claim(
                         backend.get_prd(task.prd_id),
                     )
                     revalidate_claim_plan(plan, cwd=resolved_cwd)
-                    result = manager.claim(
-                        task_id,
-                        expected_files=expected_files,
-                        force=force,
-                        branch=metadata.branch if metadata is not None else branch,
-                        worktree_path=(
-                            metadata.worktree_path if metadata is not None else None
-                        ),
-                        git_metadata=metadata,
-                        operation_locked=True,
-                        pre_log_check=lambda: require_canonical_prd_claim_binding(
-                            state_dir,
-                            backend.get_prd(task.prd_id),
-                        ),
-                    )
                     try:
-                        apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
-                    except BaseException:
-                        try:
-                            manager.release(
-                                result.claim.id,
-                                reason="transactional Git claim failed",
+                        if profiled:
+                            if metadata is None:
+                                raise ClaimError("verification profile requires Git metadata")
+                            apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
+                            manager = ClaimManager(
+                                backend, clock, actor=resolved_actor,
+                                project_root=Path(metadata.target_path), **lease_kwargs,
                             )
-                        finally:
+                        result = manager.claim(
+                            task_id,
+                            expected_files=expected_files,
+                            force=force,
+                            branch=metadata.branch if metadata is not None else branch,
+                            worktree_path=(
+                                metadata.worktree_path if metadata is not None else None
+                            ),
+                            git_metadata=metadata,
+                            operation_locked=True,
+                            pre_log_check=lambda: mutation_tracker.check_before_publication(
+                                lambda: require_canonical_prd_claim_binding(
+                                    state_dir,
+                                    backend.get_prd(task.prd_id),
+                                ),
+                            ) if profiled else require_canonical_prd_claim_binding(
+                                state_dir, backend.get_prd(task.prd_id),
+                            ),
+                        )
+                    except BaseException as exc:
+                        if profiled:
                             compensate_claim_plan_tracker(
-                                mutation_tracker, cwd=resolved_cwd
+                                mutation_tracker, cwd=resolved_cwd, failure=exc
                             )
                         raise
+                    if not profiled:
+                        try:
+                            apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
+                        except BaseException:
+                            try:
+                                manager.release(
+                                    result.claim.id, reason="transactional Git claim failed",
+                                )
+                            finally:
+                                compensate_claim_plan_tracker(
+                                    mutation_tracker, cwd=resolved_cwd
+                                )
+                            raise
                     finalize_claim_plan_tracker(
                         mutation_tracker, cwd=resolved_cwd
                     )

@@ -49,7 +49,7 @@ def _json(result):
     return json.loads(result.output)["data"]
 
 
-@pytest.mark.parametrize("proof_case", ["valid", "missing", "malformed", "failed", "wrong_owner", "external", "external_symlink", "external_fifo"])
+@pytest.mark.parametrize("proof_case", ["valid", "missing", "malformed", "failed", "wrong_owner", "external", "external_symlink", "external_fifo", "overflow"])
 def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tmp_path, monkeypatch, proof_case):
     """Same filenames remain separate and a terminal claim stays overheld."""
     home = tmp_path / "home"
@@ -111,7 +111,7 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
     monkeypatch.setenv("ANVIL_CLAIM_ID", claimed["claim_id"])
     buffer = app_root / ".anvil" / ".evidence-buffer" / f"{claimed['claim_id']}.json"
     if proof_case not in {"missing", "external", "external_symlink", "external_fifo"}:
-        for command in primary_commands:
+        for command in ([primary_commands[0]] * 17 if proof_case == "overflow" else primary_commands):
             captured = runner.invoke(app, [
                 "hook", "capture-evidence", "--command", command,
                 "--exit-code", "1" if proof_case == "failed" else "0",
@@ -119,6 +119,18 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
             ], catch_exceptions=False)
             assert captured.exit_code == 0
         assert buffer.exists()
+    if proof_case == "overflow":
+        original_buffer = buffer.read_bytes()
+        refused = runner.invoke(app, [
+            "roots", "submit-evidence", task["id"], "--request-file", str(request_path),
+            "--manifest-file", str(manifest_path), "--actor", "root-evidence",
+            "--cwd", str(app_root), "--json",
+        ], catch_exceptions=False)
+        assert refused.exit_code == 1
+        assert json.loads(refused.output)["error"]["code"] == "command_proof_import_overflow"
+        assert (app_root / ".anvil" / "events.jsonl").read_bytes() == before
+        assert buffer.read_bytes() == original_buffer
+        return
     if proof_case == "malformed":
         buffer.write_text('{"command":', encoding="utf-8")
     if proof_case == "wrong_owner":
@@ -232,12 +244,47 @@ def test_root_set_submit_evidence_preserves_each_root_and_reconciles_response(tm
     roots = event["payload_json"]["root_set_evidence"]["roots"]
     assert [item["root_id"] for item in roots] == ["app", "library"]
     assert [item["files"] for item in roots] == [["README.md"], ["README.md"]]
+    invalidation_reference = None
+    if proof_case == "valid":
+        from anvil.state.payloads import AcceptedAttemptInvalidation
+        backend = _open_backend(app_root / ".anvil")
+        try:
+            backend.append(EventDraft(
+                timestamp=SystemClock().now(), actor="root-gap-reviewer", action="task.applied",
+                target_kind="task", target_id=task["id"], payload_json={
+                    "schema_version": 1, "task_id": task["id"], "reviewer": "root-gap-reviewer",
+                    "decision": "accepted", "review_attempt_id": submitted["evidence_id"],
+                },
+            ))
+            binding = backend.acceptance_invalidation_binding(task["id"])
+            assert binding["root_set"]["request_digest"] == claimed["request_digest"]
+            invalidation_reference = AcceptedAttemptInvalidation(
+                accepted_event_id=binding["accepted_event_id"], binding_digest=binding["binding_digest"],
+                decision_id="root-gap-1", reason="Independently reviewed command-import gap; source PASS remains.",
+                evidence_gap_reference="review/root-gap.json", evidence_gap_sha256="f" * 64,
+                evidence_gap_reviewed_by="root-gap-reviewer", confirmed=True,
+            )
+            with pytest.raises(EventRejected, match="root custody is not released"):
+                backend.invalidate_task_acceptance(task_id=task["id"], reviewer="root-gap-reviewer",
+                                                   reference=invalidation_reference, timestamp=SystemClock().now())
+            assert backend.get_task(task["id"]).status.value == "done"
+        finally:
+            backend.close()
     final = _json(runner.invoke(app, [
         "roots", "reconcile", "--request-id", "evidence-request",
         "--request-digest", claimed["request_digest"], "--actor", "root-evidence",
         "--confirm-runner-stopped", "--cwd", str(app_root), "--json",
     ], catch_exceptions=False))
     assert final["state"] == "released"
+    if invalidation_reference is not None:
+        backend = _open_backend(app_root / ".anvil")
+        try:
+            backend.invalidate_task_acceptance(task_id=task["id"], reviewer="root-gap-reviewer",
+                                               reference=invalidation_reference, timestamp=SystemClock().now())
+            assert backend.get_task(task["id"]).status.value == "drafted"
+            assert backend.get_claim(claimed["claim_id"]).root_set.model_dump(mode="json") == binding["root_set"]
+        finally:
+            backend.close()
 
     historical_events = (app_root / ".anvil" / "events.jsonl").read_bytes()
     _json(runner.invoke(app, [

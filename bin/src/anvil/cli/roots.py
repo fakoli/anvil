@@ -305,7 +305,7 @@ def claim(
         request, _request_id, digest = _original_request_identity(task_id=task_id, request_file=request_file, actor=resolved_actor, state_dir=state_dir)
         request["task_id"] = task_id
         registry_owner = RootSetRegistry()
-        backend = _open_backend(state_dir)
+        backend = _open_backend(state_dir, project_root=project_root)
         try:
             with registry_owner.locked() as registry:
                 roots = _request_authority(request, backend, registry, project_root)
@@ -403,7 +403,12 @@ def _provision_and_claim(backend, state_dir: Path, project_root: Path, task_id: 
             root_facts=root_facts,
         )
         cfg = _load_config_optional(state_dir)
-        manager = ClaimManager(backend, SystemClock(), actor=actor, project_root=project_root, **_lease_manager_kwargs(cfg, lease_override=lease_minutes))
+        manager = ClaimManager(
+            backend, SystemClock(), actor=actor,
+            project_root=(Path(primary_metadata.target_path)
+                          if task.verification.profile is not None else project_root),
+            **_lease_manager_kwargs(cfg, lease_override=lease_minutes),
+        )
 
         def mark_state_append_attempted() -> None:
             # ClaimManager invokes this only after every typed eligibility
@@ -668,7 +673,7 @@ def submit_evidence(
         _request, request_id, digest = _original_request_identity(
             task_id=task_id, request_file=request_file, actor=resolved_actor, state_dir=state_dir
         )
-        backend = _open_backend(state_dir)
+        backend = _open_backend(state_dir, project_root=_resolve_project_dir(cwd))
         try:
             claim = _matching_root_claim(backend, task_id, resolved_actor, request_id, digest)
             evidence = _root_evidence_payload(claim.root_set, claim.id, manifest)
@@ -676,7 +681,11 @@ def submit_evidence(
             if previous is not None:
                 data = previous
             else:
-                from anvil.cli.packet_apply import _read_command_proofs
+                from anvil.claims.evidence_import import (
+                    CommandProofImportOverflow,
+                    inspect_command_buffer,
+                    require_buffer_unchanged,
+                )
                 from anvil.clock import SystemClock
                 from anvil.roots.registry import root_set_use_authorized
                 from anvil.state.models import EventDraft
@@ -727,22 +736,29 @@ def submit_evidence(
                         )
                     except (OSError, ClaimCommandProofError) as exc:
                         raise RootSetError("root_set_command_proof_invalid", "claim-bound command proof is invalid") from exc
-                evidence_id = "EVROOT-" + evidence["owner_manifest_digest"][:24]
-                payload = {
-                    "task_id": task_id, "claim_id": claim.id,
-                    "submitted_by": resolved_actor, "evidence_id": evidence_id,
-                    "commands_run": commands, "files_changed": files,
-                    "output_excerpt": "Per-root isolated verification retained by owner manifest.",
-                    "root_set_evidence": evidence,
-                    "proofs": [proof.model_dump(mode="json") for proof in (
-                        *_read_command_proofs(state_dir, claim.id), *claim_bound_proofs)],
-                }
                 with root_set_use_authorized(claim.root_set, backend=backend):
-                    backend.append(EventDraft(
-                        timestamp=SystemClock().now(), actor=resolved_actor,
-                        action="evidence.submitted", target_kind="task", target_id=task_id,
-                        payload_json=payload,
-                    ))
+                    with backend.claim_operation_lock():
+                        try:
+                            inspection = inspect_command_buffer(state_dir, claim.id)
+                            evidence_id = "EVROOT-" + evidence["owner_manifest_digest"][:24]
+                            payload = {
+                                "task_id": task_id, "claim_id": claim.id,
+                                "submitted_by": resolved_actor, "evidence_id": evidence_id,
+                                "commands_run": commands, "files_changed": files,
+                                "output_excerpt": "Per-root isolated verification retained by owner manifest.",
+                                "root_set_evidence": evidence,
+                                "proofs": [proof.model_dump(mode="json") for proof in (
+                                    *inspection.proofs, *claim_bound_proofs)],
+                            }
+                            backend.append(EventDraft(
+                                timestamp=SystemClock().now(), actor=resolved_actor,
+                                action="evidence.submitted", target_kind="task", target_id=task_id,
+                                payload_json=payload,
+                            ), pre_log_check=lambda: require_buffer_unchanged(
+                                state_dir, claim.id, inspection,
+                            ))
+                        except CommandProofImportOverflow as exc:
+                            raise RootSetError(exc.code, str(exc)) from exc
                 data = _root_evidence_status(backend, task_id=task_id, claim=claim, evidence=evidence)
                 if data is None:
                     raise RootSetError("root_set_evidence_invalid", "root-set evidence submission was not retained.")

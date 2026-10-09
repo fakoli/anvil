@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -496,6 +497,82 @@ def test_inactive_registry_preserves_legacy_when_platform_has_no_flock(tmp_path,
     assert not home.exists()
 
 
+@pytest.mark.parametrize("kind", ["regular", "oversized", "directory"])
+def test_shared_json_reader_requires_bounded_regular_utf8(tmp_path, kind):
+    path = tmp_path / "input.json"
+    raw = b'{\r\n  "value": "caf\xc3\xa9"\r\n}\r\n'
+    if kind == "directory":
+        path.mkdir()
+        (path / "sentinel").write_bytes(b"preserved directory bytes\x00")
+    else:
+        path.write_bytes(raw if kind == "regular" else raw + b" " * len(raw))
+    before = {
+        str(item.relative_to(tmp_path)): item.read_bytes() if item.is_file() else None
+        for item in tmp_path.rglob("*")
+    }
+    if kind == "regular":
+        assert RootSetRegistry._read_json_regular(path, limit=len(raw)) == {"value": "café"}
+    else:
+        with pytest.raises((OSError, ValueError)):
+            RootSetRegistry._read_json_regular(path, limit=len(raw))
+    assert {
+        str(item.relative_to(tmp_path)): item.read_bytes() if item.is_file() else None
+        for item in tmp_path.rglob("*")
+    } == before
+
+
+@pytest.mark.parametrize("owner_state", ["absent", "empty", "activated"])
+def test_enrollment_without_flock_refuses_before_owner_changes(tmp_path, monkeypatch, owner_state):
+    repo = _repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
+    monkeypatch.chdir(repo)
+    initialized = runner.invoke(app, ["init", "--with-sample"], catch_exceptions=False)
+    assert initialized.exit_code == 0, initialized.output
+    registry = RootSetRegistry()
+    assert registry.base == home / ".anvil" / "root-sets"
+    if owner_state != "absent":
+        registry.base.mkdir(parents=True)
+    if owner_state == "activated":
+        registry.activation_path.write_text(
+            json.dumps({"schema": "anvil.root-set-activation/v1"}) + "\n", encoding="utf-8",
+        )
+        registry.path.write_text(json.dumps({
+            "schema": "anvil.root-set-registry/v1", "repositories": {}, "reservations": {},
+        }) + "\n", encoding="utf-8")
+        registry.lock_path.write_bytes(b"")
+
+    def snapshot(path):
+        if not path.exists():
+            return None
+        return {
+            str(item.relative_to(path)): item.read_bytes() if item.is_file() else None
+            for item in path.rglob("*")
+        }
+
+    owner_before, project_before = snapshot(registry.base), snapshot(repo)
+    monkeypatch.setattr(root_registry, "fcntl", None)
+    result = runner.invoke(app, [
+        "roots", "enroll", "--repository-id", "repo", "--path", str(repo),
+        "--origin", "local:repo", "--json",
+    ], catch_exceptions=False)
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.output)["error"]["code"] == "root_set_unsupported"
+    assert snapshot(registry.base) == owner_before
+    assert snapshot(repo) == project_before
+    if owner_state == "activated":
+        with pytest.raises(RootSetError) as error:
+            registry.ordinary_claim_allowed(repo)
+        assert error.value.code == "root_set_unsupported"
+    else:
+        registry.ordinary_claim_allowed(repo)
+    assert snapshot(registry.base) == owner_before
+    assert snapshot(repo) == project_before
+
+
 def test_only_proven_prelog_no_claim_reservation_can_be_cancelled(tmp_path, monkeypatch):
     """A false append marker cancels; an uncertain marker remains overheld."""
     home = tmp_path / "home"
@@ -581,3 +658,64 @@ def test_readiness_refusal_before_prelog_is_cancellable(tmp_path, monkeypatch):
         request_digest_value = _json(runner.invoke(app, ["roots", "request-digest", task["id"], "--request-file", str(request_path), "--actor", "owner", "--cwd", str(repo), "--json"], catch_exceptions=False))["data"]["request_digest"]
     cancelled = runner.invoke(app, ["roots", "reconcile", "--request-id", "blocked-before-prelog", "--request-digest", request_digest_value, "--actor", "owner", "--cancel-if-no-claim", "--cwd", str(repo), "--json"], catch_exceptions=False)
     assert cancelled.exit_code == 0, cancelled.output
+
+
+@pytest.mark.skipif(root_registry.fcntl is None, reason="POSIX owner registry requires flock")
+@pytest.mark.parametrize("workspace", [False, True])
+@pytest.mark.parametrize("tool", ["release_task", "renew_claim"])
+def test_mcp_root_lifecycle_refuses_without_changing_custody(
+    tmp_path, monkeypatch, workspace, tool,
+):
+    """Real owner claims refuse both MCP routes before changing either journal."""
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+
+    from anvil.cli._helpers import _open_backend
+    from anvil.mcp_server import mcp
+    from tests.test_profile_cli import _git_identity
+    from tests.test_profile_roots import _claim, _roots
+
+    primary, state, request, _ = _roots(tmp_path, monkeypatch, workspace=workspace)
+    claimed = _claim(primary, request)["data"]
+    registry = RootSetRegistry()
+
+    def snapshot():
+        backend = _open_backend(state, project_root=primary)
+        try:
+            claim = backend.get_claim(claimed["claim_id"])
+            task = backend.get_task("T001")
+            assert claim.status.value == "active" and task.status.value == "claimed"
+            facts = claim.root_set.root_facts
+            assert len(facts) == 2
+            native = (claim.model_dump(mode="json"), task.model_dump(mode="json"))
+        finally:
+            backend.close()
+        return (
+            native,
+            (state / "events.jsonl").read_bytes(),
+            (state / "state.db").read_bytes(),
+            {str(path.relative_to(registry.base)): path.read_bytes()
+             for path in registry.base.rglob("*") if path.is_file()},
+            request.read_bytes(),
+            tuple((_git_identity(Path(fact.canonical_root)),
+                   _git_identity(Path(fact.claim_worktree))) for fact in facts),
+        )
+
+    before = snapshot()
+
+    async def exercise():
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match='"code":"actor_mismatch"') as wrong_actor:
+                await client.call_tool(tool, {
+                    "task_id": "T001", "actor": "other-owner", "cwd": str(primary),
+                })
+            assert "root_set_unsupported" not in str(wrong_actor.value)
+            assert snapshot() == before
+            with pytest.raises(ToolError, match="root_set_unsupported:") as owner:
+                await client.call_tool(tool, {
+                    "task_id": "T001", "actor": "root-author", "cwd": str(primary),
+                })
+            assert f"`anvil {'release' if tool == 'release_task' else 'renew'}`" in str(owner.value)
+            assert snapshot() == before
+
+    asyncio.run(exercise())

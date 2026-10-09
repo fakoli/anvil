@@ -32,6 +32,7 @@ from anvil.git_ops.branch import (
     is_git_repo,
 )
 from anvil.naming import safe_path_component
+from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.models import ClaimGitMetadata
 
 _MAX_GIT_OBSERVATION_BYTES = 8 * 1024 * 1024
@@ -172,6 +173,12 @@ class ClaimGitMutationTracker:
     branch_marker_created: bool = False
     worktree_identity: tuple[int, int, int] | None = None
     checkout_identity: tuple[int, int, int] | None = None
+    publication_attempted: bool = False
+
+    def check_before_publication(self, check: Callable[[], None]) -> None:
+        """Run the final caller guard before witnessing a possible native append."""
+        check()
+        self.publication_attempted = True
 
 
 def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
@@ -1201,8 +1208,13 @@ def compensate_claim_plan_tracker(
     tracker: ClaimGitMutationTracker,
     *,
     cwd: Path | None = None,
+    failure: BaseException | None = None,
 ) -> None:
-    """Compensate only mutations positively recorded by this invocation."""
+    """Compensate owned Git only when native publication is known not to exist."""
+    if tracker.publication_attempted and not _publication_rejected(failure):
+        # Projection can fail after the event is durable. Keep the target needed
+        # by native recovery, including when an interrupted append is uncertain.
+        return
     plan = tracker.plan
     if not plan.git_metadata_available or plan.branch is None:
         return
@@ -1228,6 +1240,38 @@ def compensate_claim_plan_tracker(
     tracker.branch_marker_created = False
     tracker.worktree_identity = None
     tracker.checkout_identity = None
+
+
+def _publication_rejected(failure: BaseException | None) -> bool:
+    """Recognize typed prepublication refusals through native error wrappers."""
+    from anvil.bundles.manager import BundleError
+    from anvil.claims.manager import ClaimError
+
+    pending = [failure] if failure is not None else []
+    seen: set[int] = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        if isinstance(error, TransactionAborted) or not isinstance(error, Exception):
+            return False
+        for wrapped in (error.__cause__, error.__context__):
+            if wrapped is not None:
+                pending.append(wrapped)
+    # Only native managers' explicit causes carry refusal authority. Unknown
+    # outer failures can mask a logged write failure before TransactionAborted
+    # exists; incidental context must not authorize deletion of prepared Git.
+    seen.clear()
+    error = failure
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, EventRejected):
+            return True
+        if type(error) not in (ClaimError, BundleError):
+            return False
+        error = error.__cause__
+    return False
 
 
 def _compensate_values(
@@ -1302,6 +1346,11 @@ def _compensate_values(
         owns_checkout = bool(
             checkout_identity is not None
             and _checkout_identity(plan, cwd) == checkout_identity
+            and _symbolic_head(caller) == branch_ref
+            and _ref_oid(branch_ref, cwd) == plan.claim_start_sha
+            and not _working_tree_dirty(caller, ignored_paths=plan.ignored_worktree_paths)
+            and (plan.caller_head_ref is None
+                 or _ref_oid(plan.caller_head_ref, cwd) == plan.caller_head_sha)
         )
         if caller_checkout_changed and owns_checkout:
             if plan.caller_head_ref is not None:
@@ -1331,7 +1380,9 @@ def _compensate_values(
             owner_check=owns_branch,
             on_locked=clean_owned_artifacts_while_locked,
         )
-    elif owns_branch():
+    elif owns_branch() or (plan.branch_exists and not branch_created):
+        # A preexisting ref is never ours to delete, but the independently
+        # witnessed checkout/worktree mutation can still belong to this call.
         restore_owned_checkout()
         clean_owned_artifacts_while_locked()
     if branch_marker_created and ownership_token is not None:

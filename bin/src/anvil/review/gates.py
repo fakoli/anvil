@@ -1,6 +1,6 @@
 """Review gate functions for anvil.
 
-Gates are pure functions — no I/O, no database, no side-effects.
+Evidence completeness gates are pure; contract evaluation reads artifacts and profiles.
 They answer: "may this transition proceed?" and explain what is missing.
 
 Design:
@@ -32,6 +32,7 @@ from anvil.state.models import (
     ReviewDecision,
     Task,
 )
+from anvil.verification_profiles import ProfileError, require_profile_current
 
 __all__ = [
     "DeferredFinding",
@@ -454,11 +455,21 @@ def evaluate_claims(
     for assertion in task.verification.artifact_assertions:
         _group(assertion.claim)["assertions"].append(assertion)
 
+    profile_failure = None
+    if task.verification.profile is not None:
+        try:
+            if project_root is None:
+                raise ProfileError("invalid_path")
+            require_profile_current(task.verification, project_root)
+        except ProfileError as exc:
+            profile_failure = str(exc)
+            _group(None)
+
     # One engine pass over ALL assertions, indexed back per claim.
     all_assertions = list(task.verification.artifact_assertions)
     assertion_results = (
         evaluate_assertions(all_assertions, project_root)
-        if all_assertions
+        if all_assertions and profile_failure is None
         else []
     )
     results_by_claim: dict[str, list] = {}
@@ -468,7 +479,7 @@ def evaluate_claims(
     verdicts: list[ClaimVerdict] = []
     for cid, group in groups.items():
         missing: list[str] = []
-        failures: list[str] = []
+        failures: list[str] = [profile_failure] if profile_failure else []
         has_requirements = bool(group["proofs"]) or bool(group["assertions"])
 
         proof_missing: list[str] = []

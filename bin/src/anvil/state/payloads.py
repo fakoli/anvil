@@ -51,11 +51,13 @@ from anvil.state.models import (
     DelegatedAgentObservation,
     EvidenceCategory,
     PRDAssumption,
+    PrdProfileBindings,
     ProofArtifact,
     ReviewDecision,
     RootSetClaimBinding,
     TaskRejectionProvenance,
 )
+from anvil.timing_receipts import CommandTimingReceipt
 
 
 class ProjectCreatedPayload(BaseModel):
@@ -85,6 +87,10 @@ class _PrdSourcePayload(BaseModel):
 
     model_config = _PRD_PAYLOAD_CONFIG
 
+    # Stored in the content event, not reconstructed from current runner files.
+    # None identifies historical absence; {} explicitly freezes no profiles.
+    profile_bindings: PrdProfileBindings | None = None
+
     source_text: StrictStr | None = None
     source_sha256: StrictStr | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
@@ -112,7 +118,11 @@ class _PrdSourcePayload(BaseModel):
             self.source_revision,
         )
         if self.provenance_state == "legacy_unbound":
-            if self.content_available or any(value is not None for value in source_fields):
+            if (
+                self.content_available
+                or self.profile_bindings is not None
+                or any(value is not None for value in source_fields)
+            ):
                 raise ValueError(
                     "legacy-unbound provenance cannot fabricate source metadata"
                 )
@@ -1384,6 +1394,34 @@ class EvidenceSubmittedPayload(BaseModel):
         return self
 
 
+class AcceptedAttemptInvalidation(BaseModel):
+    """Explicit prospective invalidation; the accepted historical event survives."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    accepted_event_id: StrictStr = Field(min_length=1, max_length=255)
+    binding_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    decision_id: StrictStr = Field(min_length=1, max_length=255)
+    reason: StrictStr = Field(min_length=1, max_length=4096)
+    evidence_gap_reference: StrictStr = Field(min_length=1, max_length=4096)
+    evidence_gap_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_gap_reviewed_by: StrictStr = Field(min_length=1, max_length=4096)
+    confirmed: StrictBool
+
+    @model_validator(mode="after")
+    def _require_confirmation(self) -> AcceptedAttemptInvalidation:
+        if not self.confirmed:
+            raise ValueError("invalidation requires explicit confirmation")
+        return self
+
+    @field_validator("decision_id", "reason", "evidence_gap_reference", "evidence_gap_reviewed_by")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip() or any(ord(ch) < 32 for ch in value):
+            raise ValueError("invalidation identities and review references must be nonblank")
+        return value
+
+
 class TaskAppliedPayload(BaseModel):
     """Payload for 'task.applied'."""
 
@@ -1404,9 +1442,15 @@ class TaskAppliedPayload(BaseModel):
     # projected as quality by the writer. New live rejections must carry the
     # exact engine-derived object validated under the append lock.
     rejection: TaskRejectionProvenance | None = None
+    invalidation: AcceptedAttemptInvalidation | None = None
 
     @model_validator(mode="after")
     def _validate_rejection_shape(self) -> TaskAppliedPayload:
+        if self.invalidation is not None and (
+            self.decision != "rejected" or self.schema_version != 1
+            or self.notes != self.invalidation.reason
+        ):
+            raise ValueError("invalidation requires a versioned rejected review and exact reason")
         if self.decision != "rejected" and self.rejection is not None:
             raise ValueError("only a rejected task review may carry provenance")
         if self.decision == "rejected" and self.review_attempt_id is not None:
@@ -1463,6 +1507,7 @@ class ProgressNotedPayload(BaseModel):
     # still rejects unknown keys.
     phase: str | None = None
     detail: str | None = None
+    timing: CommandTimingReceipt | None = None
 
 
 class ProgressEvidenceCorePayload(BaseModel):

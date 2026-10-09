@@ -5,8 +5,8 @@
 ## What it does
 
 Agents need to read and write canonical project state without each one shelling out to the
-CLI per operation and without fighting over the same SQLite rows. The MCP server has 36
-registered tools (24 on the wire by default — see
+CLI per operation and without fighting over the same SQLite rows. The MCP server has 38
+registered tools (26 on the wire by default — see
 [Tool surface gating](#tool-surface-gating)) over stdio so that any MCP-compatible
 runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
@@ -42,7 +42,7 @@ claim path remains usable.
 
 ## Tool surface gating
 
-All 36 tools are registered, but the live stdio server exposes only the **24 execution
+All 38 tools are registered, but the live stdio server exposes only the **26 execution
 tools** on the wire by default — the turn-to-turn loop an agent runs while doing work:
 
 `get_next_task`, `claim_task`, `release_task`, `renew_claim`, `submit_progress`,
@@ -50,7 +50,8 @@ tools** on the wire by default — the turn-to-turn loop an agent runs while doi
 `get_project_summary`, `list_tasks`, `check_conflicts`, `generate_work_packet`,
 `get_dependency_graph`, `list_bundles`, `get_bundle`, `claim_bundle`,
 `generate_bundle_packet`, `submit_bundle_progress`, `record_bundle_review`,
-`finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`
+`finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`,
+`get_attempt_view`, `read_evidence_preflight`
 
 The other **12 planning tools** are hidden by default so steady-state execution clients
 never pay their schema cost on every turn:
@@ -60,10 +61,10 @@ never pay their schema cost on every turn:
 `create_bundle`
 
 Set `ANVIL_MCP_PLANNING=1` (any of `1`/`true`/`yes`/`on`) in the server's environment to
-keep all 36 tools on the wire — use it for the planning phase, or run a second server
+keep all 38 tools on the wire — use it for the planning phase, or run a second server
 entry with the flag set. No tool is removed by the gate: introspection surfaces
 (`anvil describe`, the `--help` tool list, the Docker catalog smoke test) always report
-all 36.
+all 38.
 
 ---
 
@@ -114,6 +115,31 @@ call will succeed.
 Tools are grouped below by access pattern: read-only tools first, mutating tools second.
 
 ### Read-only tools
+
+### Advisory attempt and evidence reads
+
+`get_attempt_view(task_id, prd_id=None, limits=None, observation_at=None,
+bundle=False, cwd=None)` reads recorded attempt facts. Set `bundle=True` and pass
+a bundle ID to share one frontier and cumulative limits across its members.
+`read_evidence_preflight(task_id, prd_id=None, limits=None, observation_at=None,
+cwd=None)` inspects current command-proof coverage, including failed captures.
+Both read without initializing State, reaping leases, writing packets or appending
+an event. They return advisory facts and never authorize submission or acceptance.
+
+The shared reader bounds event input to 32 MiB and 20,000 events, each event to
+1 MiB, each row cell to 256 KiB, and the response to 64 KiB. Preflight inspects the
+complete command-proof buffer, capped at 16 records and 1 MiB. Overflow refuses;
+it does not silently omit evidence. Private paths and raw command output are absent.
+Without an explicit UTC `observation_at`, current lease age remains unobserved.
+Stopped runners, external waits and deployment stay unknown unless recorded.
+Historical acceptance and later invalidation are separate facts; complete and
+interrupted execution sums are labelled separately from overlapping wall time.
+
+`submit_progress` accepts an optional canonical `timing` observation, capped at
+16 KiB. It requires the exact active ordinary claim owner and capture lifetime,
+and cannot accompany `attestation_base64`. Timing is audit only: it supplies no command
+proof, renewal, ownership or completion authority. Ordinary progress notes retain
+their existing behavior.
 
 ---
 
@@ -1523,7 +1549,7 @@ describe` uses — the CLI and MCP surfaces can never disagree — so it never n
 to be initialized. This tool is planning-gated (hidden from the wire unless
 `ANVIL_MCP_PLANNING=1`; see [Tool surface gating](#tool-surface-gating)), but the
 introspection surfaces themselves (`anvil describe`, the `--help` tool list, the Docker
-catalog smoke test) always report the full 36-tool surface regardless of the gate.
+catalog smoke test) always report the full 38-tool surface regardless of the gate.
 
 **Inputs**
 
@@ -1533,12 +1559,12 @@ None.
 
 ```json
 {
-  "api_version": "18",
-  "engine_version": "0.6.14",
-  "display_version": "0.6.14",
+  "api_version": "19",
+  "engine_version": "0.6.16",
+  "display_version": "0.6.16",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.14",
+  "tag": "v0.6.16",
   "tag_distance": 0,
   "dirty": false,
   "schema_version": 22,
@@ -1556,7 +1582,7 @@ None.
   },
   "mcp": {
     "tools": ["claim_task", "..."],
-    "count": 36
+    "count": 38
   },
   "operation_catalog": {
     "catalog_version": 1,
@@ -1623,7 +1649,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.14","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
+{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.16","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh

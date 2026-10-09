@@ -6,6 +6,7 @@ are hermetically isolated and leave no on-disk state after completion.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -19,6 +20,38 @@ import pytest
 from anvil.clock import FrozenClock
 
 GitRepoFactory = Callable[[Path], Path]
+
+
+@pytest.fixture(scope="session")
+def uv_cache_dir() -> str:
+    """Resolve uv's supported cache before any test redirects its home."""
+    return subprocess.check_output(
+        ["uv", "cache", "dir"], text=True, timeout=10,
+    ).strip()
+
+
+@pytest.fixture(autouse=True)
+def isolated_native_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+    uv_cache_dir: str,
+) -> None:
+    """Default native state belongs to this test, never the operator's home.
+
+    Scoped home settings also reach subprocess CLI calls; pytest restores them
+    at teardown. Explicit test overrides retain ordinary platform semantics.
+    """
+    # Keep tmp_path empty for tests that initialize a repository at its root.
+    test_home = tmp_path_factory.mktemp("anvil-home")
+    monkeypatch.setenv("UV_CACHE_DIR", uv_cache_dir)
+    monkeypatch.setenv("HOME", str(test_home))
+    if os.name == "nt":
+        monkeypatch.setenv("USERPROFILE", str(test_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(test_home / ".config"))
+    for key in ("ANVIL_GLOBAL_CONFIG", "ANVIL_ROOT", "ANVIL_PRD", "ANVIL_ACTOR", "ANVIL_CLAIM_ID"):
+        monkeypatch.delenv(key, raising=False)
+    # Pytest already configured this invocation; independent subprocess suites
+    # must not inherit options requiring this runner's plugins or protocol.
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
 
 
 @pytest.fixture(scope="session")
