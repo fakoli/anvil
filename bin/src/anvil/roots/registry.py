@@ -247,7 +247,7 @@ def _no_controls(value: str, label: str) -> str:
     return value
 
 
-def _no_symlink_path(value: object) -> Path:
+def _no_symlink_path(value: object, *, allow_missing: bool = False) -> Path:
     if not isinstance(value, str):
         raise _error("root_set_identity_mismatch", "root path is invalid.")
     path = Path(_no_controls(value, "root path"))
@@ -259,7 +259,7 @@ def _no_symlink_path(value: object) -> Path:
             current /= component
             if current.is_symlink():
                 raise _error("root_set_identity_mismatch", "root path may not traverse a symlink.")
-        return path.resolve(strict=True)
+        return path.resolve(strict=not allow_missing)
     except RootSetError:
         raise
     except OSError as exc:
@@ -434,13 +434,25 @@ class RootSetRegistry:
         if activation != {"schema": _ACTIVATION_SCHEMA} or not isinstance(data, dict) or set(data) != {"schema", "repositories", "reservations"} or data.get("schema") != _SCHEMA or not isinstance(data["repositories"], dict) or not isinstance(data["reservations"], dict):
             raise _error("root_set_registry_unavailable", "activated root registry is corrupt.")
         try:
+            live_paths = set()
+            for reservation in data["reservations"].values():
+                if not isinstance(reservation, dict):
+                    raise ValueError
+                if reservation.get("state") != "released":
+                    roots = reservation.get("roots")
+                    if not isinstance(roots, list):
+                        raise ValueError
+                    for root in roots:
+                        if not isinstance(root, dict) or not isinstance(root.get("path"), str):
+                            raise ValueError
+                        live_paths.add(root["path"])
             for repository_id, entry in data["repositories"].items():
                 _require_id(repository_id, "repository id")
                 if not isinstance(entry, dict) or set(entry) != {
                     "path", "common_dir", "origin", "verification_commands", "aliases"
                 }:
                     raise ValueError
-                _no_symlink_path(entry["path"])
+                _no_symlink_path(entry["path"], allow_missing=entry["path"] not in live_paths)
                 _no_symlink_path(entry["common_dir"])
                 normalize_origin(entry["origin"])
                 _validate_commands(entry["verification_commands"])
@@ -452,7 +464,7 @@ class RootSetRegistry:
                         "path", "common_dir", "origin"
                     }:
                         raise ValueError
-                    _no_symlink_path(alias["path"])
+                    _no_symlink_path(alias["path"], allow_missing=alias["path"] not in live_paths)
                     _no_symlink_path(alias["common_dir"])
                     if normalize_origin(alias["origin"]) != entry["origin"]:
                         raise ValueError
@@ -502,7 +514,7 @@ class RootSetRegistry:
                         raise ValueError
                     root_ids.add(root_id)
                     repo_ids.add(repo_id)
-                    _no_symlink_path(root["path"])
+                    _no_symlink_path(root["path"], allow_missing=reservation["state"] == "released")
                     if not isinstance(root["expected_files"], list) or len(root["expected_files"]) > 256:
                         raise ValueError
                     for expected in root["expected_files"]:
