@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -458,6 +459,70 @@ def test_remote_clone_alias_cannot_bypass_an_enrolled_reservation(tmp_path, monk
     with pytest.raises(RootSetError, match="enrolled") as exc_info:
         RootSetRegistry().ordinary_claim_allowed(alias)
     assert exc_info.value.code == "root_set_registered"
+
+
+@pytest.mark.parametrize("state", ["pending", "bound", "release_pending", "released"])
+def test_removed_historical_checkout_preserves_registry_and_custody(tmp_path, state):
+    registry = RootSetRegistry(home=tmp_path / "home")
+    original, current, unrelated = (_repo(tmp_path / name) for name in ("old", "current", "other"))
+    for path in (original, current):
+        registry.enroll(repository_id="project", path=str(path), origin="local:project")
+    with registry.locked() as data:
+        old = registry.reserve(data, request_id="old", digest="a" * 64, actor="owner",
+            state_identity="fixture", roots=[{"root_id": "project", "repository_id": "project",
+                                               "path": str(original if state == "released" else current)}])
+        old["state"] = state
+    before = registry.path.read_bytes()
+    shutil.rmtree(original)
+    registry.ordinary_claim_allowed(unrelated)
+    with pytest.raises(RootSetError, match="enrolled"):
+        registry.ordinary_claim_allowed(current)
+    with registry.locked() as data:
+        assert data == json.loads(before)
+        roots = [{"root_id": "project", "repository_id": "project", "path": str(current)}]
+        if state == "released":
+            reservation = registry.reserve(data, request_id="next", digest="b" * 64,
+                actor="owner", state_identity="fixture", roots=roots)
+            assert reservation["state"] == "pending"
+            # This probe checks admission, without retaining a second reservation.
+            del data["reservations"]["next"]
+        else:
+            with pytest.raises(RootSetError) as conflict:
+                registry.reserve(data, request_id="next", digest="b" * 64,
+                    actor="owner", state_identity="fixture", roots=roots)
+            assert conflict.value.code == "root_set_conflict"
+        with pytest.raises(RootSetError) as missing:
+            registry.reserve(data, request_id="missing", digest="c" * 64,
+                actor="owner", state_identity="fixture", roots=[roots[0] | {"path": str(original)}])
+        assert missing.value.code == "root_set_not_enrolled"
+    assert registry.path.read_bytes() == before
+    if state != "released":
+        shutil.rmtree(current)
+        with pytest.raises(RootSetError, match="corrupt"):
+            registry.ordinary_claim_allowed(unrelated)
+        assert registry.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["relative", "control", "symlink", "not_directory"])
+def test_historical_path_tolerance_still_rejects_unsafe_paths(tmp_path, fault):
+    registry = RootSetRegistry(home=tmp_path / "home")
+    repo = _repo(tmp_path / "repo")
+    registry.enroll(repository_id="project", path=str(repo), origin="local:project")
+    data = json.loads(registry.path.read_bytes())
+    if fault == "symlink":
+        path = tmp_path / "link"
+        path.symlink_to(tmp_path / "missing", target_is_directory=True)
+        value = str(path / "child")
+    elif fault == "not_directory":
+        value = str(repo / "README.md" / "child")
+    else:
+        value = "relative/missing" if fault == "relative" else str(tmp_path / "bad\npath")
+    data["repositories"]["project"]["aliases"][0]["path"] = value
+    registry.path.write_text(json.dumps(data), encoding="utf-8")
+    before = registry.path.read_bytes()
+    with pytest.raises(RootSetError, match="corrupt"):
+        registry.ordinary_claim_allowed(repo)
+    assert registry.path.read_bytes() == before
 
 
 def test_full_binding_capability_rejects_substituted_root_facts():

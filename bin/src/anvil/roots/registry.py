@@ -247,7 +247,7 @@ def _no_controls(value: str, label: str) -> str:
     return value
 
 
-def _no_symlink_path(value: object) -> Path:
+def _no_symlink_path(value: object, *, allow_missing: bool = False) -> Path:
     if not isinstance(value, str):
         raise _error("root_set_identity_mismatch", "root path is invalid.")
     path = Path(_no_controls(value, "root path"))
@@ -259,7 +259,14 @@ def _no_symlink_path(value: object) -> Path:
             current /= component
             if current.is_symlink():
                 raise _error("root_set_identity_mismatch", "root path may not traverse a symlink.")
-        return path.resolve(strict=True)
+        try:
+            return path.resolve(strict=True)
+        except FileNotFoundError:
+            if allow_missing:
+                # History survives checkout removal; callers selecting a live
+                # root still require existence. Never resolve through symlinks.
+                return path
+            raise
     except RootSetError:
         raise
     except OSError as exc:
@@ -440,8 +447,8 @@ class RootSetRegistry:
                     "path", "common_dir", "origin", "verification_commands", "aliases"
                 }:
                     raise ValueError
-                _no_symlink_path(entry["path"])
-                _no_symlink_path(entry["common_dir"])
+                _no_symlink_path(entry["path"], allow_missing=True)
+                _no_symlink_path(entry["common_dir"], allow_missing=True)
                 normalize_origin(entry["origin"])
                 _validate_commands(entry["verification_commands"])
                 aliases = _entry_aliases(entry)
@@ -452,8 +459,8 @@ class RootSetRegistry:
                         "path", "common_dir", "origin"
                     }:
                         raise ValueError
-                    _no_symlink_path(alias["path"])
-                    _no_symlink_path(alias["common_dir"])
+                    _no_symlink_path(alias["path"], allow_missing=True)
+                    _no_symlink_path(alias["common_dir"], allow_missing=True)
                     if normalize_origin(alias["origin"]) != entry["origin"]:
                         raise ValueError
             for request_id, reservation in data["reservations"].items():
@@ -502,7 +509,7 @@ class RootSetRegistry:
                         raise ValueError
                     root_ids.add(root_id)
                     repo_ids.add(repo_id)
-                    _no_symlink_path(root["path"])
+                    _no_symlink_path(root["path"], allow_missing=reservation["state"] == "released")
                     if not isinstance(root["expected_files"], list) or len(root["expected_files"]) > 256:
                         raise ValueError
                     for expected in root["expected_files"]:
