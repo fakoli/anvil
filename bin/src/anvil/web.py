@@ -187,8 +187,11 @@ def _kill_reader(process: subprocess.Popen[bytes]) -> None:
 
 def _reader_output(repository: Repository) -> bytes:
     environment = os.environ.copy()
-    for key in ("ANVIL_ROOT", "ANVIL_PRD", "ANVIL_STATE_LAYOUT", "PYTHONPATH"):
-        environment.pop(key, None)
+    for key in list(environment):
+        if key in {"ANVIL_ROOT", "ANVIL_PRD", "ANVIL_STATE_LAYOUT", "PYTHONPATH"} or key.startswith(
+            "GIT_"
+        ):
+            environment.pop(key, None)
     # Separate exec worker applies the POSIX scratch-file ceiling without the
     # unsafe preexec_fn-in-a-thread pattern. Windows retains output/time limits.
     with tempfile.TemporaryDirectory(prefix="anvil-web-reader-") as scratch:
@@ -198,6 +201,7 @@ def _reader_output(repository: Repository) -> bytes:
                 (
                     [
                         sys.executable,
+                        "-I",
                         "-m",
                         "anvil.web",
                         "--reader",
@@ -341,7 +345,7 @@ def enroll_repository(
     if not root.is_dir():
         raise WebError("repository_unavailable", "Enrolled repository directory must exist")
     argv = (
-        [sys.executable, "-m", "anvil.cli", "project", "snapshot", "--json"]
+        [sys.executable, "-I", "-m", "anvil.cli", "project", "snapshot", "--json"]
         if reader_argv is None
         else reader_argv
     )

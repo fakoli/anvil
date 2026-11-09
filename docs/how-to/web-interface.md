@@ -43,7 +43,9 @@ experiment, deployment or permission to start one.
 ## Reader identity and compatibility
 
 The default reader is the current installed Python/Anvil module running
-`project snapshot --json` in the enrolled repository. It clears inherited
+`project snapshot --json` in the enrolled repository. Module readers use isolated
+Python startup (`-I`) so repository modules and `sitecustomize.py` cannot replace
+the installed worker/CLI. It clears inherited
 `ANVIL_ROOT`, `ANVIL_PRD`, `ANVIL_STATE_LAYOUT` and `PYTHONPATH` so launching from
 another harness cannot silently select a different project.
 
@@ -53,7 +55,9 @@ unrelated feature or silently falls back to another engine. Supply a private
 JSON argv once with `enroll --reader-argv` and a descriptive `--reader-label`.
 For example, an operator may enroll a repository using an independently pinned
 Anvil executable followed by `project snapshot --json`. The executable must be
-absolute; argv contains no shell syntax or secrets. The public source contains
+absolute; argv contains no shell syntax or secrets. Explicit reader argv is
+trusted operator configuration: Python module readers should include `-I`, and
+executables must come from a reviewed installed environment, not the repository. The public source contains
 no private executable, repository, machine or tailnet paths.
 
 Enrollment binds the observed project ID and schema. Later identity/schema

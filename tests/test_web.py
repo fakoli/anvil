@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import shutil
 import sys
 import threading
 from copy import deepcopy
@@ -285,3 +286,45 @@ def test_explicit_invalid_reader_never_falls_back(tmp_path, reader):
     assert json.loads(result.stdout)["error"]["code"] == "invalid_reader"
     assert not config.exists()
     assert not (tmp_path / ".anvil").exists()
+
+
+def test_default_reader_cannot_execute_repository_modules_or_sitecustomize(
+    tmp_path, cli_populated, monkeypatch
+):
+    from anvil.cli._helpers import _home_workspace_base
+
+    root, state = cli_populated
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    monkeypatch.delenv("ANVIL_STATE_LAYOUT", raising=False)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "wrong-repository"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "wrong-worktree"))
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_WORK_TREE")
+    workspace = _home_workspace_base(root)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "wrong-repository"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "wrong-worktree"))
+    workspace.mkdir(parents=True)
+    shutil.move(str(state), str(workspace / ".anvil"))
+    state = workspace / ".anvil"
+    package = root / "anvil"
+    package.mkdir()
+    marker = root / "repository-code-executed"
+    malicious = (
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('executed')\n"
+    )
+    (package / "__init__.py").write_text(malicious)
+    (package / "web.py").write_text(malicious)
+    (package / "cli.py").write_text(malicious)
+    (root / "sitecustomize.py").write_text(malicious)
+    before = (state / "state.db").read_bytes(), (state / "events.jsonl").read_bytes()
+    repository = web.enroll_repository(tmp_path / "catalog.json", root)
+    assert "-I" in repository.reader_argv
+    assert (
+        web.read_snapshot(repository)["payload"]["project"]["project_id"] == "project-1"
+    )
+    assert not marker.exists()
+    assert before == (
+        (state / "state.db").read_bytes(),
+        (state / "events.jsonl").read_bytes(),
+    )
