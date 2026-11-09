@@ -109,3 +109,5 @@ from the user-owned LayerSpeak board deliveries
 adds persisted independent enrollment, repository isolation, canonical payload
 validation and packaged CLI/assets. Anvil's existing MIT license and copyright
 apply; original source attribution is retained.
+
+Automatic reads run every 30 seconds while the page is idle. Keyboard focus or an open details panel pauses automatic reads so inspection remains stable; use Refresh for an immediate read.

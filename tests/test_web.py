@@ -345,3 +345,18 @@ def test_reader_materializes_valid_optional_task_defaults(enrolled):
     observed = web.read_snapshot(repository)["payload"]["tasks"][0]
     for field in ("dependency_refs", "acceptance_criteria", "verification_summaries"):
         assert observed[field] == []
+
+
+@pytest.mark.parametrize("change", ["missing_limits", "lower_task_ceiling"])
+def test_reader_honors_complete_applied_limits(enrolled, change):
+    _, repositories = enrolled
+    repository = repositories[0]
+    path = Path(repository.root) / "snapshot.json"
+    data = json.loads(path.read_text())
+    if change == "missing_limits":
+        del data["data"]["applied_limits"]
+    else:
+        data["data"]["applied_limits"]["max_tasks"] = 1
+    path.write_text(json.dumps(data))
+    with pytest.raises(web.WebError, match="malformed"):
+        web.read_snapshot(repository)

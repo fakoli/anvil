@@ -26,7 +26,12 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from anvil.read_contracts import EventCursorV1, ProjectSnapshotPayloadV1, snapshot_digest
+from anvil.read_contracts import (
+    EventCursorV1,
+    ProjectSnapshotDataV1,
+    ProjectSnapshotPayloadV1,
+    snapshot_digest,
+)
 
 MAX_CONFIG_BYTES = 65_536
 MAX_OUTPUT_BYTES = 17 * 1024 * 1024
@@ -323,9 +328,15 @@ def _validate_snapshot(repository: Repository, response: object) -> dict[str, An
                 "reader_schema_changed",
                 "Observed reader schema differs from enrolled schema; reenroll deliberately",
             )
+        canonical = ProjectSnapshotDataV1.model_validate(
+            {
+                key: snapshot.get(key)
+                for key in ("payload", "event_cursor", "applied_limits", "snapshot_digest")
+            }
+        )
         # Publish the validated canonical model, including contract defaults.
         # Readers may legally omit optional arrays that the UI iterates.
-        return {**snapshot, "payload": payload.model_dump(mode="json")}
+        return {**snapshot, **canonical.model_dump(mode="json")}
     except WebError:
         raise
     except (ValueError, KeyError, TypeError, ValidationError) as error:

@@ -68,14 +68,14 @@ async function refreshRepository(selectionChanged=false){
  if(value.schema_id!=='anvil.web.repository.v1'||value.repository.id!==repository.id||value.snapshot.payload.project.project_id!==repository.project_id||!Array.isArray(value.snapshot.payload.prds)||!Array.isArray(value.snapshot.payload.tasks))throw Error('Repository snapshot identity or format does not match the selected repository.');
  current=value;option('All campaigns','',campaignSelect);for(const prd of value.snapshot.payload.prds)option(prd.title+' · '+prd.local_id+' · '+prd.status,prd.local_id,campaignSelect);
  if([...campaignSelect.options].some(item=>item.value===previousCampaign))campaignSelect.value=previousCampaign;
- campaignSelect.disabled=false;render();showProvenance(value,repository);report(repository.label+' · observed '+value.observed_at+' · refreshes every 30 seconds');
+ campaignSelect.disabled=false;render();showProvenance(value,repository);report(repository.label+' · observed '+value.observed_at+' · refreshes every 30 seconds while idle');
  }catch(error){if(generation!==requestGeneration)return;clearRepository();showProvenance(null,repository);report(repository.label+' unavailable — '+error.message,true);}finally{if(generation===requestGeneration)refreshButton.disabled=false;}
 }
 async function loadCatalog(){refreshButton.disabled=true;try{const value=await readJSON('/api/catalog');if(value.schema_id!=='anvil.web.catalog.v1'||value.machine.kind!=='local'||!Array.isArray(value.repositories))throw Error('Unsupported repository catalog.');catalog=value;machineSelect.replaceChildren();option(value.machine.label+' · local',value.machine.id,machineSelect);machineSelect.disabled=false;repositorySelect.replaceChildren();for(const repository of value.repositories)option(repository.label,repository.id,repositorySelect);repositorySelect.disabled=!value.repositories.length;if(!value.repositories.length){report('No repositories enrolled.');return;}await refreshRepository(true);}catch(error){report('Catalog unavailable — '+error.message,true);}finally{refreshButton.disabled=false;}}
 repositorySelect.addEventListener('change',()=>refreshRepository(true));
 campaignSelect.addEventListener('change',render);
 refreshButton.addEventListener('click',()=>catalog?refreshRepository():loadCatalog());
-loadCatalog();setInterval(()=>{if(!refreshButton.disabled&&catalog)refreshRepository();},30000);
+loadCatalog();setInterval(()=>{if(!refreshButton.disabled&&catalog&&document.activeElement===document.body&&!document.querySelector("details[open]"))refreshRepository();},30000);
 </script>
 </body>
 </html>
