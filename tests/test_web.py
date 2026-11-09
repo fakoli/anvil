@@ -328,3 +328,20 @@ def test_default_reader_cannot_execute_repository_modules_or_sitecustomize(
         (state / "state.db").read_bytes(),
         (state / "events.jsonl").read_bytes(),
     )
+
+
+def test_reader_materializes_valid_optional_task_defaults(enrolled):
+    _, repositories = enrolled
+    repository = repositories[0]
+    path = Path(repository.root) / "snapshot.json"
+    data = json.loads(path.read_text())
+    task = data["data"]["payload"]["tasks"][0]
+    for field in ("dependency_refs", "acceptance_criteria", "verification_summaries"):
+        task.pop(field, None)
+    data["data"]["snapshot_digest"] = snapshot_digest(
+        ProjectSnapshotPayloadV1.model_validate(data["data"]["payload"])
+    )
+    path.write_text(json.dumps(data))
+    observed = web.read_snapshot(repository)["payload"]["tasks"][0]
+    for field in ("dependency_refs", "acceptance_criteria", "verification_summaries"):
+        assert observed[field] == []

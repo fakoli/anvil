@@ -323,7 +323,9 @@ def _validate_snapshot(repository: Repository, response: object) -> dict[str, An
                 "reader_schema_changed",
                 "Observed reader schema differs from enrolled schema; reenroll deliberately",
             )
-        return snapshot
+        # Publish the validated canonical model, including contract defaults.
+        # Readers may legally omit optional arrays that the UI iterates.
+        return {**snapshot, "payload": payload.model_dump(mode="json")}
     except WebError:
         raise
     except (ValueError, KeyError, TypeError, ValidationError) as error:
