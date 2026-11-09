@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.16 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.18 (schema 22)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -2069,3 +2069,13 @@ Hook command import retains the existing 16-record/1 MiB bounds. A seventeenth v
 capture or byte overflow now yields `command_proof_import_overflow` before evidence
 append on CLI, root-set and MCP submission. It preserves all captures, including
 failed commands; it never chooses a successful prefix or trims the buffer.
+
+
+## Web interface
+
+`anvil web` starts the native read-only interface using owner-private persisted
+enrollment, independent of the launch directory. `anvil web enroll PATH` adds
+an existing project; `anvil web list --json` lists enrollment;
+`anvil web remove ID` removes presentation enrollment only.
+
+See [web setup, reader compatibility and access limits](how-to/web-interface.md).

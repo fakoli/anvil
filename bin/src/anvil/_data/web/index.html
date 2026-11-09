@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Anvil · Work ledger</title>
+<style>
+:root{color-scheme:light;--ink:#193b36;--paper:#f5f4ed;--line:#ccd5cd;--muted:#4d655e;--accent:#ad4428}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px system-ui,sans-serif}header,main{padding:28px 4vw}header{border-bottom:2px solid var(--ink)}h1{font:42px Georgia,serif;margin:8px 0 12px}p{line-height:1.5}header p{max-width:80ch}.eyebrow,.meta,label,h2,button,select{font:13px ui-monospace,monospace}.eyebrow{letter-spacing:.12em}.navigation{display:flex;align-items:end;gap:18px;flex-wrap:wrap;margin-top:24px}label{display:grid;gap:8px;min-width:180px}select,button{min-height:44px;padding:10px;border:1px solid var(--ink);border-radius:3px;color:var(--ink);background:white;max-width:100%}select{max-width:360px}button,summary{cursor:pointer}button:disabled,select:disabled{opacity:.6;cursor:default}:focus-visible{outline:3px solid var(--accent);outline-offset:4px}.meta{color:var(--muted);overflow-wrap:anywhere;line-height:1.6}#notice{margin-bottom:0;min-height:24px}.error{color:var(--accent)}.board{display:grid;grid-template-columns:repeat(5,minmax(235px,1fr));gap:18px;overflow-x:auto;padding:0 0 20px}h2{border-top:3px solid var(--ink);padding-top:14px;margin:0 0 18px}article{background:white;border:1px solid var(--line);border-radius:3px;padding:18px;margin-bottom:14px}h3{font:22px/1.25 Georgia,serif;margin:12px 0}details{margin-top:16px}summary{line-height:1.5}li{line-height:1.5;margin:8px 0}#provenance{border-top:1px solid var(--line);padding-top:18px;margin-top:16px}dl{display:grid;grid-template-columns:130px 1fr;gap:8px 16px}dt{color:var(--muted)}dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--ink)}@media(max-width:600px){header,main{padding:22px}h1{font-size:34px}.navigation,label,select{width:100%;max-width:none}dl{grid-template-columns:1fr;gap:5px}dd{margin-bottom:12px}} 
+</style>
+</head>
+<body>
+<header>
+<div class="eyebrow">ANVIL / WORK LEDGER</div>
+<h1>From purpose to proof.</h1>
+<p>Choose a machine, repository and campaign to follow its work. This view reads canonical Anvil state; task status does not authorize execution or establish a successful result.</p>
+<nav class="navigation" aria-label="Work scope">
+<label for="machine">1 · Machine<select id="machine" disabled></select></label>
+<label for="repository">2 · Repository<select id="repository" disabled></select></label>
+<label for="campaign">3 · Campaign (PRD)<select id="campaign" disabled></select></label>
+<button id="refresh" type="button">Refresh</button>
+</nav>
+<p id="notice" role="status" aria-live="polite">Reading repository catalog…</p>
+</header>
+<main><div id="board" class="board" aria-label="Tasks by workflow status"></div><details id="provenance" hidden><summary>Source and provenance</summary><dl id="source" class="meta"></dl></details></main>
+<script>
+'use strict';
+const machineSelect=document.getElementById('machine');
+const repositorySelect=document.getElementById('repository');
+const campaignSelect=document.getElementById('campaign');
+const refreshButton=document.getElementById('refresh');
+const notice=document.getElementById('notice');
+const board=document.getElementById('board');
+const provenance=document.getElementById('provenance');
+const source=document.getElementById('source');
+let catalog=null,current=null,requestGeneration=0,requestController=null;
+const columnNames=['Backlog','Ready','Active','Review','Closed','Other'];
+function element(tag,text,parent,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;if(parent)parent.append(node);return node;}
+function option(label,value,parent){const node=element('option',label,parent);node.value=value;}
+function display(value){return typeof value==='string'?value:JSON.stringify(value)??'Unavailable';}
+function lane(status){if(['proposed','drafted','reviewed'].includes(status))return 'Backlog';if(status==='ready')return 'Ready';if(['claimed','in_progress','blocked','rejected'].includes(status))return 'Active';if(status==='needs_review')return 'Review';if(['accepted','done'].includes(status))return 'Closed';return 'Other';}
+function report(message,isError=false){notice.textContent=message;notice.className=isError?'error':'';}
+function clearRepository(){current=null;board.replaceChildren();campaignSelect.replaceChildren();campaignSelect.disabled=true;source.replaceChildren();provenance.hidden=true;}
+function render(){
+ board.replaceChildren();if(!current)return;
+ const scopedTasks=current.snapshot.payload.tasks.filter(task=>!campaignSelect.value||task.prd_ref.prd_id===campaignSelect.value);
+ // ponytail: 500 visible cards; paginate only when a real campaign exceeds this bound.
+ const tasks=scopedTasks.slice(0,500);if(scopedTasks.length>500)element('p','Showing the first 500 of '+scopedTasks.length+' tasks. Select a campaign to narrow the view; the API retains the complete bounded snapshot.',board,'meta');
+ if(!tasks.length){element('p','No tasks in this campaign.',board);return;}
+ for(const name of columnNames){const members=tasks.filter(task=>lane(task.status)===name);if(name==='Other'&&!members.length)continue;
+ const section=element('section',undefined,board);element('h2',name+' · '+members.length,section);
+ for(const task of members){const card=element('article',undefined,section);element('div',task.prd_ref.prd_id+' / '+task.local_id,card,'meta');element('h3',task.title,card);element('div',task.status+' · '+task.priority,card,'meta');
+ if(task.dependency_refs.length)element('p','Depends on '+task.dependency_refs.map(ref=>ref.prd_id+':'+ref.task_id).join(', '),card,'meta');
+ const details=element('details',undefined,card);element('summary','Criteria and verification',details);const list=element('ul',undefined,details);for(const criterion of task.acceptance_criteria)element('li',display(criterion),list);
+ element('p',task.verification_summaries.length?task.verification_summaries.map(item=>item.label+': '+item.count).join(' · '):'No verification summary recorded.',details,'meta');
+ }}
+}
+async function readJSON(url,signal){const response=await fetch(url,{cache:'no-store',signal});const value=await response.json();if(!response.ok)throw Error((value.error?.code||'HTTP '+response.status)+': '+(value.error?.message||'Repository read refused'));return value;}
+function showProvenance(value,repository){const snapshot=value?.snapshot;source.replaceChildren();for(const [label,content] of [
+ ['Machine',catalog.machine.label+' ('+catalog.machine.kind+')'],['Repository',repository.label],['Root',repository.root],['Project',snapshot?.payload?.project? snapshot.payload.project.name+' · '+snapshot.payload.project.project_id : repository.project_id+' (enrolled; snapshot unavailable)'],['Configured reader',repository.reader_label],['Configured reader arguments',repository.reader_argv],['Enrolled schema',repository.expected_schema_version],['Observed snapshot schema',snapshot?.schema_version],['Observed reader API',snapshot?.api_version],['Digest',snapshot?.snapshot_digest??snapshot?.digest],['Event frontier',snapshot?.event_cursor],['Observed',value?.observed_at]]){element('dt',label,source);element('dd',display(content),source);}provenance.hidden=false;}
+async function refreshRepository(selectionChanged=false){
+ if(!catalog)return;
+ const repository=catalog.repositories.find(item=>item.id===repositorySelect.value);if(!repository)return;
+ const previousCampaign=selectionChanged?'':campaignSelect.value;
+ const generation=++requestGeneration;if(requestController)requestController.abort();requestController=new AbortController();
+ clearRepository();refreshButton.disabled=true;report('Reading '+repository.label+'…');
+ try{const value=await readJSON('/api/repositories/'+encodeURIComponent(repository.id)+'/snapshot',requestController.signal);
+ if(generation!==requestGeneration)return;
+ if(value.schema_id!=='anvil.web.repository.v1'||value.repository.id!==repository.id||value.snapshot.payload.project.project_id!==repository.project_id||!Array.isArray(value.snapshot.payload.prds)||!Array.isArray(value.snapshot.payload.tasks))throw Error('Repository snapshot identity or format does not match the selected repository.');
+ current=value;option('All campaigns','',campaignSelect);for(const prd of value.snapshot.payload.prds)option(prd.title+' · '+prd.local_id+' · '+prd.status,prd.local_id,campaignSelect);
+ if([...campaignSelect.options].some(item=>item.value===previousCampaign))campaignSelect.value=previousCampaign;
+ campaignSelect.disabled=false;render();showProvenance(value,repository);report(repository.label+' · observed '+value.observed_at+' · refreshes every 30 seconds');
+ }catch(error){if(generation!==requestGeneration)return;clearRepository();showProvenance(null,repository);report(repository.label+' unavailable — '+error.message,true);}finally{if(generation===requestGeneration)refreshButton.disabled=false;}
+}
+async function loadCatalog(){refreshButton.disabled=true;try{const value=await readJSON('/api/catalog');if(value.schema_id!=='anvil.web.catalog.v1'||value.machine.kind!=='local'||!Array.isArray(value.repositories))throw Error('Unsupported repository catalog.');catalog=value;machineSelect.replaceChildren();option(value.machine.label+' · local',value.machine.id,machineSelect);machineSelect.disabled=false;repositorySelect.replaceChildren();for(const repository of value.repositories)option(repository.label,repository.id,repositorySelect);repositorySelect.disabled=!value.repositories.length;if(!value.repositories.length){report('No repositories enrolled.');return;}await refreshRepository(true);}catch(error){report('Catalog unavailable — '+error.message,true);}finally{refreshButton.disabled=false;}}
+repositorySelect.addEventListener('change',()=>refreshRepository(true));
+campaignSelect.addEventListener('change',render);
+refreshButton.addEventListener('click',()=>catalog?refreshRepository():loadCatalog());
+loadCatalog();setInterval(()=>{if(!refreshButton.disabled&&catalog)refreshRepository();},30000);
+</script>
+</body>
+</html>

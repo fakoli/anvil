@@ -6,6 +6,22 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.18] - 2026-11-09
+
+### Added
+
+- Native read-only web interface with machine/repository/campaign navigation,
+  explicit private project enrollment and bounded canonical snapshot readers.
+- Dedicated `anvil-web` entrypoint for scoped installs without replacing an
+  existing global CLI. `anvil web` uses the same implementation.
+
+### Changed
+
+- CLI discovery API advances to 21 for the new web commands. The state engine
+  remains schema22; explicitly configured compatible readers may project newer
+  existing state without automatic migration or a hidden fallback.
+
+
 ## [0.6.16] - 2026-10-08
 
 ### Added

@@ -81,7 +81,7 @@ _COMMAND = "describe"
 # Bumped to "18" when the local-event repair command expanded the published
 # CLI command surface beyond API 17.
 # Bumped to "19" for advisory preflight/attempt reads and timing ingestion.
-API_VERSION = "19"
+API_VERSION = "21"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -281,14 +281,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "19",
-          "engine_version": "0.6.16",
-          "display_version": "0.6.16",
+          "api_version": "21",
+          "engine_version": "0.6.18",
+          "display_version": "0.6.18",
           "schema_version": 22,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.16",
+          "tag": "v0.6.18",
           "tag_distance": 0,
           "dirty": false,
           "cli": {

@@ -4,7 +4,7 @@ Local-first project state engine: turn rough ideas and PRDs into reviewed,
 lockable, evidence-backed work packets that humans and AI coding agents can
 coordinate on without conflicts.
 
-`anvil-state` installs the `anvil` CLI and the `anvil-mcp` MCP server.
+`anvil-state` installs the `anvil` CLI, the read-only `anvil-web` interface, and the `anvil-mcp` MCP server.
 
 Current release: **v0.6.9** (schema 22, public API contract 15). The release
 adds revision-safe PRD lifecycle gates, transactional Git claims, bounded
