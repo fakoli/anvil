@@ -1,24 +1,23 @@
 """Bounded readers and repository isolation at the native web boundary."""
 
-from copy import deepcopy
 import http.client
 import json
-from pathlib import Path
 import sys
 import threading
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
-
-from tests.test_project_snapshot import cli_populated as cli_populated
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+import anvil.web as web
 from anvil.cli import app
 from anvil.cli.project import API_VERSION
-from anvil.state.schema import get_schema_version
 from anvil.project_snapshot import read_project_snapshot
 from anvil.read_contracts import ProjectSnapshotPayloadV1, snapshot_digest
-import anvil.web as web
+from anvil.state.schema import get_schema_version
+from tests.test_project_snapshot import cli_populated as cli_populated
 
 
 @pytest.fixture

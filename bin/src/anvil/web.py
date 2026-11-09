@@ -126,7 +126,9 @@ def load_config(path: Path) -> WebConfig:
     if not path.exists():
         return WebConfig()
     try:
-        if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_mode & 0o022:
+        if not stat.S_ISREG(path.stat().st_mode) or (
+            os.name == "posix" and path.stat().st_mode & 0o022
+        ):
             raise WebError(
                 "invalid_config",
                 "Web config must be a regular file without group or public write access",

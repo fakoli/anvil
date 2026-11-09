@@ -24,7 +24,8 @@ Enroll each existing project explicitly. `anvil web list --json` shows the
 persisted catalog; `anvil web remove REPOSITORY_ID` removes enrollment only.
 Enrollment refuses inaccessible/uninitialized state rather than initializing or
 migrating it. Its owner-private configuration is `~/.anvil/web/config.json`,
-written atomically with owner-only file permissions. Run enrollment changes
+written atomically with owner-only POSIX file permissions. Windows uses the
+owner profile's file ACLs instead of interpreting POSIX write bits. Run enrollment changes
 serially and reload the page afterward. `--config PATH` selects another catalog;
 `--port NUMBER` overrides the configured loopback port. These are web-group
 options, for example `anvil web --config /path/to/config.json list --json`.
