@@ -384,3 +384,29 @@ def test_reader_refuses_incomplete_or_noninteger_provenance(enrolled, field, val
         web.enroll_repository(
             config_path, Path(repository.root), reader_argv=repository.reader_argv
         )
+
+
+def test_reader_never_forwards_unknown_envelope_fields(enrolled):
+    _, repositories = enrolled
+    repository = repositories[0]
+    path = Path(repository.root) / "snapshot.json"
+    data = json.loads(path.read_text())
+    original_digest = data["data"]["snapshot_digest"]
+    data["data"]["unexpected_private_reader_detail"] = {"never_forward": "reader-only"}
+    path.write_text(json.dumps(data))
+    observed = web.read_snapshot(repository)
+    assert "unexpected_private_reader_detail" not in observed
+    assert observed["snapshot_digest"] == original_digest
+    assert set(observed) == {
+        "operation_id",
+        "operation_version",
+        "output_schema_id",
+        "api_version",
+        "schema_version",
+        "digest_algorithm",
+        "truncated",
+        "payload",
+        "event_cursor",
+        "applied_limits",
+        "snapshot_digest",
+    }

@@ -310,6 +310,7 @@ def _validate_snapshot(repository: Repository, response: object) -> dict[str, An
             or snapshot.get("operation_id") != "state.project.snapshot"
             or snapshot.get("digest_algorithm") != "sha256"
             or type(snapshot.get("schema_version")) is not int
+            or not 1 <= snapshot["schema_version"] <= 2**63 - 1
             or type(snapshot.get("operation_version")) is not int
             or snapshot.get("operation_version") != 1
             or not isinstance(snapshot.get("api_version"), str)
@@ -340,7 +341,19 @@ def _validate_snapshot(repository: Repository, response: object) -> dict[str, An
         )
         # Publish the validated canonical model, including contract defaults.
         # Readers may legally omit optional arrays that the UI iterates.
-        return {**snapshot, **canonical.model_dump(mode="json")}
+        headers = {
+            key: snapshot[key]
+            for key in (
+                "operation_id",
+                "operation_version",
+                "output_schema_id",
+                "api_version",
+                "schema_version",
+                "digest_algorithm",
+                "truncated",
+            )
+        }
+        return {**headers, **canonical.model_dump(mode="json")}
     except WebError:
         raise
     except (ValueError, KeyError, TypeError, ValidationError) as error:
