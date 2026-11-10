@@ -529,35 +529,14 @@ def _backup_database(db_path: Path, backup_path: Path) -> None:
 
 
 def _active_claim_ids_without_migrating(state_dir: Path, db_path: Path) -> list[str]:
-    """Replay a private log copy; never initialize or replay against the live log."""
-    import tempfile
-
-    from anvil.clock import SystemClock
+    """Share normal-open's canonical custody check without opening live State."""
     from anvil.config import read_events_storage
-    from anvil.state.sqlite import SqliteBackend
+    from anvil.state.sqlite import _active_claim_ids_from_event_log
 
-    events_path = state_dir / "events.jsonl"
-    if not events_path.exists():
-        return []
-    with tempfile.TemporaryDirectory() as tmpdir:
-        scratch_root = Path(tmpdir)
-        scratch_events = scratch_root / "events.jsonl"
-        shutil.copy2(events_path, scratch_events)
-        backend = SqliteBackend(
-            db_path=str(scratch_root / "scratch.db"),
-            events_path=str(scratch_events),
-            clock=SystemClock(),
-            events_storage=read_events_storage(state_dir / "config.yaml"),
-        )
-        backend.initialize()
-        try:
-            backend.replay_from_empty(str(scratch_events))
-            return sorted({
-                *(claim.id for claim in backend.list_active_claims()),
-                *(claim.id for claim in backend.list_bundle_claims(status="active")),
-            })
-        finally:
-            backend.close()
+    return _active_claim_ids_from_event_log(
+        str(state_dir / "events.jsonl"),
+        read_events_storage(state_dir / "config.yaml"),
+    )
 
 
 # ---------------------------------------------------------------------------

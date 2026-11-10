@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from anvil.clock import FrozenClock
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.sqlite import SqliteBackend
 from tests.test_bundle_scope_migration import _seed_claim
-from tests.test_bundle_state import _T0, _backend, _event, _seed
+from tests.test_bundle_state import _T0, _backend, _create_bundle, _event, _seed
 
 
 def _files(root: Path) -> dict[str, bytes]:
@@ -62,6 +63,49 @@ def test_normal_open_refuses_active_custody_without_live_mutation(tmp_path, only
     assert _files(tmp_path) == before
 
 
+def test_normal_open_refuses_unprojected_authority_claim_before_migration(tmp_path, monkeypatch):
+    """A crash between log append and projection must not hide active custody."""
+    from anvil.bundles.manager import BundleManager
+    from anvil.roots.registry import RootSetRegistry
+
+    backend = _backend(tmp_path)
+    _seed(backend)
+    _create_bundle(backend)
+    saved_projection = tmp_path / "before-claim.db"
+    with closing(sqlite3.connect(saved_projection)) as saved:
+        backend._require_conn().backup(saved)
+        saved.execute("PRAGMA journal_mode=DELETE")
+        saved.execute("PRAGMA user_version=25")
+    monkeypatch.setattr(
+        "anvil.roots.registry.RootSetRegistry",
+        lambda: RootSetRegistry(tmp_path / "native-home"),
+    )
+    BundleManager(
+        backend, FrozenClock(_T0), actor="codex-main", project_root=tmp_path,
+    ).claim("B001")
+    backend.close()
+    shutil.copyfile(saved_projection, tmp_path / "state.db")
+    for suffix in ("-wal", "-shm"):
+        (tmp_path / f"state.db{suffix}").unlink(missing_ok=True)
+    before = _files(tmp_path)
+    with pytest.raises(SchemaProbeFailed, match="Active task or bundle custody"):
+        _backend(tmp_path)
+    assert _files(tmp_path) == before
+
+
+def test_normal_open_refuses_missing_authority_without_creating_log(tmp_path):
+    state = _older_state(tmp_path)
+    (state / "events.jsonl").unlink()
+    before = _files(state)
+    backend = SqliteBackend(
+        db_path=str(state / "state.db"), events_path=str(state / "events.jsonl"),
+        clock=FrozenClock(_T0),
+    )
+    with pytest.raises(SchemaProbeFailed, match="authority log is unavailable"):
+        backend.initialize()
+    assert _files(state) == before
+
+
 def test_cli_status_and_migration_refuse_active_custody(tmp_path, monkeypatch):
     state = tmp_path / ".anvil"
     state.mkdir()
@@ -93,7 +137,7 @@ def test_active_custody_refusal_does_not_create_missing_event_log(tmp_path):
         db_path=str(tmp_path / "state.db"), events_path=str(tmp_path / "events.jsonl"),
         clock=FrozenClock(_T0),
     )
-    with pytest.raises(SchemaProbeFailed, match="Active task or bundle custody"):
+    with pytest.raises(SchemaProbeFailed, match="authority log is unavailable"):
         backend.initialize()
     assert _files(tmp_path) == before
 

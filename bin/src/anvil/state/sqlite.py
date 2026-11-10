@@ -654,11 +654,43 @@ def _stable_database_copy(db_path: str | os.PathLike[str]) -> Iterator[Path]:
         ) from exc
 
 
-def _require_idle_schema_upgrade(db_path: str) -> None:
-    """Refuse older State with task or bundle custody before live SQLite open."""
+def _active_claim_ids_from_event_log(events_path: str, events_storage: str) -> list[str]:
+    """Read canonical custody by replaying a private log into an empty backend."""
+    from anvil.clock import SystemClock
+
+    authority = Path(events_path)
+    if not authority.exists():
+        return []
+    with tempfile.TemporaryDirectory(prefix="anvil-migration-custody-") as temporary:
+        scratch_root = Path(temporary)
+        scratch_authority = scratch_root / "authority.jsonl"
+        scratch_authority.write_bytes(authority.read_bytes())
+        backend = SqliteBackend(
+            db_path=str(scratch_root / "state.db"),
+            events_path=str(scratch_root / "scratch-events.jsonl"),
+            clock=SystemClock(),
+            events_storage=events_storage,
+        )
+        try:
+            backend.initialize()
+            backend.replay_from_empty(str(scratch_authority))
+            return sorted({
+                *(claim.id for claim in backend.list_active_claims()),
+                *(claim.id for claim in backend.list_bundle_claims(status="active")),
+            })
+        finally:
+            backend.close()
+
+
+def _require_idle_schema_upgrade(db_path: str, events_path: str, events_storage: str) -> None:
+    """Refuse custody in either projection or authority before live SQLite open."""
     database = Path(db_path)
     if not database.is_file() or database.stat().st_size == 0:
         return
+    if not Path(events_path).is_file():
+        raise SchemaProbeFailed(
+            "Existing State authority log is unavailable; schema migration refused."
+        )
     with _stable_database_copy(database) as scratch_db:
         with closing(sqlite3.connect(scratch_db)) as connection:
             tables = {row[0] for row in connection.execute(
@@ -671,6 +703,12 @@ def _require_idle_schema_upgrade(db_path: str) -> None:
                     raise SchemaProbeFailed(
                         "Active task or bundle custody prevents schema migration."
                     )
+    # A crash can leave a committed claim in the log but absent from SQLite.
+    # Inspect authority before DDL, not after migration's normal catch-up.
+    if _active_claim_ids_from_event_log(events_path, events_storage):
+        raise SchemaProbeFailed(
+            "Active task or bundle custody prevents schema migration."
+        )
 
 
 def _wal_checksum(
@@ -1122,7 +1160,9 @@ class SqliteBackend:
             version = schema_probe(self._db_path)
             self._validate_probed_schema_version(version)
             if version != SCHEMA_VERSION:
-                _require_idle_schema_upgrade(self._db_path)
+                _require_idle_schema_upgrade(
+                    self._db_path, self._events_path, self._events_storage,
+                )
         with _schema_initialization_lock(self._db_path, self._events_path):
             self._initialize_under_lock()
 
@@ -1155,7 +1195,9 @@ class SqliteBackend:
                 version = self._conn.execute("PRAGMA user_version").fetchone()[0]
                 self._validate_probed_schema_version(version)
                 if version != SCHEMA_VERSION:
-                    _require_idle_schema_upgrade(self._db_path)
+                    _require_idle_schema_upgrade(
+                        self._db_path, self._events_path, self._events_storage,
+                    )
                 self._check_schema_version()
             except BaseException:
                 self.close()
@@ -1177,7 +1219,9 @@ class SqliteBackend:
             )
         self._validate_probed_schema_version(confirmed_version)
         if confirmed_version != SCHEMA_VERSION:
-            _require_idle_schema_upgrade(self._db_path)
+            _require_idle_schema_upgrade(
+                self._db_path, self._events_path, self._events_storage,
+            )
 
         conn: sqlite3.Connection | None = None
         try:

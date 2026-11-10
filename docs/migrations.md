@@ -327,8 +327,10 @@ Behaviour:
   and configuration. Backups are owner-readable and an existing artifact is never
   overwritten. An integrity check completes before any live migration.
 - **Refuses active task and bundle custody**. Ordinary backend initialization also
-  checks existing custody before any live SQLite open or migration, so updating
-  the executable does not bypass this guard. Expired-but-active rows remain
+  checks both existing projection rows and a private replay of the authoritative
+  log before any live SQLite open or migration. A crash leaving an unprojected
+  claim cannot bypass this guard; a missing authority log also causes refusal.
+  Updating the executable does not bypass it. Expired-but-active rows remain
   protected until the owning workflow releases them; migration never expires,
   accepts or force-releases work.
 - **Serializes preflight, backup and apply under the engine event lock**, including
