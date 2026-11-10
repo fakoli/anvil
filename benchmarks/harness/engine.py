@@ -412,6 +412,7 @@ def benchmark_environment(project_root: Path) -> dict[str, str]:
     for variable in (
         "ANVIL_ROOT", "ANVIL_PRD", "ANVIL_ACTOR", "ANVIL_GATE_ACTOR",
         "ANVIL_CLAIM_ID", "ANVIL_GLOBAL_CONFIG", "ANVIL_SESSION_ID",
+        "ANVIL_KEYS_DIR", "ANVIL_TRUST_LIST",
         "CLAUDE_CODE_SESSION_ID",
     ):
         environment.pop(variable, None)

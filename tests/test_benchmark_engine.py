@@ -604,6 +604,8 @@ def test_fixture_claim_ignores_operator_home_registry_and_state_selectors(
     monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(poison_config))
     monkeypatch.setenv("ANVIL_ACTOR", "operator-owner")
     monkeypatch.setenv("ANVIL_CLAIM_ID", "C00000000")
+    monkeypatch.setenv("ANVIL_KEYS_DIR", str(operator_home / "signing-keys"))
+    monkeypatch.setenv("ANVIL_TRUST_LIST", str(operator_home / "trust.json"))
     before = {str(path): path.read_bytes() for path in operator_home.rglob("*") if path.is_file()}
 
     task = engine.TaskSpec("T001", "Benchmark task", files=("workspace/x.txt",))
@@ -612,6 +614,14 @@ def test_fixture_claim_ignores_operator_home_registry_and_state_selectors(
 
     assert result.code == 0, result.out + result.err
     assert json.loads(result.out)["data"]["claim"]["claimed_by"] == "fixture-owner"
+    fixture_environment = engine.benchmark_environment(project.root)
+    assert "ANVIL_KEYS_DIR" not in fixture_environment
+    assert "ANVIL_TRUST_LIST" not in fixture_environment
+    signer = engine.run_process(
+        [sys.executable, "-c", "from anvil.signing import load_or_create_signer; load_or_create_signer()"],
+        project.root, timeout=20, env=fixture_environment,
+    )
+    assert signer.code == 0, signer.out + signer.err
     assert not (project.root / ".git").exists()
     assert not list(operator_root.iterdir())
     assert {str(path): path.read_bytes() for path in operator_home.rglob("*") if path.is_file()} == before
