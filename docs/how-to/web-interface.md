@@ -77,10 +77,18 @@ the same moves through buttons.
 Available actions depend on the task and its current custody. Drafted or
 reviewed work can become Ready when its readiness requirements pass. Ready
 work can return to Backlog. Starting, blocking and resuming work require a
-current claim owned by the configured actor. Claim acquisition, evidence
-submission, bundle coordination and protected root operations retain their
-existing CLI/MCP paths. A drag does not acquire a lease, run work, fabricate
+current claim owned by the configured actor. Evidence submission, detailed
+bundle coordination and protected root operations retain their CLI/MCP paths. A drag does not acquire a lease, run work, fabricate
 evidence or skip directly from Backlog to successful completion.
+
+Open **Execution batches** to inspect up to 50 current bundles. A planned bundle
+owned by the session actor offers **Preview batch claim**. Confirmation calls the
+native claim path with an exact project/source/member scope digest; changed scope refuses
+without partial custody. Members must be independent; split dependency chains
+into successive cohorts. This authorizes execution under one coordinator lease;
+it does not start workers or accept completion. Member counts and the next
+advisory wave refresh from the same State used by the CLI. See the
+[concurrent execution journeys](concurrent-execution-journeys.md).
 
 To approve submitted work, move an In review card to Closed and inspect the
 preview’s task, evidence, submitting actor, commit and commands. **Approve and

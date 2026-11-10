@@ -1521,6 +1521,14 @@ def apply(
             )
             raise typer.Exit(code=1)
 
+        if approve:
+            bundle_blocker = backend.bundle_member_acceptance_blocker(task_id)
+            if bundle_blocker is not None:
+                if json_output:
+                    fail("apply", bundle_blocker, code="bundle_review_required")
+                typer.echo(f"Error: {bundle_blocker}", err=True)
+                raise typer.Exit(code=1)
+
         # retro-opps T007 — cheap base-freshness probe alongside the evidence
         # gate. Computed once for review-only AND --approve; --reject is never
         # affected (rejecting a stale branch is exactly the right move).
@@ -1855,6 +1863,7 @@ def apply(
             payload["expected_evidence_id"] = expected_evidence_id
             payload["expected_task_updated_at"] = preview_updated_at.isoformat()
         if approve:
+            payload["bundle_review_guard_version"] = 1
             if expected_evidence_id is not None:
                 payload["review_attempt_id"] = expected_evidence_id
             else:

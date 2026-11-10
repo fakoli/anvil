@@ -191,6 +191,7 @@ def apply_workflow_task(
         "notes": notes,
     }
     if decision == "accepted":
+        payload["bundle_review_guard_version"] = 1
         attempt = backend.get_latest_evidence(task_id)
         if attempt is None:
             raise ValueError("accepted workflow task requires submitted evidence")

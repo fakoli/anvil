@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import Future
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -451,6 +452,11 @@ class ActionConfirmation(BaseModel):
         return value
 
 
+class BundlePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    bundle_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=128)
+
+
 def _native_writer(repository: Repository) -> bool:
     """A custom read command never implicitly grants execution authority."""
     from anvil.state.schema import get_schema_version
@@ -573,6 +579,43 @@ def make_server(
     csrf_token = secrets.token_urlsafe(32)
     previews: dict[str, tuple[float, Repository, dict[str, Any]]] = {}
     preview_lock = threading.Lock()
+    reads: dict[str, Future[dict[str, Any]]] = {}
+    read_lock = threading.Lock()
+    read_request_slots = threading.BoundedSemaphore(4)
+
+    def shared_read(repository: Repository, operation: str) -> dict[str, Any]:
+        # Include coalesced waiters in admission so slow board reads cannot
+        # occupy every HTTP thread needed for a mutation.
+        if not read_request_slots.acquire(blocking=False):
+            raise WebError("busy", "Too many concurrent reads. Try again shortly.")
+        try:
+            return coalesced_read(repository, operation)
+        finally:
+            read_request_slots.release()
+
+    def coalesced_read(repository: Repository, operation: str) -> dict[str, Any]:
+        # Coalesce only overlapping reads. No TTL cache: every later refresh
+        # reads State again and every mutation keeps its own fresh engine checks.
+        key = operation + repository.model_dump_json()
+        with read_lock:
+            pending = reads.get(key)
+            owner = pending is None
+            if pending is None:
+                pending = Future()
+                reads[key] = pending
+        if owner:
+            try:
+                if allow_writes and _native_writer(repository):
+                    result = _action_worker(repository, actor or "", operation)
+                else:
+                    result = {"snapshot": read_snapshot(repository)}
+                pending.set_result(result)
+            except BaseException as error:
+                pending.set_exception(error)
+            finally:
+                with read_lock:
+                    reads.pop(key, None)
+        return pending.result()
 
     class Handler(BaseHTTPRequestHandler):
         server: WebHTTPServer
@@ -665,6 +708,20 @@ def make_server(
                     )
                     body, content_type = json.dumps(data).encode(), "application/json"
                 else:
+                    bundle_match = re.fullmatch(
+                        r"/api/repositories/([0-9a-f]{24})/bundles", self.path
+                    )
+                    if bundle_match:
+                        repository = self._repository(bundle_match[1])
+                        if not allow_writes or not _native_writer(repository):
+                            raise WebError(
+                                "read_only_repository", "Batch actions need a compatible writer."
+                            )
+                        bundle_body = json.dumps(shared_read(repository, "bundles")).encode()
+                        if len(bundle_body) > MAX_OUTPUT_BYTES:
+                            raise WebError("response_limit", "Batch response exceeds its budget.")
+                        self._send(bundle_body)
+                        return
                     prefix, suffix = "/api/repositories/", "/snapshot"
                     if not self.path.startswith(prefix) or not self.path.endswith(suffix):
                         self.send_error(404)
@@ -677,13 +734,13 @@ def make_server(
                         return
                     if allow_writes and _native_writer(repository):
                         assert actor is not None
-                        inspected = _action_worker(repository, actor, "snapshot")
+                        inspected = shared_read(repository, "snapshot")
                         snapshot = _validate_snapshot(
                             repository, {"ok": True, "data": inspected["snapshot"]}
                         )
                         workflow = inspected["workflow"]
                     else:
-                        snapshot = read_snapshot(repository)
+                        snapshot = shared_read(repository, "snapshot")["snapshot"]
                         workflow = {
                             "enabled": False,
                             "actions": {},
@@ -743,7 +800,8 @@ def make_server(
                 self.send_error(413)
                 return
             match = re.fullmatch(
-                r"/api/repositories/([0-9a-f]{24})/(preview|transition)", self.path
+                r"/api/repositories/([0-9a-f]{24})/(preview|transition|bundle-preview|bundle-claim)",
+                self.path,
             )
             if match is None:
                 self.send_error(404)
@@ -759,9 +817,15 @@ def make_server(
                 if len(raw) != length:
                     raise WebError("invalid_request", "Incomplete action request.")
                 assert actor is not None
-                if match[2] == "preview":
-                    request = ActionPreviewRequest.model_validate_json(raw)
-                    result = _action_worker(repository, actor, "preview", request.model_dump())
+                if match[2] in {"preview", "bundle-preview"}:
+                    if match[2] == "bundle-preview":
+                        bundle_request = BundlePreviewRequest.model_validate_json(raw)
+                        result = _action_worker(
+                            repository, actor, "bundle_preview", bundle_request.model_dump()
+                        )
+                    else:
+                        request = ActionPreviewRequest.model_validate_json(raw)
+                        result = _action_worker(repository, actor, "preview", request.model_dump())
                     binding = result.pop("binding")
                     preview_id = secrets.token_urlsafe(32)
                     with preview_lock:
@@ -786,6 +850,19 @@ def make_server(
                         raise WebError(
                             "repository_changed",
                             "Repository configuration changed. Preview the move again.",
+                        )
+                    bundle_claim = match[2] == "bundle-claim"
+                    if (pending[2].get("kind") == "bundle_claim") != bundle_claim:
+                        raise WebError(
+                            "preview_kind_mismatch", "Preview does not match this action."
+                        )
+                    if bundle_claim and any(
+                        value is not None for value in (
+                            confirmation.reason, confirmation.resolution, confirmation.duplicate_of
+                        )
+                    ):
+                        raise WebError(
+                            "invalid_request", "Batch claims do not accept task action fields."
                         )
                     result = _action_worker(
                         repository,

@@ -999,6 +999,7 @@ class BundleClaimedPayload(BaseModel):
     id: str = Field(min_length=1)
     bundle_id: str = Field(min_length=1)
     creation_event_id: str = Field(min_length=1)
+    expected_scope_digest: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     claimed_by: str = Field(min_length=1)
     branch: str | None = None
     worktree_path: str | None = None
@@ -1471,9 +1472,14 @@ class TaskAppliedPayload(BaseModel):
     invalidation: AcceptedAttemptInvalidation | None = None
     expected_evidence_id: str | None = None
     expected_task_updated_at: datetime.datetime | None = None
+    # Scoped grants require this version and finalized bundle review live and
+    # on replay. Historical unscoped grants retain their original semantics.
+    bundle_review_guard_version: StrictInt | None = Field(default=None, ge=1, le=1)
 
     @model_validator(mode="after")
     def _validate_rejection_shape(self) -> TaskAppliedPayload:
+        if self.bundle_review_guard_version is not None and self.decision != "accepted":
+            raise ValueError("bundle review guard applies only to acceptance")
         if (self.expected_evidence_id is None) != (self.expected_task_updated_at is None):
             raise ValueError("review preconditions require both evidence and task version")
         if self.invalidation is not None and (

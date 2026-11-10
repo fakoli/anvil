@@ -7687,7 +7687,7 @@ class TestSchemaVersionPhase8:
     """
 
     def test_schema_version_is_twenty_four(self) -> None:
-        """Guarded task actions and closure ship at SCHEMA_VERSION == 24
+        """Scoped execution grants ship at SCHEMA_VERSION == 25
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
@@ -7700,7 +7700,7 @@ class TestSchemaVersionPhase8:
         v20 = transactional task and bundle claim Git bindings; v21 =
         revision-bound PRD lifecycle; v22 = root-set claim bindings;
         v23 reserved for withdrawal; v24 = guarded task actions and closure)."""
-        assert SCHEMA_VERSION == 24
+        assert SCHEMA_VERSION == 25
         assert f"PRAGMA user_version = {SCHEMA_VERSION};" in DDL
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
@@ -7764,7 +7764,7 @@ class TestV18ToV19RejectionProvenanceMigration:
 
         migrated = _make_backend(tmp_path)
         try:
-            assert migrated.get_schema_version() == SCHEMA_VERSION == 24
+            assert migrated.get_schema_version() == SCHEMA_VERSION == 25
             rows = {
                 row.id: row
                 for row in migrated.list_reviews()
@@ -10297,7 +10297,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 24
+            assert b.get_schema_version() == SCHEMA_VERSION == 25
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -10476,7 +10476,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 24
+            assert b.get_schema_version() == SCHEMA_VERSION == 25
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.
@@ -14247,8 +14247,8 @@ class TestAppendLockBackoff:
     fixed-interval poll woke every waiter on the same tick: early winners
     re-acquired in lockstep and late arrivals burned their whole 5 s budget
     without ever winning a release, surfacing as spurious StateLocked. These
-    tests pin the replacement schedule: exponential from 10 ms, capped at
-    500 ms, ±10% jitter, same 5 s overall timeout.
+    tests pin the latency-tuned schedule: exponential from 1 ms, capped at
+    2 ms, ±10% jitter, same 5 s overall timeout.
 
     No real sleeping and no monkey-patching: in the spirit of the project's
     Clock-protocol pattern, the injected sleep_fn advances a fake monotonic
@@ -14262,7 +14262,7 @@ class TestAppendLockBackoff:
         delays = _flock_backoff_delays(rand=lambda: 0.5)  # 2*0.5-1 == 0 → no jitter
         got = [next(delays) for _ in range(9)]
         assert got == pytest.approx(
-            [0.010, 0.020, 0.040, 0.080, 0.160, 0.320, 0.500, 0.500, 0.500]
+            [0.001, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002]
         )
 
     def test_jitter_stays_within_ten_percent(self) -> None:
@@ -14319,13 +14319,12 @@ class TestAppendLockBackoff:
         # delays consume the 5 s budget exactly.
         assert sum(slept) == pytest.approx(_FLOCK_TIMEOUT_S)
         # Each un-clamped delay obeys the schedule: within ±10% of
-        # min(10 ms * 2^i, 500 ms). The final delay may be clamped shorter.
+        # min(1 ms * 2^i, 2 ms). The final delay may be clamped shorter.
+        base = _FLOCK_BACKOFF_INITIAL_S
         for i, delay in enumerate(slept[:-1]):
-            base = min(_FLOCK_BACKOFF_INITIAL_S * 2**i, _FLOCK_BACKOFF_CAP_S)
             assert base * 0.9 <= delay <= base * 1.1, f"delay {i}: {delay}"
-        # Exponential, not fixed: the old 50 ms poll took ~100 wake-ups to
-        # exhaust 5 s; the backoff schedule gets there in 13-18 larger steps.
-        assert 10 <= len(slept) <= 20
+            base = min(base * 2, _FLOCK_BACKOFF_CAP_S)
+        assert 2200 <= len(slept) <= 2800
 
 
 # ---------------------------------------------------------------------------
@@ -14508,7 +14507,7 @@ class TestClaimProgressAttestationState:
         )
         b.initialize()
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 24
+            assert b.get_schema_version() == SCHEMA_VERSION == 25
             assert b.get_claim("C001").generation == 1  # type: ignore[union-attr]
             assert b.get_claim("C002").generation == 2  # type: ignore[union-attr]
             assert b.get_claim("C001").attestation_context is None  # type: ignore[union-attr]

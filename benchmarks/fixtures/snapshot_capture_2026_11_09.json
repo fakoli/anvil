@@ -1,0 +1,80 @@
+{
+  "scope": "Capture only, 1000 tasks, at most 100000 synthetic events; no proof verification, full snapshot serialization, competing writers, containers, or operator State. Cold prefix cache per sample; actual event lock acquisition through release is measured. Five samples describe bounded latency, not an end-to-end p95 SLO.",
+  "results": [
+    {
+      "tasks": 1000,
+      "events": 1008,
+      "database_bytes": 1515520,
+      "wal_bytes": 4144752,
+      "log_bytes": 602725,
+      "capture_ms": [
+        7.067304017255083,
+        4.3949109967797995,
+        4.120583995245397,
+        4.056751989992335,
+        4.010814998764545
+      ],
+      "capture_median_ms": 4.120583995245397,
+      "capture_max_ms": 7.067304017255083,
+      "event_lock_ms": [
+        2.9614490049425513,
+        1.6943019872996956,
+        1.569761981954798,
+        1.525105006294325,
+        1.4994259981904179
+      ],
+      "event_lock_median_ms": 1.569761981954798,
+      "event_lock_max_ms": 2.9614490049425513
+    },
+    {
+      "tasks": 1000,
+      "events": 10000,
+      "database_bytes": 4038656,
+      "wal_bytes": 4144752,
+      "log_bytes": 3237381,
+      "capture_ms": [
+        37.04539101454429,
+        36.77689400501549,
+        36.00563498912379,
+        36.12470900407061,
+        36.626777990022674
+      ],
+      "capture_median_ms": 36.626777990022674,
+      "capture_max_ms": 37.04539101454429,
+      "event_lock_ms": [
+        5.296071001794189,
+        4.942141997162253,
+        4.490299004828557,
+        4.767444013850763,
+        4.921501997159794
+      ],
+      "event_lock_median_ms": 4.921501997159794,
+      "event_lock_max_ms": 5.296071001794189
+    },
+    {
+      "tasks": 1000,
+      "events": 100000,
+      "database_bytes": 29904896,
+      "wal_bytes": 4144752,
+      "log_bytes": 29607367,
+      "capture_ms": [
+        53.12487599439919,
+        49.77353001595475,
+        49.83365299995057,
+        49.90871500922367,
+        50.10065299575217
+      ],
+      "capture_median_ms": 49.90871500922367,
+      "capture_max_ms": 53.12487599439919,
+      "event_lock_ms": [
+        26.434335013618693,
+        24.191906995838508,
+        24.294516013469547,
+        24.404577998211607,
+        24.198997009079903
+      ],
+      "event_lock_median_ms": 24.294516013469547,
+      "event_lock_max_ms": 26.434335013618693
+    }
+  ]
+}

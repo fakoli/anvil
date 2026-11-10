@@ -411,16 +411,19 @@ def _idempotent_no_op(
 
 # Overall contention budget matches SQLite's busy_timeout (5 s).
 _FLOCK_TIMEOUT_S = 5.0
-_FLOCK_BACKOFF_INITIAL_S = 0.010
-_FLOCK_BACKOFF_CAP_S = 0.500
+_FLOCK_BACKOFF_INITIAL_S = 0.001
+_FLOCK_BACKOFF_CAP_S = 0.002
 _FLOCK_BACKOFF_JITTER = 0.10
 
 
 def _flock_backoff_delays(
     rand: Callable[[], float] = random.random,
 ) -> Iterator[float]:
-    """Yield flock retry delays: exponential from 10 ms to a 500 ms cap, ±10% jitter.
+    """Yield flock retry delays: exponential from 1 ms to a 2 ms cap, ±10% jitter.
 
+    A short first retry avoids adding 10 ms to a sub-millisecond write. Slow
+    holders still back off to the bounded cap rather than polling continuously.
+    The short cap avoids half-second stalls while other workers keep committing.
     Fixed-interval polling starves late arrivals under a coordinated
     multi-agent wave: every waiter wakes on the same tick, the same few
     claimants win repeatedly, and the rest burn their whole 5 s budget in
@@ -602,9 +605,8 @@ def _wal_checksum(
     if len(content) % 8:
         raise SchemaProbeFailed("WAL checksum input is not 8-byte aligned.")
     s0, s1 = seed
-    for offset in range(0, len(content), 8):
-        first = int.from_bytes(content[offset : offset + 4], byteorder)
-        second = int.from_bytes(content[offset + 4 : offset + 8], byteorder)
+    byte_format = {"little": "<II", "big": ">II"}[byteorder]
+    for first, second in struct.iter_unpack(byte_format, content):
         s0 = (s0 + first + s1) & 0xFFFFFFFF
         s1 = (s1 + second + s0) & 0xFFFFFFFF
     return s0, s1
@@ -618,8 +620,35 @@ def _schema_version_from_database_bytes(database_header: bytes) -> int:
     return int.from_bytes(database_header[60:64], "big")
 
 
+class _VerifiedWalPrefix(NamedTuple):
+    content: bytes
+    checksum: tuple[int, int]
+    latest_page_one: bytes | None
+    committed_page_one: bytes | None
+
+
+_WAL_SCHEMA_PREFIX_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_WAL_SCHEMA_PREFIX_CACHE: _VerifiedWalPrefix | None = None
+_WAL_SCHEMA_PREFIX_CACHE_LOCK = threading.Lock()
+
+
 def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
-    """Return committed ``user_version`` by replaying only WAL page-1 frames."""
+    """Read committed ``user_version``, reusing only byte-identical verified frames.
+
+    One bounded immutable prefix avoids checksumming the same WAL again under
+    the event lock after the initial outside-lock probe. Every call still reads
+    the current bytes and compares the entire prefix, including header/salts.
+    No file identity, timestamp, size, path, or digest grants cache reuse.
+    """
+    global _WAL_SCHEMA_PREFIX_CACHE
+    with _WAL_SCHEMA_PREFIX_CACHE_LOCK:
+        verified_prefix = _WAL_SCHEMA_PREFIX_CACHE
+        if (
+            verified_prefix is not None
+            and not wal_content.startswith(verified_prefix.content)
+        ):
+            _WAL_SCHEMA_PREFIX_CACHE = None
+            verified_prefix = None
     main_version = _schema_version_from_database_bytes(database_header)
     if not wal_content:
         return main_version
@@ -644,6 +673,11 @@ def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
     latest_page_one: bytes | None = None
     committed_page_one: bytes | None = None
     offset = 32
+    if verified_prefix is not None:
+        running = verified_prefix.checksum
+        latest_page_one = verified_prefix.latest_page_one
+        committed_page_one = verified_prefix.committed_page_one
+        offset = len(verified_prefix.content)
     while offset + frame_size <= len(wal_content):
         header = wal_content[offset : offset + 24]
         page = wal_content[offset + 24 : offset + frame_size]
@@ -652,19 +686,29 @@ def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
         )
         if (frame_salt1, frame_salt2) != (salt1, salt2):
             break
-        running = _wal_checksum(
+        frame_checksum = _wal_checksum(
             header[:8] + page,
             byteorder=checksum_byteorder,
             seed=running,
         )
-        if running != (stored1, stored2):
+        if frame_checksum != (stored1, stored2):
             break
+        running = frame_checksum
         if page_number == 1:
             latest_page_one = page
         if database_size:
             committed_page_one = latest_page_one
         offset += frame_size
 
+    # Ignore an invalid/incomplete tail, exactly as SQLite does. Only complete,
+    # checksum-verified frames enter the cache; the tail must be checked again.
+    with _WAL_SCHEMA_PREFIX_CACHE_LOCK:
+        _WAL_SCHEMA_PREFIX_CACHE = (
+            _VerifiedWalPrefix(
+                wal_content[:offset], running, latest_page_one, committed_page_one,
+            )
+            if offset <= _WAL_SCHEMA_PREFIX_CACHE_MAX_BYTES else None
+        )
     if committed_page_one is None:
         return main_version
     return _schema_version_from_database_bytes(committed_page_one[:100])
@@ -5203,6 +5247,12 @@ class SqliteBackend:
         if "closure" not in {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}:
             conn.execute("ALTER TABLE tasks ADD COLUMN closure TEXT")
 
+    def _m_to_v25(self, conn: sqlite3.Connection) -> None:
+        """v24 → v25: bind scoped authorization to the winning bundle claim."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(bundle_claims)")}
+        if "expected_scope_digest" not in columns:
+            conn.execute("ALTER TABLE bundle_claims ADD COLUMN expected_scope_digest TEXT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -5225,6 +5275,7 @@ class SqliteBackend:
         (20, _m_to_v21),
         (21, _m_to_v22),
         (22, _m_to_v24),
+        (24, _m_to_v25),
     ]
 
     @staticmethod
@@ -10149,6 +10200,16 @@ class SqliteBackend:
                 )
             if row[0] != payload.creation_event_id:
                 raise EventRejected("bundle.claimed: creation event does not match.")
+            if payload.expected_scope_digest is not None:
+                from anvil.bundles.execution import bundle_execution_scope_digest
+
+                if (
+                    bundle_execution_scope_digest(self, payload.bundle_id)
+                    != payload.expected_scope_digest
+                ):
+                    raise EventRejected(
+                        "bundle_scope_changed: refresh the execution plan before claiming."
+                    )
             if row[1] != payload.claimed_by:
                 raise EventRejected(
                     f"bundle.claimed: coordinator is '{row[1]}', not "
@@ -10196,7 +10257,15 @@ class SqliteBackend:
                 (payload.bundle_id,),
             ).fetchall()
             member_ids = [member[0] for member in member_rows]
+            member_set = set(member_ids)
             supplied_ids = [member.task_id for member in payload.member_claims]
+            if payload.expected_scope_digest is not None and any(
+                dependency in member_set
+                for member in member_rows for dependency in json.loads(member[2] or "[]")
+            ):
+                raise EventRejected(
+                    "bundle_internal_dependencies: scoped execution requires independent members."
+                )
             for member_id in member_ids:
                 self._check_invalidation_claim_actor(conn, member_id, payload.claimed_by)
             if supplied_ids != member_ids:
@@ -10319,6 +10388,14 @@ class SqliteBackend:
             ).fetchone()
         ):
             return
+        if payload.expected_scope_digest is not None:
+            from anvil.bundles.execution import bundle_execution_scope_digest
+
+            if (
+                bundle_execution_scope_digest(self, payload.bundle_id)
+                != payload.expected_scope_digest
+            ):
+                return
         member_ids = [member.task_id for member in payload.member_claims]
         placeholders = ",".join("?" for _ in member_ids)
         if conn.execute(
@@ -10340,6 +10417,12 @@ class SqliteBackend:
             (payload.bundle_id,),
         ).fetchall()
         if [row[0] for row in replay_members] != member_ids:
+            return
+        member_set = set(member_ids)
+        if payload.expected_scope_digest is not None and any(
+            dependency in member_set
+            for member in replay_members for dependency in json.loads(member[2] or "[]")
+        ):
             return
         graph = analyze_bundle_graph(
             member_ids,
@@ -10410,8 +10493,9 @@ class SqliteBackend:
             """INSERT INTO bundle_claims
                (id, bundle_id, claimed_by, status, branch, worktree_path,
                 git_metadata, session_id, expected_files, member_claim_ids, created_at,
-                lease_expires_at, last_heartbeat_at, released_at, release_reason)
-               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                lease_expires_at, last_heartbeat_at, expected_scope_digest,
+                released_at, release_reason)
+               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
             (
                 payload.id,
                 payload.bundle_id,
@@ -10433,6 +10517,7 @@ class SqliteBackend:
                 payload.created_at.isoformat(),
                 payload.lease_expires_at.isoformat(),
                 payload.last_heartbeat_at.isoformat(),
+                payload.expected_scope_digest,
             ),
         )
         member_rows = conn.execute(
@@ -13716,6 +13801,11 @@ class SqliteBackend:
                 f"got {decision!r}."
             )
         if decision == "accepted":
+            bundle_blocker = self._bundle_member_acceptance_blocker(
+                conn, task_id, guard_version=payload.bundle_review_guard_version,
+            )
+            if bundle_blocker is not None:
+                raise EventRejected(bundle_blocker)
             attempt_row = self._latest_evidence_row(conn, task_id)
             if attempt_row is None:
                 raise EventRejected(
@@ -13774,6 +13864,53 @@ class SqliteBackend:
                 f"Expected 'needs_review', got '{actual_status}'. "
                 "The task may have been reviewed by a concurrent operation."
             )
+
+    def bundle_member_acceptance_blocker(self, task_id: str) -> str | None:
+        """Explain a bundled attempt's review gate without accepting any work."""
+        return self._bundle_member_acceptance_blocker(self._require_conn(), task_id)
+
+    def _bundle_member_acceptance_blocker(
+        self, conn: sqlite3.Connection, task_id: str, *, guard_version: int | None = 1,
+    ) -> str | None:
+        attempt_row = self._latest_evidence_row(conn, task_id)
+        if attempt_row is None:
+            return None  # The ordinary acceptance-evidence guard owns this case.
+        attempt = self._row_to_evidence(attempt_row)
+        member_claim = conn.execute(
+            "SELECT bundle_claim_id FROM claims WHERE id = ? AND task_id = ?",
+            (attempt.claim_id, task_id),
+        ).fetchone()
+        if member_claim is None or member_claim[0] is None:
+            return None  # A standalone attempt is not governed by an old bundle.
+        bundle_claim = conn.execute(
+            "SELECT bundle_id, member_claim_ids, expected_scope_digest "
+            "FROM bundle_claims WHERE id = ?",
+            (member_claim[0],),
+        ).fetchone()
+        reason = (
+            "bundle_review_required: finalize the current bundle review before member acceptance."
+        )
+        if bundle_claim is None:
+            return reason
+        if bundle_claim[2] is None:
+            return None  # Preserve legacy sequential bundle progress and replay.
+        if guard_version != 1:
+            return "bundle_review_required: new member acceptance requires review guard version 1."
+        member_claim_ids = json.loads(bundle_claim[1])
+        if member_claim_ids.get(task_id) != attempt.claim_id:
+            return reason
+        bundle_row = conn.execute(
+            "SELECT status, creation_event_id, review_disposition_event_id "
+            "FROM execution_bundles WHERE id = ?", (bundle_claim[0],),
+        ).fetchone()
+        if (
+            bundle_row is None
+            or bundle_row[0] not in {"reviewed_unintegrated", "integrated", "merged", "completed"}
+            or bundle_row[2] is None
+            or not self._bundle_review_round_passes(conn, bundle_claim[0], bundle_row[1])
+        ):
+            return reason
+        return None
 
     def _legacy_claimed_apply_evidence(
         self,
@@ -13984,6 +14121,15 @@ class SqliteBackend:
             # A divergent earlier fact changed the preview's bound inputs.
             # Retain the event for audit but do not manufacture acceptance or
             # a Review row for an obsolete decision.
+            return
+        if (
+            payload.decision == "accepted"
+            and self._bundle_member_acceptance_blocker(
+                conn, payload.task_id, guard_version=payload.bundle_review_guard_version,
+            ) is not None
+        ):
+            # Retain a premature acceptance fact for audit without allowing it
+            # to bypass the same disposition-bound quorum required live.
             return
         task_id: str = payload.task_id
         reviewer: str = payload.reviewer

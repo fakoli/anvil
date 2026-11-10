@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> CLI: 92 executable leaf commands.
+> CLI: 93 executable leaf commands.
 
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.19 (schema 24)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.20 (schema 25)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1191,6 +1191,21 @@ The owning PRD must remain exactly approved for its canonical source at the pre-
 claim boundary; drift refuses without a claim, bundle-status change, or Git mutation.
 JSON output includes the exact coordinator identity plus structured renew, release,
 progress, and complete argv/environment continuations; no task-submit command is emitted.
+
+`--expected-scope-digest SHA256` binds a claim to a previously inspected bundle
+execution plan. Scoped grants require independent members; internal dependency
+edges refuse before custody is acquired. Their member acceptance requires
+finalized bundle review. Legacy unscoped sequential grants retain their existing
+flow. Changes to the project, bundle, owning PRD lineage or selected members
+refuse under the native claim lock. Unrelated task changes do not invalidate it.
+
+### `anvil bundle execution-plan` { #bundle-execution-plan }
+
+`anvil bundle execution-plan B001 --max-workers 8 --json` returns current member
+custody, a scope digest, blockers, counts and an advisory conflict-free dispatch
+wave. It does not spawn workers or accept evidence. Pending review frees worker
+capacity; dependencies still require `done`. The native 500-member ceiling is a
+planning limit, not a measured concurrency guarantee.
 
 ### `anvil bundle renew` { #bundle-renew }
 

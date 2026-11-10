@@ -82,7 +82,7 @@ _COMMAND = "describe"
 # CLI command surface beyond API 17.
 # Bumped to "19" for advisory preflight/attempt reads and timing ingestion.
 # Bumped to "22" for guarded task-action, web writes and typed task closure.
-API_VERSION = "22"
+API_VERSION = "23"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -282,14 +282,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "22",
-          "engine_version": "0.6.19",
-          "display_version": "0.6.19",
-          "schema_version": 22,
+          "api_version": "23",
+          "engine_version": "0.6.20",
+          "display_version": "0.6.20",
+          "schema_version": 25,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.19",
+          "tag": "v0.6.20",
           "tag_distance": 0,
           "dirty": false,
           "cli": {

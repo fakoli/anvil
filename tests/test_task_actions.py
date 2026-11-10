@@ -142,7 +142,7 @@ def test_schema_22_upgrade_is_additive_and_23_refuses_before_writes(tmp_path, fr
         else:
             backend.initialize()
             with sqlite3.connect(database) as connection:
-                assert connection.execute("PRAGMA user_version").fetchone()[0] == 24
+                assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
                 assert "closure" in {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
             backend.close()
 

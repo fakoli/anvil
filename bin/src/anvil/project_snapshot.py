@@ -8,6 +8,7 @@ import os
 import sqlite3
 import tempfile
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
 
@@ -78,10 +79,7 @@ def read_project_snapshot(
     applied_limits = _validated_limits(limits)
     root = Path(state_dir)
     try:
-        with query_only_transaction(
-            root / "state.db",
-            root / "events.jsonl",
-        ) as (conn, events_fh):
+        with captured_snapshot_transaction(root) as (conn, events_fh):
             return snapshot_from_transaction(conn, events_fh, limits=applied_limits)
     except ProjectSnapshotError:
         raise
@@ -97,11 +95,58 @@ def read_project_snapshot(
         _refuse(ReadErrorCode.invalid_hierarchy, field="state")
 
 
+@contextmanager
+def captured_snapshot_transaction(
+    state_dir: str | os.PathLike[str],
+) -> Iterator[tuple[sqlite3.Connection, BinaryIO]]:
+    """Capture one immutable database/log pair, then release all live locks.
+
+    Validation still compares every captured event with its captured projection.
+    No stat signature or cached digest substitutes for that check. Copying uses
+    bounded buffers and the exact initial log length; existing worker scratch
+    limits apply to the private files. No live state file is written.
+    """
+    root = Path(state_dir)
+    with tempfile.TemporaryDirectory(prefix="anvil-snapshot-capture-") as directory:
+        captured_root = Path(directory)
+        captured_connection = sqlite3.connect(captured_root / "state.db")
+        captured_connection.row_factory = sqlite3.Row
+        try:
+            with (captured_root / "events.jsonl").open("wb") as captured_log:
+                with query_only_transaction(root / "state.db", root / "events.jsonl") as (
+                    live_connection, live_log,
+                ):
+                    # BEGIN alone does not pin a SQLite snapshot. Read first so
+                    # backup cannot restart against a later database version.
+                    live_connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+                    initial = os.fstat(live_log.fileno())
+                    identity = (
+                        initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns,
+                    )
+                    _verify_event_identity(live_log, identity)
+                    remaining = initial.st_size
+                    while remaining:
+                        chunk = live_log.read(min(remaining, 1_048_576))
+                        if not chunk:
+                            _refuse(ReadErrorCode.projection_not_converged, field="projection")
+                        captured_log.write(chunk)
+                        remaining -= len(chunk)
+                    # ponytail: capture is O(database + log bytes); use pinned
+                    # WAL views if qualified history sizes exceed the lock budget.
+                    live_connection.backup(captured_connection, pages=128)
+                    _verify_event_identity(live_log, identity)
+            captured_connection.execute("PRAGMA query_only = ON")
+            with (captured_root / "events.jsonl").open("rb") as captured_log:
+                yield captured_connection, captured_log
+        finally:
+            captured_connection.close()
+
+
 def snapshot_from_transaction(
     conn: sqlite3.Connection, events_fh: BinaryIO,
     *, limits: ProviderReadLimitsV1 | Mapping[str, Any] | None = None,
 ) -> ProjectSnapshotDataV1:
-    """Read the same bounded snapshot inside an already-open query-only transaction."""
+    """Read the same bounded snapshot from a locked or privately captured pair."""
     applied_limits = _validated_limits(limits)
     event_cursor, event_identity = _event_cursor(conn, events_fh)
     payload = _project_payload(conn, applied_limits)

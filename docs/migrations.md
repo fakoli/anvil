@@ -295,13 +295,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v24, including the additive v22→v24 closure step) that already lives in
+(currently v25, including additive v22→v24 closure and v24→v25 scoped-grant steps) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v24
+Schema migration  : v3 -> v25
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -309,7 +309,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v24.
+Migrated state.db v3 -> v25.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 
@@ -411,3 +411,16 @@ before mutation**: this candidate does not contain that line's integration.
 Keep the compatible schema23 reader for that state until its migration and
 replay semantics are explicitly integrated and tested. Do not lower the schema
 marker or initialize a replacement project to bypass this refusal.
+
+
+### v24→v25: scoped execution grants
+
+Adds nullable `bundle_claims.expected_scope_digest` to the winning coordinator
+claim projection. Existing claim rows remain unscoped; their sequential workflow
+and historical acceptance replay are preserved. New digest-bound claims require
+independent members, retain exact project/PRD/member scope, and enforce finalized
+bundle review before member acceptance, including replay.
+
+The supported v22 upgrade proceeds through v24 to v25. The separate schema23
+bundle-withdrawal line remains incompatible: v23→v25 refuses before mutation.
+Do not delete or restamp that State to bypass the refusal.

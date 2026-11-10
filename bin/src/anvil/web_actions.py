@@ -14,7 +14,11 @@ from typing import Any
 
 from anvil.cli._helpers import _open_backend, _resolve_state_dir
 from anvil.clock import SystemClock
-from anvil.project_snapshot import _local_entity_id, snapshot_from_transaction
+from anvil.project_snapshot import (
+    _local_entity_id,
+    captured_snapshot_transaction,
+    snapshot_from_transaction,
+)
 from anvil.state.backend import EventRejected
 from anvil.state.models import Task, TaskStatus
 from anvil.state.sqlite import SqliteBackend, query_only_transaction
@@ -43,9 +47,14 @@ RESOLUTIONS = [
 @contextmanager
 def _read_backend(
     repository: Repository,
+    *, snapshot: bool = False,
 ) -> Iterator[tuple[SqliteBackend, sqlite3.Connection, Any]]:
     state_dir = _resolve_state_dir(Path(repository.root))
-    with query_only_transaction(state_dir / "state.db", state_dir / "events.jsonl") as (
+    transaction = (
+        captured_snapshot_transaction(state_dir) if snapshot else
+        query_only_transaction(state_dir / "state.db", state_dir / "events.jsonl")
+    )
+    with transaction as (
         connection,
         events_file,
     ):
@@ -84,7 +93,9 @@ def _actions(backend: SqliteBackend, task: Task, actor: str) -> list[dict[str, A
     if task.status == TaskStatus.needs_review:
         # These remain proposals: the existing apply command enforces the
         # evidence, review-attempt, bundle and configured merge gates on apply.
-        actions += ["approve", "reject"]
+        if backend.bundle_member_acceptance_blocker(task.id) is None:
+            actions.append("approve")
+        actions.append("reject")
     return [
         {
             "id": action,
@@ -100,7 +111,7 @@ def inspect_repository(repository: Repository, actor: str) -> dict[str, Any]:
     from anvil.cli.describe import API_VERSION
     from anvil.state.schema import get_schema_version
 
-    with _read_backend(repository) as (backend, connection, events_file):
+    with _read_backend(repository, snapshot=True) as (backend, connection, events_file):
         snapshot = snapshot_from_transaction(connection, events_file).model_dump(mode="json")
         snapshot.update(
             operation_id="state.project.snapshot",
@@ -129,6 +140,11 @@ def inspect_repository(repository: Repository, actor: str) -> dict[str, Any]:
                 "actions": actions,
                 "versions": versions,
                 "closures": closures,
+                "review_blockers": {
+                    _task_key(task): blocker for task in tasks
+                    if task.status == TaskStatus.needs_review
+                    and (blocker := backend.bundle_member_acceptance_blocker(task.id))
+                },
             },
         }
 
@@ -187,6 +203,7 @@ def preview_action(repository: Repository, actor: str, request: dict[str, Any]) 
             "resolutions": RESOLUTIONS if action == "close" else [],
             "requires_confirmation": True,
             "binding": {
+                "kind": "task_transition",
                 "task_id": task.id,
                 "prd_id": task.prd_id,
                 "action": action,
@@ -200,6 +217,8 @@ def preview_action(repository: Repository, actor: str, request: dict[str, Any]) 
 
 def execute_action(repository: Repository, actor: str, request: dict[str, Any]) -> dict[str, Any]:
     binding = request["binding"]
+    if binding.get("kind") == "bundle_claim":
+        return execute_bundle_claim(repository, actor, binding)
     # Only the selected task is compared: independent tasks can advance while a
     # human reviews this preview. The reducer repeats CAS under its writer lock.
     with _read_backend(repository) as (backend, _, __):
@@ -275,6 +294,82 @@ def execute_action(repository: Repository, actor: str, request: dict[str, Any]) 
     return {"ok": True}
 
 
+def inspect_bundles(repository: Repository, actor: str) -> dict[str, Any]:
+    from anvil.bundles.execution import build_bundle_execution_plan
+
+    # ponytail: show at most 50 current batches; add cursor pagination if operators
+    # need more in one view. Build plans off-lock, like the task board.
+    with _read_backend(repository, snapshot=True) as (backend, connection, _):
+        rows = connection.execute(
+            "SELECT id FROM execution_bundles WHERE status IN "
+            "('planned', 'active', 'implemented_unreviewed', 'reviewed_unintegrated', "
+            "'integrated', 'replan_required') "
+            "ORDER BY id LIMIT 51"
+        ).fetchall()
+        return {
+            "plans": [build_bundle_execution_plan(backend, row[0]) for row in rows[:50]],
+            "truncated": len(rows) > 50,
+            "actor": actor,
+        }
+
+
+def preview_bundle_claim(
+    repository: Repository, actor: str, request: dict[str, Any],
+) -> dict[str, Any]:
+    from anvil.bundles.execution import build_bundle_execution_plan
+
+    with _read_backend(repository) as (backend, _, __):
+        bundle = backend.get_bundle(request["bundle_id"])
+        if bundle is None or bundle.status.value != "planned":
+            raise WebError("bundle_unavailable", "Only a planned batch can be claimed.")
+        if bundle.coordinator != actor:
+            raise WebError("coordinator_mismatch", "This session is not the batch coordinator.")
+        plan = build_bundle_execution_plan(backend, bundle.id)
+        return {
+            "title": "Claim execution batch",
+            "details": [
+                f"Batch: {bundle.id} · Campaign: {bundle.prd_id}",
+                f"Coordinator: {actor} · Members: {len(bundle.task_ids)}",
+                *[f"{member['task_id']}: {member['title']} ({member['status']})"
+                  for member in plan["members"]],
+                "Claims the exact member scope under one coordinator lease. "
+                "Native source, dependency, conflict and isolation checks run on confirmation.",
+                "Workers still submit individual evidence. This does not start workers "
+                "or approve completion; pending review does not pause independent work.",
+            ],
+            "requires_reason": False,
+            "resolutions": [],
+            "requires_confirmation": True,
+            "binding": {
+                "kind": "bundle_claim", "bundle_id": bundle.id,
+                "expected_scope_digest": plan["scope_digest"],
+            },
+        }
+
+
+def execute_bundle_claim(
+    repository: Repository, actor: str, binding: dict[str, Any],
+) -> dict[str, Any]:
+    from anvil.cli import app
+
+    with _read_backend(repository):
+        pass  # Recheck enrollment identity; scope CAS binds it again atomically.
+    output = io.StringIO()
+    # The existing CLI owns root locks, source/profile validation and claim
+    # creation. Never carry a separate read lock across this call.
+    with redirect_stdout(output):
+        app(args=[
+            "bundle", "claim", binding["bundle_id"], "--actor", actor,
+            "--expected-scope-digest", binding["expected_scope_digest"],
+            "--json", "--cwd", repository.root,
+        ], standalone_mode=False)
+    response = json.loads(output.getvalue())
+    if response.get("ok") is not True:
+        error = response.get("error", {})
+        raise WebError(error.get("code", "claim_refused"), error.get("message", "Claim refused."))
+    return {"ok": True, "bundle_id": binding["bundle_id"]}
+
+
 def main() -> None:
     operation = ""
     try:
@@ -288,6 +383,10 @@ def main() -> None:
             result = inspect_repository(repository, actor)
         elif operation == "preview":
             result = preview_action(repository, actor, request["request"])
+        elif operation == "bundles":
+            result = inspect_bundles(repository, actor)
+        elif operation == "bundle_preview":
+            result = preview_bundle_claim(repository, actor, request["request"])
         elif operation == "execute":
             result = execute_action(repository, actor, request["request"])
         else:

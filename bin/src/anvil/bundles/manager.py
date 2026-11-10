@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,12 +93,12 @@ class BundleManager:
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
         pre_log_check: Callable[[], None] | None = None,
+        expected_scope_digest: str | None = None,
     ) -> BundleClaimResult:
         from anvil.roots.registry import (
             RootSetError,
             RootSetRegistry,
             assert_unscoped_claim_allowed,
-            live_claim_append_authorized,
             ordinary_claim_coordinator_held,
         )
 
@@ -111,16 +112,62 @@ class BundleManager:
                     return self.claim(
                         bundle_id, branch=branch, worktree_path=worktree_path,
                         git_metadata=git_metadata, pre_log_check=pre_log_check,
+                        expected_scope_digest=expected_scope_digest,
                     )
             else:
                 pass
         except RootSetError as exc:
             raise BundleError(f"{exc.code}: {exc}") from exc
+        lock_factory = getattr(self._backend, "claim_operation_lock", None)
+        with lock_factory() if lock_factory is not None else nullcontext():
+            return self._claim_locked(
+                bundle_id, branch=branch, worktree_path=worktree_path,
+                git_metadata=git_metadata, pre_log_check=pre_log_check,
+                expected_scope_digest=expected_scope_digest,
+            )
+
+    def _claim_locked(
+        self, bundle_id: str, *, branch: str | None, worktree_path: str | None,
+        git_metadata: ClaimGitMetadata | None, pre_log_check: Callable[[], None] | None,
+        expected_scope_digest: str | None,
+    ) -> BundleClaimResult:
+        from anvil.roots.registry import live_claim_append_authorized
+
+        if expected_scope_digest is not None:
+            from anvil.bundles.execution import (
+                BundleExecutionPlanError,
+                bundle_execution_scope_digest,
+            )
+
+            caller_scope_check = pre_log_check
+
+            def check_scope_before_log() -> None:
+                try:
+                    actual_digest = bundle_execution_scope_digest(self._backend, bundle_id)
+                except BundleExecutionPlanError as exc:
+                    raise BundleError(str(exc)) from exc
+                if actual_digest != expected_scope_digest:
+                    raise BundleError(
+                        "bundle_scope_changed: refresh the execution plan before claiming."
+                    )
+                if caller_scope_check is not None:
+                    caller_scope_check()
+
+            check_scope_before_log()
+            pre_log_check = check_scope_before_log
         bundle = self.preflight(bundle_id)
         tasks = [self._backend.get_task(task_id) for task_id in bundle.task_ids]
         if any(task is None for task in tasks):  # pragma: no cover - preflight
             raise BundleError("Bundle member disappeared after preflight.")
         typed_tasks = [task for task in tasks if task is not None]
+        if expected_scope_digest is not None:
+            member_ids = set(bundle.task_ids)
+            if any(
+                dependency in member_ids for task in typed_tasks for dependency in task.dependencies
+            ):
+                raise BundleError(
+                    "bundle_internal_dependencies: scoped execution requires independent members."
+                )
 
         if any(task.verification.profile is not None for task in typed_tasks):
             caller_check = pre_log_check
@@ -174,6 +221,8 @@ class BundleManager:
                     now + datetime.timedelta(minutes=self._lease_minutes)
                 ).isoformat(),
                 "last_heartbeat_at": now.isoformat(),
+                **({"expected_scope_digest": expected_scope_digest}
+                   if expected_scope_digest is not None else {}),
             },
         )
         try:

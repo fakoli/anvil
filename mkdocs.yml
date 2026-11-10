@@ -120,6 +120,7 @@ nav:
       - Verification profiles: how-to/verification-profiles.md
       - Recorded attempt views: how-to/attempt-views.md
       - Coordinating a milestone bundle: how-to/coordinating-a-bundle.md
+      - Concurrent execution journeys: how-to/concurrent-execution-journeys.md
       - Execute in the current or local-model harness: how-to/execute-in-your-harness.md
       - Using anvil on any harness: how-to/using-anvil-on-any-harness.md
       - Syncing with GitHub: how-to/syncing-with-github.md

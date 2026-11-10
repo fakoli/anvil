@@ -6,6 +6,28 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.20] - 2026-11-09
+
+### Added
+
+- Bounded bundle execution plans shared by CLI and web batch claims, with an
+  exact scope digest checked again under the native claim lock.
+- Disposable CLI and web execution journeys covering independent proof intake,
+  competing claims and separate human acceptance.
+- Process contention benchmark separating ledger latency from reader and CLI time.
+
+### Changed
+
+- Snapshot validation runs on a consistent private capture after releasing live
+  State locks; overlapping web refreshes share one in-flight read.
+- Shorter lock retry intervals reduce avoidable contention stalls. Verified WAL
+  handling preserves corruption checks and reserved-schema refusal.
+- CLI discovery API advances to 23. Schema25 persists scoped bundle grants;
+  schema24 migrates additively, schema22 follows the supported migration chain,
+  and the separately reserved schema23 line remains refused before mutation.
+- Scoped independent batches require finalized bundle review before member
+  acceptance, including replay. Legacy sequential bundle behavior is preserved.
+
 ## [0.6.19] - 2026-11-09
 
 ### Added

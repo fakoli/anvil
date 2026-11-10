@@ -2201,6 +2201,7 @@ class BundleClaim(BaseModel):
     session_id: str | None = None
     expected_files: list[str] = Field(default_factory=list)
     member_claim_ids: dict[TaskID, ClaimID]
+    expected_scope_digest: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     created_at: datetime.datetime
     lease_expires_at: datetime.datetime
     last_heartbeat_at: datetime.datetime
@@ -2230,6 +2231,8 @@ class BundleClaim(BaseModel):
         data = handler(self)
         if data.get("git_metadata") is None:
             data.pop("git_metadata", None)
+        if data.get("expected_scope_digest") is None:
+            data.pop("expected_scope_digest", None)
         return data
 
     @field_validator("released_at", mode="after")

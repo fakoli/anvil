@@ -93,13 +93,15 @@ Version history
   reservation/request/digest binding without changing legacy claim rows.
 - v24: audited non-success task closure and guarded task actions. The supported
   upgrade is v22 → v24; reserved v23 bundle-withdrawal State is incompatible.
+- v25: persisted bundle execution scope on the winning coordinator claim.
+  The nullable additive column preserves unscoped bundle history.
 """
 
 from __future__ import annotations
 
 # 23 is reserved by the separately developed bundle-withdrawal engine. This
 # branch deliberately does not claim its event semantics or migrate its State.
-SCHEMA_VERSION: int = 24
+SCHEMA_VERSION: int = 25
 
 
 def get_schema_version() -> int:
@@ -315,6 +317,7 @@ CREATE TABLE IF NOT EXISTS bundle_claims (
     session_id         TEXT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
     member_claim_ids   TEXT NOT NULL DEFAULT '{}',
+    expected_scope_digest TEXT,
     created_at         TEXT NOT NULL,
     lease_expires_at   TEXT NOT NULL,
     last_heartbeat_at  TEXT NOT NULL,
@@ -512,7 +515,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 24;
+PRAGMA user_version = 25;
 """
 
 
