@@ -81,7 +81,12 @@ current claim owned by the configured actor. Evidence submission, detailed
 bundle coordination and protected root operations retain their CLI/MCP paths. A drag does not acquire a lease, run work, fabricate
 evidence or skip directly from Backlog to successful completion.
 
-Open **Execution batches** to inspect up to 50 current bundles. A planned bundle
+Open **Execution batches** to inspect current bundles, 50 per page. **Previous
+batches** and **Next batches** navigate every batch in the selected campaign;
+**All campaigns** includes the whole repository. Pages use stable bundle IDs,
+so earlier batches leaving the current list cannot skip later batches. Each page
+reads current State; **Refresh** starts from the first page to include earlier
+additions. A planned bundle
 owned by the session actor offers **Preview batch claim**. Confirmation calls the
 native claim path with an exact project/source/member scope digest; changed scope refuses
 without partial custody. Members must be independent; split dependency chains

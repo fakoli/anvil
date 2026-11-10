@@ -23,7 +23,7 @@ from anvil.state.backend import EventRejected
 from anvil.state.models import Task, TaskStatus
 from anvil.state.sqlite import SqliteBackend, query_only_transaction
 from anvil.task_actions import available_task_actions, transition_task
-from anvil.web import Repository, WebError
+from anvil.web import BundleListRequest, Repository, WebError
 
 ACTION_LABELS = {
     "ready": ("Make ready", "ready"),
@@ -294,22 +294,44 @@ def execute_action(repository: Repository, actor: str, request: dict[str, Any]) 
     return {"ok": True}
 
 
-def inspect_bundles(repository: Repository, actor: str) -> dict[str, Any]:
+def inspect_bundles(
+    repository: Repository, actor: str, request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from anvil.bundles.execution import build_bundle_execution_plan
 
-    # ponytail: show at most 50 current batches; add cursor pagination if operators
-    # need more in one view. Build plans off-lock, like the task board.
+    selection = BundleListRequest.model_validate(request or {})
+    # Immutable IDs keep earlier status changes from shifting later pages.
+    # Each page is fresh advice; refresh from the start to see earlier additions.
     with _read_backend(repository, snapshot=True) as (backend, connection, _):
+        conditions = [
+            "status IN ('planned', 'active', 'implemented_unreviewed', "
+            "'reviewed_unintegrated', 'integrated', 'replan_required')",
+        ]
+        parameters = []
+        if selection.prd_id is not None:
+            if backend.get_prd(selection.prd_id) is None:
+                raise WebError("invalid_batch_query", "Campaign is not in this repository.")
+            conditions.append("prd_id = ?")
+            parameters.append(selection.prd_id)
+        if selection.after_bundle_id is not None:
+            conditions.append("id > ?")
+            parameters.append(selection.after_bundle_id)
         rows = connection.execute(
-            "SELECT id FROM execution_bundles WHERE status IN "
-            "('planned', 'active', 'implemented_unreviewed', 'reviewed_unintegrated', "
-            "'integrated', 'replan_required') "
-            "ORDER BY id LIMIT 51"
+            "SELECT id FROM execution_bundles WHERE " + " AND ".join(conditions)
+            + " ORDER BY id LIMIT 51", parameters,
         ).fetchall()
         return {
             "plans": [build_bundle_execution_plan(backend, row[0]) for row in rows[:50]],
             "truncated": len(rows) > 50,
             "actor": actor,
+            "repository_id": repository.id,
+            "project_id": repository.project_id,
+            "prd_id": selection.prd_id,
+            "pagination": {
+                "after_bundle_id": selection.after_bundle_id,
+                "next_after_bundle_id": rows[49][0] if len(rows) > 50 else None,
+                "page_size": 50,
+            },
         }
 
 
@@ -384,7 +406,7 @@ def main() -> None:
         elif operation == "preview":
             result = preview_action(repository, actor, request["request"])
         elif operation == "bundles":
-            result = inspect_bundles(repository, actor)
+            result = inspect_bundles(repository, actor, request.get("request"))
         elif operation == "bundle_preview":
             result = preview_bundle_claim(repository, actor, request["request"])
         elif operation == "execute":

@@ -481,6 +481,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_target_action ON events (target_id, action);
 
 -- ``task_id`` is still NOT NULL: T026 is the data-only phase, so only task-kind
 -- mappings persist. The SyncMapping model accepts an entity_kind='prd'

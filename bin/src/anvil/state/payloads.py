@@ -989,6 +989,14 @@ class BundleMemberClaimPayload(BaseModel):
 
     id: str
     task_id: str
+    generation: StrictInt | None = Field(default=None, ge=1)
+    attestation_context: ClaimAttestationContext | None = None
+
+    @model_validator(mode="after")
+    def _context_requires_generation(self) -> BundleMemberClaimPayload:
+        if self.attestation_context is not None and self.generation is None:
+            raise ValueError("bundle member attestation requires an explicit generation")
+        return self
 
 
 class BundleClaimedPayload(BaseModel):

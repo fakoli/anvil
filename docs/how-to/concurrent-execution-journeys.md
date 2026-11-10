@@ -86,6 +86,16 @@ Plain command text is not a substitute for a required claim-bound artifact.
 See [bundle coordination](coordinating-a-bundle.md) for exact member proof
 attribution, lease renewal and recovery.
 
+Native bundle claims capture each member's immutable repository, starting commit,
+task/PRD revision, generation and expected-path context. The bundle packet's
+`members[].member_claim` carries that context for proof capture. Submit an actual
+capture with `anvil submit TASK_ID --commands COMMAND --files-changed FILES
+--command-proof-file CAPTURE.json --actor lead`. Use an empty `FILES` value for a
+verification-only command. Both the member authorization and coordinator lease
+must still be active; a sibling's capture or a released cohort cannot authorize
+submission. Historical claims without context need a fresh claim before using
+this imported-proof path; their old evidence is not retargeted.
+
 A malformed artifact refuses before successful evidence intake. Preserve the
 failed capture and its error. Do not fabricate a successful receipt, rewrite old
 evidence for a new claim, or use a second owner to bypass the refusal. The
@@ -148,7 +158,9 @@ measurements. A passing journey is correctness evidence, not a latency or fleet
 capacity qualification. See the [concurrency findings](../design/concurrency-source-findings.md)
 for the measured baseline and qualification boundaries, and the
 [ledger validation](../design/ledger-latency-validation.md) for the implemented
-latency results and remaining scale limits.
+latency results and remaining scale limits. The [execution qualification guide](../design/execution-scale-validation.md)
+adds real claim-bound command captures, replay and canonical-reader checks, plus
+bounded OpenShell worker qualification.
 
 One bounded run on 2026-11-09 measured the native execution-plan projection and
 atomic bundle claim on synthetic State:

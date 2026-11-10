@@ -15,6 +15,12 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 - Disposable CLI and web execution journeys covering independent proof intake,
   competing claims and separate human acceptance.
 - Process contention benchmark separating ledger latency from reader and CLI time.
+- Claim-bound command proof intake for bundle members, with immutable per-member
+  context in work packets and identical coordinator custody checks during replay.
+- Bounded execution-batch pagination, so later cohorts remain accessible in the
+  web UI without projecting every batch on each request.
+- Reproducible command-proof scale qualification and bounded OpenShell worker
+  validation, with exact ownership, resource limits and failure receipts.
 
 ### Changed
 
@@ -27,6 +33,10 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   and the separately reserved schema23 line remains refused before mutation.
 - Scoped independent batches require finalized bundle review before member
   acceptance, including replay. Legacy sequential bundle behavior is preserved.
+- Task-history indexing and one-operation Git identity reuse avoid repeated
+  history scans and repository inspection during cohort claims.
+- Equivalent file spellings retain claim exclusion across ordinary claims,
+  bundles and replay; empty-scope preflight reads only member custody.
 
 ## [0.6.19] - 2026-11-09
 

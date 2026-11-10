@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -457,6 +457,16 @@ class BundlePreviewRequest(BaseModel):
     bundle_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=128)
 
 
+class BundleListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    after_bundle_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=128,
+    )
+    prd_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", max_length=128,
+    )
+
+
 def _native_writer(repository: Repository) -> bool:
     """A custom read command never implicitly grants execution authority."""
     from anvil.state.schema import get_schema_version
@@ -583,20 +593,24 @@ def make_server(
     read_lock = threading.Lock()
     read_request_slots = threading.BoundedSemaphore(4)
 
-    def shared_read(repository: Repository, operation: str) -> dict[str, Any]:
+    def shared_read(
+        repository: Repository, operation: str, request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         # Include coalesced waiters in admission so slow board reads cannot
         # occupy every HTTP thread needed for a mutation.
         if not read_request_slots.acquire(blocking=False):
             raise WebError("busy", "Too many concurrent reads. Try again shortly.")
         try:
-            return coalesced_read(repository, operation)
+            return coalesced_read(repository, operation, request)
         finally:
             read_request_slots.release()
 
-    def coalesced_read(repository: Repository, operation: str) -> dict[str, Any]:
+    def coalesced_read(
+        repository: Repository, operation: str, request: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         # Coalesce only overlapping reads. No TTL cache: every later refresh
         # reads State again and every mutation keeps its own fresh engine checks.
-        key = operation + repository.model_dump_json()
+        key = operation + repository.model_dump_json() + json.dumps(request, sort_keys=True)
         with read_lock:
             pending = reads.get(key)
             owner = pending is None
@@ -606,7 +620,7 @@ def make_server(
         if owner:
             try:
                 if allow_writes and _native_writer(repository):
-                    result = _action_worker(repository, actor or "", operation)
+                    result = _action_worker(repository, actor or "", operation, request)
                 else:
                     result = {"snapshot": read_snapshot(repository)}
                 pending.set_result(result)
@@ -664,6 +678,8 @@ def make_server(
 
         def _refuse(self, error: WebError, *, mutation: bool = False) -> None:
             status = 503 if error.code == "busy" else (409 if mutation else 502)
+            if error.code == "invalid_batch_query":
+                status = 400
             self._send(
                 json.dumps(
                     {
@@ -708,16 +724,35 @@ def make_server(
                     )
                     body, content_type = json.dumps(data).encode(), "application/json"
                 else:
+                    request_path, _, query = self.path.partition("?")
                     bundle_match = re.fullmatch(
-                        r"/api/repositories/([0-9a-f]{24})/bundles", self.path
+                        r"/api/repositories/([0-9a-f]{24})/bundles", request_path
                     )
                     if bundle_match:
+                        try:
+                            if len(query) > 1024:
+                                raise ValueError("Query exceeds its bound")
+                            parameters = parse_qs(
+                                query, keep_blank_values=True, strict_parsing=True,
+                                max_num_fields=2, errors="strict",
+                            )
+                            if any(len(values) != 1 for values in parameters.values()):
+                                raise ValueError("Duplicate query parameter")
+                            selection = BundleListRequest.model_validate({
+                                key: values[0] for key, values in parameters.items()
+                            })
+                        except (ValueError, ValidationError) as error:
+                            raise WebError(
+                                "invalid_batch_query", "Invalid execution-batch page or campaign."
+                            ) from error
                         repository = self._repository(bundle_match[1])
                         if not allow_writes or not _native_writer(repository):
                             raise WebError(
                                 "read_only_repository", "Batch actions need a compatible writer."
                             )
-                        bundle_body = json.dumps(shared_read(repository, "bundles")).encode()
+                        bundle_body = json.dumps(shared_read(
+                            repository, "bundles", selection.model_dump(),
+                        )).encode()
                         if len(bundle_body) > MAX_OUTPUT_BYTES:
                             raise WebError("response_limit", "Batch response exceeds its budget.")
                         self._send(bundle_body)

@@ -51,6 +51,8 @@ from pydantic import BaseModel
 from anvil import signing
 from anvil.actors import canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
+from anvil.claims.conflicts import canonical_claim_file_scope
+from anvil.planning.inference import BundlePlanningError
 from anvil.state.backend import (
     BackendError,  # noqa: F401
     EventRejected,
@@ -10163,6 +10165,55 @@ class SqliteBackend:
             ),
         )
 
+    def _bundle_member_contexts_match(
+        self, conn: sqlite3.Connection, payload: BundleClaimedPayload,
+    ) -> bool:
+        """Validate persisted child bindings identically for append and replay."""
+        from anvil.claims.progress_attestation import (
+            ProgressAttestationError,
+            canonical_progress_path,
+        )
+
+        repository_binding: tuple[str, str] | None = None
+        for member in payload.member_claims:
+            generation = conn.execute(
+                "SELECT COALESCE(MAX(generation), 0) + 1 FROM claims WHERE task_id = ?",
+                (member.task_id,),
+            ).fetchone()[0]
+            if member.generation is not None and member.generation != generation:
+                return False
+            context = member.attestation_context
+            if context is None:
+                continue  # Historical bundle claims did not capture this context.
+            task_row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?",
+                (member.task_id,),
+            ).fetchone()
+            if task_row is None:
+                return False
+            try:
+                task = self._row_to_task(task_row, conn)
+                if context.task_revision != task_snapshot_revision(task):
+                    return False
+                paths = [canonical_progress_path(path) for path in task.likely_files]
+            except (CanonicalJsonRefusal, ProgressAttestationError, TypeError, ValueError):
+                return False
+            prd = conn.execute("SELECT revision FROM prds WHERE id = ?", (task.prd_id,)).fetchone()
+            if prd is None or (context.prd_id, context.prd_revision) != (task.prd_id, prd[0]):
+                return False
+            if [entry.path for entry in context.expected_paths] != paths:
+                return False
+            binding = (context.repository_id, context.claim_start_sha)
+            if repository_binding is not None and binding != repository_binding:
+                return False
+            repository_binding = binding
+            if (
+                payload.git_metadata is not None
+                and context.claim_start_sha != payload.git_metadata.claim_start_sha
+            ):
+                return False
+        return True
+
     def _check_bundle_claimed(
         self,
         conn: sqlite3.Connection,
@@ -10272,6 +10323,8 @@ class SqliteBackend:
                 raise EventRejected(
                     "bundle.claimed: member claims must match stored member order."
                 )
+            if not self._bundle_member_contexts_match(conn, payload):
+                raise EventRejected("bundle.claimed: member claim context or generation mismatch.")
             not_ready = [row[0] for row in member_rows if row[1] != "ready"]
             if not_ready:
                 raise EventRejected(
@@ -10338,9 +10391,11 @@ class SqliteBackend:
                 "WHERE c.status = 'active' ORDER BY c.id"
             ).fetchall()
             conflicts: list[str] = []
-            expected_set = set(expected_files)
+            expected_set = canonical_claim_file_scope(expected_files)
             for active in active_rows:
-                overlap = sorted(expected_set & set(json.loads(active[2] or "[]")))
+                overlap = expected_set and expected_set.intersection(
+                    canonical_claim_file_scope(json.loads(active[2] or "[]"))
+                )
                 group_overlap = sorted(
                     bundle_groups & set(json.loads(active[3] or "[]"))
                 )
@@ -10350,6 +10405,8 @@ class SqliteBackend:
                 raise EventRejected(
                     f"bundle.claimed: conflicts with active claims: {conflicts}."
                 )
+        except BundlePlanningError as exc:
+            raise EventRejected(f"bundle.claimed: invalid claim file scope: {exc}") from exc
         finally:
             conn.execute("COMMIT")
 
@@ -10418,6 +10475,8 @@ class SqliteBackend:
         ).fetchall()
         if [row[0] for row in replay_members] != member_ids:
             return
+        if not self._bundle_member_contexts_match(conn, payload):
+            return
         member_set = set(member_ids)
         if payload.expected_scope_digest is not None and any(
             dependency in member_set
@@ -10459,18 +10518,23 @@ class SqliteBackend:
             dep_status = {row[0]: row[1] for row in dep_rows}
             if any(dep_status.get(dep) != "done" for dep in external_dependencies):
                 return
-        expected_set = set(expected_files)
-        for active in conn.execute(
-            "SELECT c.task_id, c.expected_files, t.conflict_groups "
-            "FROM claims c JOIN tasks t ON t.id = c.task_id "
-            "WHERE c.status = 'active' ORDER BY c.id"
-        ).fetchall():
-            if (
-                active[0] in member_set
-                or expected_set.intersection(json.loads(active[1] or "[]"))
-                or bundle_groups.intersection(json.loads(active[2] or "[]"))
-            ):
-                return
+        try:
+            expected_set = canonical_claim_file_scope(expected_files)
+            for active in conn.execute(
+                "SELECT c.task_id, c.expected_files, t.conflict_groups "
+                "FROM claims c JOIN tasks t ON t.id = c.task_id "
+                "WHERE c.status = 'active' ORDER BY c.id"
+            ).fetchall():
+                if (
+                    active[0] in member_set
+                    or (expected_set and expected_set.intersection(
+                        canonical_claim_file_scope(json.loads(active[1] or "[]"))
+                    ))
+                    or bundle_groups.intersection(json.loads(active[2] or "[]"))
+                ):
+                    return
+        except BundlePlanningError:
+            return
         if conn.execute(
             f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) "
             "AND status != 'ready' LIMIT 1",
@@ -10526,9 +10590,11 @@ class SqliteBackend:
             "ORDER BY m.position",
             (payload.bundle_id,),
         ).fetchall()
-        claims_by_task = {member.task_id: member.id for member in payload.member_claims}
+        claims_by_task = {member.task_id: member for member in payload.member_claims}
         for task_id, likely_files_json in member_rows:
-            claim_id = claims_by_task[task_id]
+            member = claims_by_task[task_id]
+            claim_id = member.id
+            context = member.attestation_context
             conn.execute(
                 """INSERT INTO claims
                    (id, task_id, claimed_by, claim_type, status, branch,
@@ -10539,7 +10605,7 @@ class SqliteBackend:
                    VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?, ?,
                            (SELECT COALESCE(MAX(generation), 0) + 1
                               FROM claims WHERE task_id = ?),
-                           NULL, ?, ?, ?, NULL, NULL)""",
+                           ?, ?, ?, ?, NULL, NULL)""",
                 (
                     claim_id,
                     task_id,
@@ -10557,8 +10623,11 @@ class SqliteBackend:
                     ),
                     payload.session_id,
                     payload.id,
-                    likely_files_json or "[]",
+                    json.dumps([entry.path for entry in context.expected_paths])
+                    if context is not None else likely_files_json or "[]",
                     task_id,
+                    json.dumps(context.model_dump(mode="json"), sort_keys=True)
+                    if context is not None else None,
                     payload.created_at.isoformat(),
                     payload.lease_expires_at.isoformat(),
                     payload.last_heartbeat_at.isoformat(),
@@ -12223,7 +12292,10 @@ class SqliteBackend:
         mirror ``ClaimManager.check_conflicts``' self/own-task skips). With
         ``payload.force`` set, the overlap is logged and allowed through.
         """
-        new_files: set[str] = {str(f) for f in (payload.expected_files or [])}
+        try:
+            new_files = canonical_claim_file_scope(payload.expected_files or [])
+        except BundlePlanningError as exc:
+            raise EventRejected(f"claim.created: invalid claim file scope: {exc}") from exc
         if not new_files:
             return
 
@@ -12244,10 +12316,14 @@ class SqliteBackend:
             if other_actor == payload.claimed_by and other_bundle_claim_id is None:
                 continue
             try:
-                other_files = set(json.loads(row[3] or "[]"))
+                other_files = canonical_claim_file_scope(json.loads(row[3] or "[]"))
             except (json.JSONDecodeError, TypeError):
                 continue
-            overlap = sorted(new_files & {str(f) for f in other_files})
+            except BundlePlanningError as exc:
+                raise EventRejected(
+                    f"claim.created: invalid active claim file scope: {exc}"
+                ) from exc
+            overlap = sorted(new_files & other_files)
             if not overlap:
                 continue
             if payload.force and other_bundle_claim_id is None:
@@ -12445,7 +12521,10 @@ class SqliteBackend:
             (task_id,),
         ).fetchone():
             return
-        incoming_files = set(payload.expected_files or [])
+        try:
+            incoming_files = canonical_claim_file_scope(payload.expected_files or [])
+        except BundlePlanningError:
+            return
         task_group_row = conn.execute(
             "SELECT conflict_groups FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
@@ -12457,7 +12536,12 @@ class SqliteBackend:
             "JOIN tasks t ON t.id = c.task_id WHERE c.status = 'active' "
             "AND c.bundle_claim_id IS NOT NULL"
         ).fetchall():
-            if incoming_files.intersection(json.loads(bundle_child[0] or "[]")):
+            try:
+                if incoming_files and incoming_files.intersection(
+                    canonical_claim_file_scope(json.loads(bundle_child[0] or "[]"))
+                ):
+                    return
+            except BundlePlanningError:
                 return
             if incoming_groups.intersection(json.loads(bundle_child[1] or "[]")):
                 return
@@ -13166,31 +13250,10 @@ class SqliteBackend:
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
-        if row[3] is not None:
-            # Bundle members still use exact claim-bound hook proofs. Only the
-            # active coordinator may submit, while both leases remain valid.
-            parent = conn.execute(
-                "SELECT bc.claimed_by, bc.status, bc.released_at, bc.lease_expires_at, "
-                "bc.member_claim_ids, b.coordinator, b.status "
-                "FROM bundle_claims bc JOIN execution_bundles b ON b.id = bc.bundle_id "
-                "WHERE bc.id = ?", (row[3],),
-            ).fetchone()
-            if parent is None:
-                return False
-            try:
-                members = json.loads(parent[4])
-                parent_expiry = datetime.datetime.fromisoformat(parent[3])
-                if (
-                    parent[0] != payload.submitted_by or parent[1] != "active"
-                    or parent[2] is not None or parent[5] != payload.submitted_by
-                    or parent[6] != "active" or not isinstance(members, dict)
-                    or members.get(payload.task_id) != payload.claim_id
-                    or event_time >= parent_expiry
-                    or (live_now is not None and live_now >= parent_expiry)
-                ):
-                    return False
-            except (TypeError, ValueError, json.JSONDecodeError):
-                return False
+        if row[3] is not None and not self._bundle_proof_custody_matches(
+            conn, row[3], payload, event_time, live_now,
+        ):
+            return False
         project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
         task_row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (payload.task_id,)
@@ -13255,6 +13318,39 @@ class SqliteBackend:
                 return False
         return True
 
+    @staticmethod
+    def _bundle_proof_custody_matches(
+        conn: sqlite3.Connection,
+        bundle_claim_id: str,
+        payload: EvidenceSubmittedPayload,
+        event_time: datetime.datetime,
+        live_now: datetime.datetime | None,
+    ) -> bool:
+        """Imported and hook proofs share the same coordinator custody gate."""
+        parent = conn.execute(
+            "SELECT bc.claimed_by, bc.status, bc.released_at, bc.lease_expires_at, "
+            "bc.member_claim_ids, b.coordinator, b.status "
+            "FROM bundle_claims bc JOIN execution_bundles b ON b.id = bc.bundle_id "
+            "WHERE bc.id = ?", (bundle_claim_id,),
+        ).fetchone()
+        if parent is None:
+            return False
+        try:
+            members = json.loads(parent[4])
+            parent_expiry = datetime.datetime.fromisoformat(parent[3])
+            if (
+                parent[0] != payload.submitted_by or parent[1] != "active"
+                or parent[2] is not None or parent[5] != payload.submitted_by
+                or parent[6] != "active" or not isinstance(members, dict)
+                or members.get(payload.task_id) != payload.claim_id
+                or event_time >= parent_expiry
+                or (live_now is not None and live_now >= parent_expiry)
+            ):
+                return False
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return True
+
     @classmethod
     def _claim_command_proof_batch_matches_claim(
         cls,
@@ -13293,7 +13389,6 @@ class SqliteBackend:
             or row[0] != payload.task_id
             or row[1] != payload.submitted_by
             or row[2] != "active"
-            or row[3] is not None
             or row[5] is None
             or row[8] is not None
         ):
@@ -13320,6 +13415,10 @@ class SqliteBackend:
                 else None
             )
         except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if row[3] is not None and not cls._bundle_proof_custody_matches(
+            conn, row[3], payload, event_time, live_now,
+        ):
             return False
         project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
         task_binding = conn.execute(
