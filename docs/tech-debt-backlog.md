@@ -767,3 +767,7 @@ advisory and harmless.
 - DONE · Critic-3: capture-evidence.sh `datetime.utcnow()` deprecated
 - DONE · Critic-2: `evidence attach` ghost command
 - DONE · Critic-4: 3 hook tests with always-passing assertions (+ exposed a real heredoc/pipe bug in capture-evidence.sh)
+
+## Native web legacy layout selection (PR #257)
+
+**Status**: DEFERRED. The default web reader deliberately clears inherited `ANVIL_STATE_LAYOUT` and uses canonical HOME-workspace state; local-only legacy `.anvil` projects require an explicit trusted reader that sets its own local layout. If both layouts exist, HOME wins. Native per-repository layout selection is outside this read-only foundation; actual HOME-workspace projects are qualified, and no automatic migration or fallback is authorized.

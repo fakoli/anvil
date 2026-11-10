@@ -47,7 +47,7 @@ The default reader is the current installed Python/Anvil module running
 Python startup (`-I`) so repository modules and `sitecustomize.py` cannot replace
 the installed worker/CLI. It clears inherited
 `ANVIL_ROOT`, `ANVIL_PRD`, `ANVIL_STATE_LAYOUT` and `PYTHONPATH` so launching from
-another harness cannot silently select a different project.
+another harness cannot silently select a different project. The default uses Anvil’s HOME-workspace layout; a local-only legacy `.anvil` project needs an explicit trusted reader that sets `ANVIL_STATE_LAYOUT=local` itself. Merely selecting another Anvil executable does not select the local layout. If both layouts exist, the default reads HOME state; native per-repository layout selection is deferred.
 
 A repository with newer existing state needs an explicitly selected compatible
 reader; this interface never downgrades state, performs a migration, merges an
