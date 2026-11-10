@@ -858,12 +858,16 @@ def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
     WAL appends are sequential and frame-checksummed. A concurrent writer may
     extend the file after this read; that does not invalidate the complete,
     committed prefix already captured. The parser ignores an incomplete or
-    checksum-invalid trailing frame exactly as SQLite recovery does.
+    checksum-invalid trailing frame exactly as SQLite recovery does. Recheck
+    page 1 because a concurrent checkpoint may move WAL content into the DB.
     """
     wal_path = Path(f"{db_path}-wal")
     with db_path.open("rb") as database:
         database_header = database.read(100)
     wal_content = wal_path.read_bytes() if wal_path.exists() else b""
+    with db_path.open("rb") as database:
+        if database.read(100) != database_header:
+            raise SchemaProbeFailed("Database header changed during schema inspection.")
     return database_header, wal_content
 
 
@@ -891,12 +895,14 @@ def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
     try:
         if Path(f"{path}-journal").exists():
             return _read_schema_from_rollback_snapshot(path)
-        last_error: SchemaProbeFailed | None = None
+        last_error: SchemaProbeFailed | OSError | None = None
         for _ in range(3):
             try:
                 database_header, wal_content = _read_stable_database_and_wal(path)
                 return _schema_version_from_wal(database_header, wal_content)
-            except SchemaProbeFailed as exc:
+            except (SchemaProbeFailed, OSError) as exc:
+                # Last-close checkpoint can remove WAL after its existence check.
+                # Retry the whole pair: the earlier DB header may also be stale.
                 last_error = exc
         assert last_error is not None
         raise last_error

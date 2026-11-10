@@ -272,6 +272,87 @@ def _copy_live_wal_fixture(
         conn.close()
 
 
+@pytest.mark.parametrize("committed_version", [SCHEMA_VERSION, SCHEMA_VERSION + 1])
+@pytest.mark.parametrize("checkpoint_window", ["before_exists", "after_exists"])
+def test_schema_probe_retries_checkpoint_removed_wal_and_rereads_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed_version: int,
+    checkpoint_window: str,
+) -> None:
+    """Last-close checkpoint can remove WAL before or after its existence check."""
+    import sqlite3
+
+    from anvil.state.sqlite import read_db_schema_version
+
+    database = tmp_path / "state.db"
+    wal_path = Path(f"{database}-wal")
+    writer = sqlite3.connect(database)
+    writer.execute("PRAGMA journal_mode = WAL")
+    writer.execute("PRAGMA wal_autocheckpoint = 0")
+    writer.execute("CREATE TABLE sentinel (value INTEGER NOT NULL)")
+    writer.execute(f"PRAGMA user_version = {committed_version - 1}")
+    writer.commit()
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writer.execute(f"PRAGMA user_version = {committed_version}")
+    writer.commit()
+    assert int.from_bytes(database.read_bytes()[60:64], "big") == committed_version - 1
+
+    original_exists = Path.exists
+    wal_observations = []
+    checkpoint_manifest = {}
+
+    def close_writer_after_wal_exists(path: Path) -> bool:
+        existed = original_exists(path)
+        if path == wal_path:
+            wal_observations.append(existed)
+            if len(wal_observations) == 1:
+                assert existed
+                writer.close()
+                assert not original_exists(wal_path)
+                checkpoint_manifest.update(_state_manifest(tmp_path))
+                if checkpoint_window == "before_exists":
+                    return original_exists(path)
+        return existed
+
+    monkeypatch.setattr(Path, "exists", close_writer_after_wal_exists)
+    try:
+        assert read_db_schema_version(database) == committed_version
+    finally:
+        writer.close()
+    assert wal_observations == [True, False]
+    assert _state_manifest(tmp_path) == checkpoint_manifest
+
+
+@pytest.mark.parametrize("error_type", [FileNotFoundError, PermissionError])
+def test_schema_probe_exhausts_bounded_io_retries_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[OSError],
+) -> None:
+    from anvil.state.backend import SchemaProbeFailed
+    from anvil.state.sqlite import read_db_schema_version
+
+    state_dir = _copy_live_wal_fixture(
+        tmp_path, version=SCHEMA_VERSION + 1, include_shm=False,
+    )
+    database = state_dir / "state.db"
+    wal_path = Path(f"{database}-wal")
+    before = _state_manifest(state_dir)
+    original_open = Path.open
+    wal_open_attempts = []
+
+    def refuse_wal_open(path: Path, *args, **kwargs):
+        if path == wal_path:
+            wal_open_attempts.append(path)
+            raise error_type("injected unavailable WAL")
+        return original_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", refuse_wal_open)
+        with pytest.raises(SchemaProbeFailed) as raised:
+            read_db_schema_version(database)
+    assert isinstance(raised.value.__cause__, error_type)
+    assert len(wal_open_attempts) == 3
+    assert _state_manifest(state_dir) == before
+
+
 def _create_hot_rollback_journal(tmp_path: Path, *, version: int) -> Path:
     """Crash a subprocess mid-transaction, leaving a genuine hot journal."""
     import sqlite3
