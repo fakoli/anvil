@@ -204,6 +204,10 @@ class BundleManager:
         if project is None:
             raise BundleError("Cannot capture bundle claim context: project not found.")
         try:
+            if self._project_root is None:
+                raise ProgressAttestationError(
+                    "repository_unavailable", "an explicit project root is required",
+                )
             repository_snapshot = inspect_local_repository(
                 self._project_root, project_id=project.id,
             )

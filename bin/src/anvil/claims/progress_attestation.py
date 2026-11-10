@@ -1139,7 +1139,7 @@ def _hash_contained_regular_file(root: Path, portable_path: str) -> str | None:
 
 
 def _hash_file_posix(root: Path, portable_path: str) -> str | None:
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0)
     for name in ("O_CLOEXEC", "O_NOFOLLOW"):
         directory_flags |= getattr(os, name, 0)
     file_flags = os.O_RDONLY

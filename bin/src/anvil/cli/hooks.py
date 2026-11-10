@@ -1319,7 +1319,7 @@ def hook_capture_evidence(
                     directory_fd = _capture_windows_directory(current_dir)
                 else:
                     directory_fd = os.open(
-                        part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                        part, getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
                         | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd,
                     )
                 capture_scope.callback(os.close, directory_fd)
