@@ -94,10 +94,11 @@ def replay(
                 from_events_abs.parent / "config.yaml"
             ),
         )
-        backend.initialize()
-
         # Delegate entirely to the existing engine — no replay logic here.
-        backend.replay_from_empty(str(from_events_abs))
+        try:
+            backend.replay_from_empty(str(from_events_abs))
+        finally:
+            backend.close()
 
     typer.echo(f"Replayed events from {from_events_abs}")
     typer.echo(f"Canonical state written to {into_abs}")

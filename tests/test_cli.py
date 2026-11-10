@@ -10239,12 +10239,17 @@ class TestReplayCommand:
         _do_init(tmp_path, name="Replay Test Project")
         return tmp_path / ".anvil"
 
-    def test_replay_happy_path_into_scratch_db(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("existing_target", [False, True])
+    def test_replay_happy_path_into_scratch_db(self, tmp_path: Path, existing_target: bool) -> None:
         """Successful replay into a temp path exits 0 and creates the target db."""
         state_dir = self._init_project(tmp_path)
         events_path = state_dir / "events.jsonl"
+        original_events = events_path.read_bytes()
 
         scratch_db = tmp_path / "scratch" / "replay.db"
+        if existing_target:
+            scratch_db.parent.mkdir()
+            scratch_db.touch()
 
         result = runner.invoke(
             app,
@@ -10257,6 +10262,7 @@ class TestReplayCommand:
         )
         assert result.exit_code == 0, f"replay failed: {result.output}"
         assert scratch_db.exists(), "scratch db not created after replay"
+        assert events_path.read_bytes() == original_events
         # Output should confirm the events source and destination.
         assert str(events_path) in result.output or "events" in result.output.lower()
         assert str(scratch_db) in result.output or "canonical" in result.output.lower()

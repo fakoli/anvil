@@ -42,6 +42,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.state.backend import SchemaProbeFailed
 from anvil.state.schema import SCHEMA_VERSION
 
 # The union merge driver is the whole point of the git layout: concurrent
@@ -87,6 +88,11 @@ _MIGRATE_STATE_HELP = (
 )
 
 
+def _require_existing_state_files(state_dir: Path) -> None:
+    if not (state_dir / "state.db").is_file() or not (state_dir / "events.jsonl").is_file():
+        raise SchemaProbeFailed("Migration requires an existing database and event log.")
+
+
 def migrate_events(
     to: str = typer.Option(  # noqa: B008
         ...,
@@ -113,6 +119,7 @@ def migrate_events(
     """
     from anvil.state.hashing import hash_event_id
     from anvil.state.models import Event
+    from anvil.state.sqlite import _schema_initialization_lock
 
     if to != "git":
         typer.echo(
@@ -142,6 +149,7 @@ def migrate_events(
     from anvil.config import load_config
 
     try:
+        _require_existing_state_files(state_dir)
         config = load_config(config_path)
     except (OSError, ValueError) as exc:
         schema_probe.close()
@@ -153,7 +161,9 @@ def migrate_events(
 
     if config.events_storage == "git":
         schema_probe.close()
-        typer.echo("events_storage is already 'git' — nothing to migrate.")
+        with _schema_initialization_lock(str(state_dir / "state.db"), str(events_path)):
+            _require_existing_state_files(state_dir)
+            typer.echo("events_storage is already 'git' — nothing to migrate.")
         raise typer.Exit(code=0)
 
     backend = _open_backend(state_dir, schema_probe=schema_probe)
@@ -311,7 +321,6 @@ def migrate_state(
 ) -> None:
     """Preview or apply an idle-State upgrade under the engine's writer lock."""
     from anvil.cli._helpers import BoundedSchemaProbe
-    from anvil.state.backend import SchemaProbeFailed
     from anvil.state.sqlite import SqliteBackend, _schema_initialization_lock
 
     state_dir = _resolve_state_dir(None)
@@ -324,8 +333,7 @@ def migrate_state(
         SqliteBackend.validate_schema_compatibility(from_version)
         # A migration must not initialize a competing project or create a missing
         # authority log. The stable log is also the cross-process writer token.
-        if not db_path.is_file() or not events_path.is_file():
-            raise SchemaProbeFailed("Schema migration requires an existing database and event log.")
+        _require_existing_state_files(state_dir)
         with _schema_initialization_lock(str(db_path), str(events_path)):
             _migrate_state_locked(state_dir, schema_probe, yes=yes, json_output=json_output)
     finally:
