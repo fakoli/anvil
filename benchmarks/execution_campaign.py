@@ -58,6 +58,8 @@ def _check_plan(plan):
         name = cell["name"]
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name):
             raise ValueError("Cell names require 1..64 lowercase letters/digits/hyphens")
+        if name in {"campaign", "plan"}:
+            raise ValueError("Cell name conflicts with a reserved campaign artifact")
         if name in names:
             raise ValueError(f"Duplicate cell name: {name}")
         names.add(name)

@@ -126,13 +126,15 @@ def test_campaign_deadline_starts_no_cell(tmp_path, monkeypatch, campaign_source
     assert not result["complete"] and not result["qualified"] and result["cells"] == []
 
 
-@pytest.mark.parametrize("invalid", ["path", "duplicate", "unknown", "budget", "type"])
+@pytest.mark.parametrize("invalid", ["path", "duplicate", "unknown", "budget", "type", "campaign", "plan"])
 def test_invalid_plan_refuses_before_reserving_or_executing(
     tmp_path, monkeypatch, campaign_source, invalid,
 ):
     plan = _plan()
     if invalid == "path":
         plan["cells"][0]["name"] = "../escape"
+    elif invalid in {"campaign", "plan"}:
+        plan["cells"][0]["name"] = invalid
     elif invalid == "duplicate":
         plan["cells"][1]["name"] = "first"
     elif invalid == "unknown":
