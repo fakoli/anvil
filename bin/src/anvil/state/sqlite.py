@@ -34,6 +34,7 @@ import ntpath
 import os
 import random
 import re
+import shutil
 import sqlite3
 import struct
 import sys
@@ -631,25 +632,28 @@ def _stable_database_copy(db_path: str | os.PathLike[str]) -> Iterator[Path]:
     """
     database = Path(db_path)
     suffixes = ("", "-wal", "-journal")
+
+    def file_digests(database_path: Path) -> dict[str, bytes]:
+        digests = {}
+        for suffix in suffixes:
+            path = Path(f"{database_path}{suffix}")
+            if path.exists():
+                with path.open("rb") as source:
+                    digests[suffix] = hashlib.file_digest(source, "sha256").digest()
+        return digests
+
     try:
         for _ in range(3):
-            captured = {
-                suffix: path.read_bytes()
-                for suffix in suffixes
-                if (path := Path(f"{database}{suffix}")).exists()
-            }
-            if "" not in captured:
-                raise SchemaProbeFailed("Migration database is unavailable.")
             with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
                 scratch_db = Path(temporary) / "state.db"
-                for suffix, content in captured.items():
-                    Path(f"{scratch_db}{suffix}").write_bytes(content)
-                confirmed = {
-                    suffix: path.read_bytes()
-                    for suffix in suffixes
-                    if (path := Path(f"{database}{suffix}")).exists()
-                }
-                if captured != confirmed:
+                for suffix in suffixes:
+                    source = Path(f"{database}{suffix}")
+                    if source.exists():
+                        shutil.copyfile(source, Path(f"{scratch_db}{suffix}"))
+                captured = file_digests(scratch_db)
+                if "" not in captured:
+                    raise SchemaProbeFailed("Migration database is unavailable.")
+                if captured != file_digests(database):
                     continue
                 yield scratch_db
                 return
@@ -674,7 +678,7 @@ def _active_claim_ids_from_event_log(events_path: str, events_storage: str) -> l
     with tempfile.TemporaryDirectory(prefix="anvil-migration-custody-") as temporary:
         scratch_root = Path(temporary)
         scratch_authority = scratch_root / "authority.jsonl"
-        scratch_authority.write_bytes(authority.read_bytes())
+        shutil.copyfile(authority, scratch_authority)
         backend = SqliteBackend(
             db_path=str(scratch_root / "state.db"),
             events_path=str(scratch_root / "scratch-events.jsonl"),

@@ -47,6 +47,59 @@ def _invoke(root: Path, monkeypatch, arguments: list[str]):
     return CliRunner().invoke(app, arguments)
 
 
+def test_private_snapshot_streams_and_detects_same_metadata_changes(tmp_path, monkeypatch):
+    from anvil.state.sqlite import _stable_database_copy
+
+    database = tmp_path / "state.db"
+    database.write_bytes(b"before")
+    original_stat = database.stat()
+    real_copy = shutil.copyfile
+    copies = []
+
+    def change_after_first_copy(source, destination):
+        real_copy(source, destination)
+        copies.append(source)
+        if len(copies) == 1:
+            database.write_bytes(b"after!")
+            os.utime(database, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    def reject_whole_file_read(path):
+        pytest.fail("private snapshot must stream file content")
+
+    monkeypatch.setattr(shutil, "copyfile", change_after_first_copy)
+    monkeypatch.setattr(Path, "read_bytes", reject_whole_file_read)
+    with _stable_database_copy(database) as snapshot:
+        with snapshot.open("rb") as source:
+            assert source.read() == b"after!"
+    assert len(copies) == 2
+    assert not snapshot.exists()
+
+
+@pytest.mark.parametrize("sidecar_suffix", ["-wal", "-journal"])
+def test_private_snapshot_retries_changed_sidecar_set(tmp_path, monkeypatch, sidecar_suffix):
+    from anvil.state.sqlite import _stable_database_copy
+
+    database = tmp_path / "state.db"
+    database.write_bytes(b"database")
+    sidecar = Path(f"{database}{sidecar_suffix}")
+    sidecar.write_bytes(b"sidecar")
+    real_copy = shutil.copyfile
+    database_copies = []
+
+    def remove_copied_sidecar(source, destination):
+        real_copy(source, destination)
+        if source == sidecar:
+            sidecar.unlink()
+        elif source == database:
+            database_copies.append(source)
+
+    monkeypatch.setattr(shutil, "copyfile", remove_copied_sidecar)
+    with _stable_database_copy(database) as snapshot:
+        assert snapshot.read_bytes() == b"database"
+        assert not Path(f"{snapshot}{sidecar_suffix}").exists()
+    assert len(database_copies) == 2
+
+
 @pytest.mark.parametrize("only_bundle_custody", [False, True])
 def test_normal_open_refuses_active_custody_without_live_mutation(tmp_path, only_bundle_custody):
     backend, _, _ = _seed_claim(tmp_path)
