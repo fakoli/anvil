@@ -161,7 +161,9 @@ def migrate_events(
 
     if config.events_storage == "git":
         schema_probe.close()
-        with _schema_initialization_lock(str(state_dir / "state.db"), str(events_path)):
+        with _schema_initialization_lock(
+            str(state_dir / "state.db"), str(events_path), create_missing_log=False,
+        ):
             _require_existing_state_files(state_dir)
             typer.echo("events_storage is already 'git' — nothing to migrate.")
         raise typer.Exit(code=0)
@@ -334,7 +336,9 @@ def migrate_state(
         # A migration must not initialize a competing project or create a missing
         # authority log. The stable log is also the cross-process writer token.
         _require_existing_state_files(state_dir)
-        with _schema_initialization_lock(str(db_path), str(events_path)):
+        with _schema_initialization_lock(
+            str(db_path), str(events_path), create_missing_log=False,
+        ):
             _migrate_state_locked(state_dir, schema_probe, yes=yes, json_output=json_output)
     finally:
         schema_probe.close()

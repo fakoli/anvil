@@ -510,7 +510,8 @@ def _require_no_event_recovery(db_path: str | os.PathLike[str]) -> None:
 
 @contextmanager
 def _schema_initialization_lock(
-    db_path: str, events_path: str, *, allow_event_recovery: bool = False
+    db_path: str, events_path: str, *, allow_event_recovery: bool = False,
+    create_missing_log: bool = True,
 ) -> Iterator[None]:
     """Serialize Anvil initializers without creating a separate lock entry.
 
@@ -519,6 +520,8 @@ def _schema_initialization_lock(
     validates an existing database when this token is missing, so refusing a
     future schema still creates nothing.  A per-thread stack reuses ownership
     during nested Git projection rebuilds.
+    Explicit migrations disable log creation even if both files disappear
+    after their initial checks; only ordinary bootstrap may create a new log.
     """
     if not allow_event_recovery:
         _require_no_event_recovery(db_path)
@@ -540,7 +543,8 @@ def _schema_initialization_lock(
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_fh = lock_path.open(
-                "r+b" if os.path.exists(db_path) or lock_path.exists() else "a+b"
+                "r+b" if not create_missing_log or os.path.exists(db_path) or lock_path.exists()
+                else "a+b"
             )
         except FileNotFoundError as exc:
             raise SchemaProbeFailed(

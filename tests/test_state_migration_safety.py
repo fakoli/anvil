@@ -201,6 +201,42 @@ def test_migration_rechecks_database_after_lock(tmp_path, monkeypatch, apply_mig
     assert _files(state) == after_removal
 
 
+@pytest.mark.parametrize("migration_kind", ["state", "events"])
+@pytest.mark.parametrize("apply_migration", [False, True])
+def test_explicit_migration_cannot_recreate_lost_authority(
+    tmp_path, monkeypatch, migration_kind, apply_migration,
+):
+    import anvil.state.sqlite as sqlite_module
+
+    if migration_kind == "events":
+        from tests.test_git_events import _build_local_project
+
+        _build_local_project(tmp_path)
+        converted = _invoke(tmp_path, monkeypatch, ["migrate-events", "--to", "git", "--yes"])
+        assert converted.exit_code == 0, converted.output
+        state = tmp_path / ".anvil"
+        arguments = ["migrate-events", "--to", "git"]
+    else:
+        state = _older_state(tmp_path)
+        arguments = ["migrate", "state", "--json"]
+    real_lock = sqlite_module._schema_initialization_lock
+    after_removal = {}
+
+    @contextmanager
+    def remove_both_files_before_lock(*args, **kwargs):
+        (state / "state.db").unlink()
+        (state / "events.jsonl").unlink()
+        after_removal.update(_files(state))
+        with real_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(sqlite_module, "_schema_initialization_lock", remove_both_files_before_lock)
+    result = _invoke(tmp_path, monkeypatch, [*arguments, *(["--yes"] if apply_migration else [])])
+    assert result.exit_code == 1, result.output
+    assert "schema_probe_failed" in result.output
+    assert _files(state) == after_removal
+
+
 @pytest.mark.parametrize("events_storage", ["local", "git"])
 @pytest.mark.parametrize("operation", ["reopen", "initialize", "append", "lock"])
 def test_current_projection_refuses_missing_authority(tmp_path, events_storage, operation):
