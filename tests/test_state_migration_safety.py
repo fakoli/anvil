@@ -150,8 +150,11 @@ def test_empty_projection_refuses_custody_but_missing_projection_retains_bootstr
 
 
 
-def test_normal_open_refuses_missing_authority_without_creating_log(tmp_path):
+@pytest.mark.parametrize("empty_projection", [False, True])
+def test_normal_open_refuses_missing_authority_without_creating_log(tmp_path, empty_projection):
     state = _older_state(tmp_path)
+    if empty_projection:
+        (state / "state.db").write_bytes(b"")
     (state / "events.jsonl").unlink()
     before = _files(state)
     backend = SqliteBackend(

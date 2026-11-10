@@ -691,12 +691,12 @@ def _schema_upgrade_active_claim_ids(
     # Explicit migration requires an existing file, including a damaged empty one.
     if not database.is_file():
         return []
-    if database.stat().st_size == 0:
-        return _active_claim_ids_from_event_log(events_path, events_storage)
     if not Path(events_path).is_file():
         raise SchemaProbeFailed(
             "Existing State authority log is unavailable; schema migration refused."
         )
+    if database.stat().st_size == 0:
+        return _active_claim_ids_from_event_log(events_path, events_storage)
     with _stable_database_copy(database) as scratch_db:
         with closing(sqlite3.connect(scratch_db)) as connection:
             tables = {row[0] for row in connection.execute(
