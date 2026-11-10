@@ -684,6 +684,25 @@ def _stop_owned_process_group(process):
 
 
 def _supervise(output, options, deadline, *, child_target=_child):
+    try:
+        # A signal-zero probe changes no process. Refuse before spawning if
+        # the environment denies the group control required for bounded cleanup.
+        os.killpg(os.getpgrp(), 0)
+    except (AttributeError, OSError) as error:
+        receipt = {
+            "validated": False,
+            "error": {
+                "code": "unsupported_environment",
+                "message": "POSIX process-group signaling is required for bounded cleanup.",
+                "detail": repr(error),
+            },
+            "child_started": False,
+            "child_stopped": None,
+            "child_exit_code": None,
+            "work_directory": str(output.with_suffix(".work")),
+        }
+        output.write_text(json.dumps(receipt, indent=2) + "\n")
+        return receipt
     process = multiprocessing.get_context("spawn").Process(
         target=child_target, args=(output, options)
     )
@@ -714,7 +733,9 @@ def _supervise(output, options, deadline, *, child_target=_child):
             json.dumps({"validated": False, "child_exit_code": process.exitcode}) + "\n"
         )
     receipt = json.loads(output.read_text())
-    receipt.update(child_exit_code=process.exitcode, child_stopped=not process.is_alive())
+    receipt.update(
+        child_started=True, child_exit_code=process.exitcode, child_stopped=not process.is_alive()
+    )
     output.write_text(json.dumps(receipt, indent=2) + "\n")
     return receipt
 

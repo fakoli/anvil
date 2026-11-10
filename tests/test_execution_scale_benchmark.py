@@ -111,7 +111,7 @@ def _assert_descendant_stopped(output):
     for _ in range(40):
         try:
             process_state = status.read_text().split(")", 1)[1].split()[0]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             stopped = True
             break
         if process_state == "Z":
@@ -123,8 +123,39 @@ def _assert_descendant_stopped(output):
     assert stopped, "supervisor left a running command descendant"
 
 
+def _require_process_group_control():
+    try:
+        os.killpg(os.getpgrp(), 0)
+    except (AttributeError, OSError) as error:
+        pytest.skip(f"POSIX process-group cleanup capability unavailable: {error!r}")
+
+
+def test_denied_process_group_capability_refuses_before_constructing_a_child(tmp_path, monkeypatch):
+    probes = []
+
+    def deny_group_signal(process_group_id, signum):
+        probes.append((process_group_id, signum))
+        raise PermissionError("process-group signaling denied by sandbox")
+
+    def unexpected_context(*_arguments, **_keywords):
+        pytest.fail("capability refusal must occur before constructing a child")
+
+    monkeypatch.setattr(execution_scale.os, "killpg", deny_group_signal)
+    monkeypatch.setattr(execution_scale.multiprocessing, "get_context", unexpected_context)
+    output = tmp_path / "unsupported.json"
+    receipt = execution_scale._supervise(output, {}, 10)
+    assert probes == [(os.getpgrp(), 0)]
+    assert not receipt["validated"] and receipt["child_started"] is False
+    assert receipt["child_stopped"] is None and receipt["child_exit_code"] is None
+    assert receipt["error"]["code"] == "unsupported_environment"
+    assert "denied by sandbox" in receipt["error"]["detail"]
+    assert json.loads(output.read_text()) == receipt
+    assert not output.with_suffix(".work").exists()
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc stopped-process observation")
 def test_deadline_kills_term_ignoring_descendant_after_coordinator_exits(tmp_path, monkeypatch):
+    _require_process_group_control()
     output = tmp_path / "timeout.json"
     supervise = execution_scale._supervise
     monkeypatch.setattr(execution_scale, "_supervise", partial(supervise, child_target=_stalled_child))
@@ -140,6 +171,7 @@ def test_deadline_kills_term_ignoring_descendant_after_coordinator_exits(tmp_pat
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc stopped-process observation")
 def test_interrupt_stops_descendant_and_returns_a_failed_receipt(tmp_path):
+    _require_process_group_control()
     output = tmp_path / "interrupted.json"
     previous_handlers = {signum: signal.getsignal(signum)
                          for signum in (signal.SIGINT, signal.SIGTERM)}

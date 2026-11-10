@@ -62,12 +62,20 @@ the default `relaxed` mode has different crash guarantees. `--events-storage
 git` is a separate cell because its content-validation cost differs from local
 event storage. Compare only matched modes, source hashes and fixture sizes.
 
-The CLI requires POSIX process-group cleanup, limits tasks to 2,000, executor
+The CLI requires POSIX process-group signaling capability, limits tasks to 2,000, executor
 slots to 128, cohorts to 12, each command to 30 seconds, retained fixture storage
 to 256 MiB, and the overall deadline to at most one hour (15 minutes by default).
 On timeout it terminates the owned process group and retains a failed receipt
 and the available ledger/captures. Source hashes are checked before and after
 the run; changing source cannot produce a validated receipt.
+
+Before spawning any worker, the supervisor probes its own process group with
+signal zero, which sends no signal. If the platform denies that capability
+(including restrictive OpenShell environments), the CLI retains a failed
+`unsupported_environment` receipt with `child_started: false`; no worker starts.
+The native `run()` API is usable only under an external managed owner's bounded
+lifecycle, including cancellation and cleanup. It does not supply the CLI's
+supervision itself. There is no unattended bypass flag or sandbox-policy fallback.
 
 ## Qualification results
 
@@ -100,6 +108,10 @@ and a real spawned coordinator with a SIGTERM-ignoring command descendant. It
 requires the coordinator to stop, the descendant to stop executing, and a failed
 timeout receipt to remain. Escalation targets the entire owned process group
 even when its leader already exited on SIGTERM.
+The deadline and interruption regressions explicitly skip when the platform
+denies process-group capability and retain that reason. The separate refusal
+regression verifies that denied capability creates no child and remains required
+in those environments.
 
 ## OpenShell workers
 
