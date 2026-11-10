@@ -6,6 +6,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.22] - 2026-11-10
+
+### Fixed
+
+- Retry the complete schema probe when a concurrent SQLite checkpoint removes
+  a WAL between inspection and read. Bounded retries preserve closed refusal
+  for persistent I/O errors and never open live SQLite during the probe.
+
 ## [0.6.21] - 2026-11-10
 
 ### Added

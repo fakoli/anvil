@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import traceback
 from datetime import timedelta
 
 import pytest
@@ -537,5 +538,7 @@ def test_reader_waits_for_writer_and_observes_one_frontier(
     commit.set()
     w.join(5)
     r.join(5)
-    assert not failures and done.is_set()
+    assert not failures and done.is_set(), "\n".join(
+        "".join(traceback.format_exception(failure)) for failure in failures
+    )
     assert results[0]["event_cursor"]["event_count"] == 9
