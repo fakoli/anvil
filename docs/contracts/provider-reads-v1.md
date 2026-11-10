@@ -22,7 +22,7 @@ anvil describe --json
 The response must contain all of the following before a version-1 consumer
 continues:
 
-- `api_version == "19"`;
+- `api_version == "21"` for this engine release;
 - `operation_catalog.catalog_version == 1`;
 - the required `operation_id` with `operation_version == 1`;
 - the exact version-1 input, output, and error schema resource paths published
@@ -35,6 +35,20 @@ from the engine release number and do not fall back to database inspection.
 The same manifest is returned by the planning-gated MCP `describe_surface`
 tool. Provider reads themselves use the CLI transports recorded in the catalog:
 `project snapshot` and `prd show`.
+
+## Native web adapter policy
+
+The native read-only web adapter is a separately qualified, operator-configured
+consumer. Its private enrollment pins reader argv, project identity and state
+schema; it does not perform generic discovery negotiation. It validates the
+supported version-1 operation/schema headers, typed API metadata, complete
+canonical payload, applied limits and digest. The observed discovery API is
+reported as provenance, not interpreted as proof of compatibility or source
+identity. A deployment may use an independently qualified API20 reader alongside
+this API21 engine when its canonical version-1 snapshot contract matches.
+Operators must qualify each pinned reader against canonical project controls;
+this adapter policy does not authorize generic consumers to ignore their pinned
+discovery API or permit migration, fallback or direct database reads.
 
 ## Packaged schemas and fixtures
 

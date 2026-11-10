@@ -51,6 +51,7 @@ from anvil.cli.roots import roots_app
 from anvil.cli.run_workflow import run_workflow
 from anvil.cli.scan import scan
 from anvil.cli.sync import sync_app
+from anvil.cli.web import web_app
 
 # ---------------------------------------------------------------------------
 # Root application
@@ -108,6 +109,7 @@ app.add_typer(migrate_app, name="migrate")
 app.add_typer(proof_app, name="proof")
 app.add_typer(bundle_app, name="bundle")
 app.add_typer(project_app, name="project")
+app.add_typer(web_app, name="web")
 app.add_typer(repair_app, name="repair")
 repair_app.command("local-event")(repair_local_event)
 app.add_typer(roots_app, name="roots")
