@@ -1,5 +1,9 @@
 # anvil coordination benchmark
 
+For repeatable native proof/latency campaigns and bounded OpenShell worker
+qualification, use the [execution qualification guide](../docs/design/execution-scale-validation.md).
+The coordination comparison below measures a different workload.
+
 **The claim this measures:** when multiple agents work one project in parallel,
 coordinating through anvil's durable state engine produces *fewer collisions,
 fewer duplicates, correct ordering, and auditable evidence* than coordinating through

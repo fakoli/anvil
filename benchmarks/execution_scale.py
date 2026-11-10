@@ -52,6 +52,7 @@ from anvil.web import (  # noqa: E402
 ACTOR = "scale-coordinator"
 PROJECT_ID = "execution-scale-fixture"
 MAX_STORAGE_BYTES = 256 * 1024 * 1024
+NATIVE_STAGES = ("claim_append", "progress_append", "proof_validation", "evidence_append")
 
 
 def _summary(samples):
@@ -379,6 +380,26 @@ def _web_snapshot(project, work, source_identity, task_count):
     }
 
 
+def _check_options(
+    *,
+    tasks=24,
+    workers=8,
+    cohort_size=12,
+    command_timeout=10,
+    durability="relaxed",
+    events_storage="local",
+):
+    if not (
+        1 <= tasks <= 2000
+        and 1 <= workers <= min(tasks, 128)
+        and 1 <= cohort_size <= 12
+        and 1 <= command_timeout <= 30
+        and durability in {"relaxed", "strict"}
+        and events_storage in {"local", "git"}
+    ):
+        raise ValueError("tasks=1..2000, workers=1..min(tasks,128), cohort=1..12, timeout=1..30")
+
+
 def run(
     work,
     *,
@@ -391,15 +412,9 @@ def run(
     prepare_executor=None,
 ):
     """Run only below a fresh directory; the CLI additionally enforces a wall deadline."""
-    if not (
-        1 <= tasks <= 2000
-        and 1 <= workers <= min(tasks, 128)
-        and 1 <= cohort_size <= 12
-        and 1 <= command_timeout <= 30
-        and durability in {"relaxed", "strict"}
-        and events_storage in {"local", "git"}
-    ):
-        raise ValueError("tasks=1..2000, workers=1..min(tasks,128), cohort=1..12, timeout=1..30")
+    _check_options(tasks=tasks, workers=workers, cohort_size=cohort_size,
+                   command_timeout=command_timeout, durability=durability,
+                   events_storage=events_storage)
     work.mkdir(parents=True, exist_ok=False)
     source_identity = _source_identity()
     project = work / "project"

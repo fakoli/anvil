@@ -1,5 +1,45 @@
 # Bounded execution and proof qualification
 
+## Repeat a declared host campaign
+
+From the source checkout, run the committed five-cell plan once:
+
+```sh
+uv run --project bin --locked python benchmarks/execution_campaign.py --output /tmp/anvil-campaign
+```
+
+The default plan is `benchmarks/fixtures/execution_campaign.json`: 1,000 tasks
+per cell; relaxed/local with 8, 32 and 128 command executors, strict/local with
+8, and relaxed/Git with 8. `--plan PATH` selects a reviewed JSON plan with the
+same fields. The plan contains no executable commands or physical-container
+settings. It is validated in full before reserving a fresh output directory.
+
+The campaign calls the existing supervisor sequentially, with one ledger writer
+and zero containers per cell. It retains `plan.json`, `campaign.json`, every
+native receipt, and each cell's `.work` evidence. Existing destinations are
+refused atomically; retries require a new destination and remain separate
+observations. Each run records the plan and receipt hashes, source-file hashes,
+Git HEAD and whether those bytes match that commit. A modified working tree is
+explicitly identified; its measured bytes must not be attributed to clean HEAD.
+
+The default target is configured in the plan, not a universal skill rule. Each
+named native stage must have samples and p95 at or below that target. A latency
+miss remains visible while the other already-declared host cells run. A
+correctness, source, custody or interruption failure stops the campaign before
+the next cell. Missing cells cannot qualify. Exit zero requires the whole
+campaign's correctness and configured latency gates; exit one retains the
+failed or incomplete results. An invalid plan or existing destination exits two.
+
+Plans have one to eight cells, at most 2,000 tasks and 128 command executors per
+cell, and at most a one-hour campaign deadline. The existing 256 MiB retained
+fixture bound applies per cell. The remaining campaign budget bounds each cell's
+supervised deadline; cleanup and final readback can extend wall time beyond the
+execution deadline. The campaign never starts or expands OpenShell workers.
+Physical qualification still uses the separate prior-wave, capacity, identity,
+latency and cleanup gates described below.
+
+## Run one cell
+
 Run the committed-source harness with a fresh receipt destination:
 
 ```sh

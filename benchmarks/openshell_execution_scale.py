@@ -30,7 +30,7 @@ ROLE_LABEL = "openshell.ai/isolation-role"
 WAVES = (2, 8, 32, 128)
 # The ledger target covers the guarded append, not Git/context preparation in
 # the outer scoped claim. Both durations remain separately visible in receipts.
-NATIVE_STAGES = ("claim_append", "progress_append", "proof_validation", "evidence_append")
+NATIVE_STAGES = execution_scale.NATIVE_STAGES
 POLICY = """version: 1
 filesystem_policy:
   include_workdir: false
