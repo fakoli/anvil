@@ -12,7 +12,6 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-
 from benchmarks import execution_scale
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX qualification harness")

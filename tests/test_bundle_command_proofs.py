@@ -19,9 +19,9 @@ from anvil.claims.command_proof_artifact import (
     load_claim_command_proof,
     verify_claim_command_proof_batch,
 )
-from anvil.clock import SystemClock
 from anvil.cli import app
 from anvil.cli._helpers import _resolve_state_dir, prd_source_path
+from anvil.clock import SystemClock
 from anvil.state.backend import EventRejected
 from anvil.state.hashing import canonical_json_bytes
 from anvil.state.models import Event, EventDraft, task_snapshot_revision

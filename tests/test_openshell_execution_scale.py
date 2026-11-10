@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from benchmarks import openshell_execution_scale as adapter
 
 IMAGE_ID = "sha256:" + "a" * 64
