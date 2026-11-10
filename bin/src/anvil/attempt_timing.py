@@ -113,11 +113,15 @@ def project_attempt_timing(
                 claim = by_claim.get(member["id"])
                 if claim is None:
                     continue
+                # New children bind their frozen context and generation to this
+                # event; historical members may omit both fields.
                 if (
                     claim["id"] in created or claim["bundle_claim_id"] != source["id"]
                     or claim["task_id"] != member["task_id"]
                     or claim["claimed_by"] != source["claimed_by"]
-                    or claim.get("attestation_context") is not None
+                    or claim.get("attestation_context") != member.get("attestation_context")
+                    or (member["generation"] is not None
+                        and claim["generation"] != member["generation"])
                     or _utc(claim["created_at"]) != _utc(source["created_at"])
                 ):
                     raise ValueError("bundle child timing disagrees with creation")

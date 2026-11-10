@@ -72,13 +72,24 @@ def test_bundle_view_has_one_shared_frontier_and_native_members(tmp_path, monkey
     async def exercise():
         async with Client(mcp) as client:
             await _profile_claim(client, root, True)
+            backend = _open_backend(state, project_root=root)
+            try:
+                claims = {claim.id: claim for claim in backend.list_active_claims()}
+            finally:
+                backend.close()
             before = _files(state)
             result = _data(await client.call_tool("get_attempt_view", {
                 "task_id": "B1", "bundle": True, "cwd": str(root),
             }))
         assert result == read_attempt_view(state, "B1", bundle=True)
         assert result["members"][0]["current"]["claim"]["bundle_claim_id"] is not None
-        assert result["members"][0]["current"]["claim"]["proof_attribution"]["repository_id"] is None
+        for member in result["members"]:
+            projected = member["current"]["claim"]
+            claim = claims[projected["id"]]
+            assert claim.attestation_context is not None
+            assert projected["generation"] == claim.generation
+            for field in ("repository_id", "claim_start_sha", "prd_id", "prd_revision", "task_revision"):
+                assert projected["proof_attribution"][field] == getattr(claim.attestation_context, field)
         assert _files(state) == before
     _run(exercise())
 

@@ -32,7 +32,16 @@ def test_packet_attempt_is_same_native_read_without_packet_side_effects(tmp_path
         monkeypatch.setattr("anvil.cli.packet_apply._open_backend", lambda *a, **kw: pytest.fail("read opened mutable backend"))
         monkeypatch.setattr("anvil.cli.packet_apply._reap_stale_claims", lambda *a: pytest.fail("read reaped claims"))
         result = _invoke(root, args)
-        assert json.loads(result.output) == read_attempt_view(state, target, bundle=bundle)
+        view = json.loads(result.output)
+        assert view == read_attempt_view(state, target, bundle=bundle)
+        if bundle:
+            for member in view["members"]:
+                projected = member["current"]["claim"]
+                claim = backend.get_claim(projected["id"])
+                assert claim.attestation_context is not None
+                assert projected["generation"] == claim.generation
+                for field in ("repository_id", "claim_start_sha", "prd_id", "prd_revision", "task_revision"):
+                    assert projected["proof_attribution"][field] == getattr(claim.attestation_context, field)
         assert {p.name: p.read_bytes() for p in state.iterdir() if p.is_file() and p.suffix != ".db-shm"} == before
         assert list((state / "packets").iterdir()) == packets
     finally:

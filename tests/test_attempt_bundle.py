@@ -4,6 +4,7 @@ import pytest
 
 from anvil.attempt_view import read_attempt_view
 from anvil.project_snapshot import ProjectSnapshotError
+from tests.test_bundle_command_proofs import project as project
 from tests.test_bundle_execution import _backend, _seed
 from tests.test_native_evidence_correction import accepted as accepted
 
@@ -97,6 +98,64 @@ def test_bundle_lifecycle_attribution_and_checkpoint(tmp_path):
     view = read_attempt_view(tmp_path, "B001", bundle=True)
     assert view["bundle"]["status"] == "replan_required"
     assert all(m["current"]["claim"]["status"] == "released" for m in view["members"])
+
+
+@pytest.mark.parametrize("corruption", ["missing_context", "malformed_context", "task_revision", "generation"])
+def test_bundle_member_timing_requires_exact_creation_context(project, corruption):
+    import json
+    import sqlite3
+
+    from tests.test_bundle_command_proofs import _claim
+
+    backend, _, _, events, _ = project
+    claimed = _claim(project)
+    state = events.parent
+    claim_id = claimed.claim.member_claim_ids["release:T001"]
+    claim = backend.get_claim(claim_id)
+    assert claim.attestation_context is not None
+    view = read_attempt_view(state, "B001", bundle=True)
+    member = next(member for member in view["members"] if member["identity"]["stored_task_id"] == claim.task_id)
+    assert member["current"]["claim"]["proof_attribution"]["task_revision"] == claim.attestation_context.task_revision
+    before = events.read_bytes()
+    # Corrupt only the disposable projection, leaving its immutable creation
+    # event intact. Neither absent nor plausible replacement context may pass.
+    with sqlite3.connect(state / "state.db") as conn:
+        if corruption == "generation":
+            conn.execute("UPDATE claims SET generation = generation + 1 WHERE id = ?", (claim_id,))
+        else:
+            context = claim.attestation_context.model_dump(mode="json")
+            context["task_revision"] = "f" * 64
+            if corruption == "malformed_context":
+                context.pop("repository_id")
+            conn.execute("UPDATE claims SET attestation_context = ? WHERE id = ?",
+                         (None if corruption == "missing_context" else json.dumps(context), claim_id))
+    with pytest.raises(ProjectSnapshotError) as error:
+        read_attempt_view(state, "B001", bundle=True)
+    assert error.value.error.code.value == "invalid_hierarchy"
+    assert error.value.error.field == "projection"
+    assert events.read_bytes() == before
+
+
+def test_historical_bundle_child_without_context_or_explicit_generation_is_readable(tmp_path):
+    from tests.test_bundle_execution import _bundle_claim_payload, _event
+
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        payload = _bundle_claim_payload(backend, "BC-HISTORICAL")
+        assert all("generation" not in member and "attestation_context" not in member
+                   for member in payload["member_claims"])
+        backend.append(_event("bundle.claimed", "bundle", "B001", payload, actor="coordinator"))
+        before = (tmp_path / "events.jsonl").read_bytes()
+        view = read_attempt_view(tmp_path, "B001", bundle=True)
+        for member in view["members"]:
+            claim = member["current"]["claim"]
+            assert claim["generation"] == 1
+            assert claim["proof_attribution"]["repository_id"] is None
+            assert member["timing"]["attempt_count"] == 1
+        assert (tmp_path / "events.jsonl").read_bytes() == before
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize("corruption", ["missing", "order", "foreign"])
