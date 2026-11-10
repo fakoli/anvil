@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from anvil.clock import FrozenClock
+from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
 from anvil.state.backend import EventRejected
 from anvil.state.models import (
     BundleStatus,
@@ -840,6 +841,86 @@ def test_bundle_snapshot_replays_byte_equivalently(tmp_path: Path) -> None:
         replay.close()
 
 
+def test_pristine_bundle_withdrawal_preserves_membership_and_replays(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    replay = _backend(replay_root)
+    try:
+        _seed(source)
+        _create_bundle(source)
+        BundleDeliveryManager(
+            source, FrozenClock(_T0 + timedelta(seconds=1)), actor="codex-main"
+        ).withdraw("B001", reason="replace with root-scoped claims")
+
+        bundle = source.get_bundle("B001")
+        assert bundle is not None
+        assert bundle.status is BundleStatus.withdrawn
+        assert [source.get_task(task_id).status.value for task_id in bundle.task_ids] == [
+            "ready",
+            "ready",
+        ]
+        assert source.list_bundle_claims() == []
+        event = json.loads((source_root / "events.jsonl").read_text().splitlines()[-1])
+        assert event["action"] == "bundle.withdrawn"
+        assert event["payload_json"]["reason"] == "replace with root-scoped claims"
+
+        _create_bundle(source, bundle_id="B002")
+        assert source.get_bundle("B002") is not None
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        assert serialize_state(replay) == serialize_state(source)
+    finally:
+        source.close()
+        replay.close()
+
+
+def test_bundle_withdrawal_refuses_claim_or_checkpoint_history(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        _create_bundle(backend)
+        backend.append(
+            _event(
+                "bundle.claimed",
+                _bundle_claim_payload(backend),
+                target_kind="bundle",
+                target_id="B001",
+                actor="codex-main",
+            )
+        )
+        before = _event_count(tmp_path)
+        with pytest.raises(BundleDeliveryError, match="must be planned"):
+            BundleDeliveryManager(
+                backend, FrozenClock(_T0 + timedelta(seconds=1)), actor="codex-main"
+            ).withdraw("B001", reason="too late")
+        assert _event_count(tmp_path) == before
+        assert backend.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
+    finally:
+        backend.close()
+
+
+def test_bundle_withdrawal_refuses_delivery_checkpoint_history(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        _create_bundle(backend)
+        delivery = BundleDeliveryManager(
+            backend, FrozenClock(_T0 + timedelta(seconds=1)), actor="codex-main"
+        )
+        delivery.checkpoint("B001", commit_sha="abc123")
+        before = _event_count(tmp_path)
+        with pytest.raises(BundleDeliveryError, match="delivery checkpoint"):
+            BundleDeliveryManager(
+                backend, FrozenClock(_T0 + timedelta(seconds=2)), actor="codex-main"
+            ).withdraw("B001", reason="too late")
+        assert _event_count(tmp_path) == before
+        assert backend.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
+    finally:
+        backend.close()
+
+
 def test_replay_keeps_first_divergent_bundle_creation_atomically(
     tmp_path: Path,
 ) -> None:
@@ -1435,7 +1516,7 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 25
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 26
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1511,7 +1592,7 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
             }
         assert "review_disposition_event_id" in bundle_columns
         assert "disposition_event_id" in review_columns
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 25
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 26
     finally:
         migrated.close()
 
@@ -1559,7 +1640,7 @@ def test_v12_review_schema_recovers_torn_table_rename(tmp_path: Path) -> None:
             ).fetchone()
         assert row == ("BR-OLD", "legacy-unbound")
         assert backup is None
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 25
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 26
     finally:
         migrated.close()
 
@@ -1590,7 +1671,7 @@ def test_v14_bundle_schema_migrates_to_result_projection(tmp_path: Path) -> None
         bundle = migrated.get_bundle("B001")
         assert bundle is not None
         assert bundle.last_result_at == projected_at
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 25
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 26
     finally:
         migrated.close()
 
@@ -1609,6 +1690,11 @@ def test_v10_upgrade_seeds_claim_lineage_before_log_ahead_catchup(
                 target_id="C-UPGRADE",
             )
         )
+        backend.append(_event(
+            "claim.released", {"claim_id": "C-UPGRADE", "released_by": "worker",
+                               "release_reason": "idle before migration"},
+            target_kind="claim", target_id="C-UPGRADE", actor="worker",
+        ))
     finally:
         backend.close()
 
@@ -1658,8 +1744,8 @@ def test_v10_upgrade_seeds_claim_lineage_before_log_ahead_catchup(
         claim = upgraded.get_claim("C-UPGRADE")
         assert claim is not None
         assert claim.claimed_by == "worker"
-        assert claim.status.value == "active"
-        assert upgraded.get_task("release:T001").status.value == "claimed"  # type: ignore[union-attr]
+        assert claim.status.value == "released"
+        assert upgraded.get_task("release:T001").status.value == "ready"  # type: ignore[union-attr]
         with sqlite3.connect(tmp_path / "state.db") as conn:
             collision = conn.execute(
                 "SELECT collision_detected FROM claim_replay_lineages "

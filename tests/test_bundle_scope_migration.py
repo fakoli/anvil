@@ -39,7 +39,7 @@ def test_new_database_persists_winning_claim_scope_and_replays_it(tmp_path):
     try:
         assert claimed.expected_scope_digest == digest
         connection = backend._require_conn()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 26
         column = next(
             row for row in connection.execute("PRAGMA table_info(bundle_claims)")
             if row[1] == "expected_scope_digest"
@@ -54,21 +54,25 @@ def test_new_database_persists_winning_claim_scope_and_replays_it(tmp_path):
         backend.close()
 
 
-@pytest.mark.parametrize("old_version", [22, 24])
+@pytest.mark.parametrize("old_version", [22, 23, 24, 25])
 def test_supported_upgrade_preserves_legacy_claims_and_authoritative_log(tmp_path, old_version):
     backend, claimed, _ = _seed_claim(tmp_path)
+    BundleManager(backend, FrozenClock(_T0), actor="codex-main", project_root=tmp_path).release(
+        "B001", reason="Release before fixture schema migration",
+    )
+    claimed = backend.get_bundle_claim("B001")
     original_claim = claimed.model_dump(mode="json", exclude={"expected_scope_digest"})
     backend.close()
     with sqlite3.connect(tmp_path / "state.db") as connection:
-        connection.execute("ALTER TABLE bundle_claims DROP COLUMN expected_scope_digest")
-        if old_version == 22:
+        if old_version < 25:
+            connection.execute("ALTER TABLE bundle_claims DROP COLUMN expected_scope_digest")
+        if old_version <= 23:
             connection.execute("ALTER TABLE tasks DROP COLUMN closure")
         connection.execute(f"PRAGMA user_version = {old_version}")
         original_members = connection.execute("SELECT * FROM claims ORDER BY id").fetchall()
         original_events = connection.execute("SELECT * FROM events ORDER BY rowid").fetchall()
-        assert "expected_scope_digest" not in {
-            row[1] for row in connection.execute("PRAGMA table_info(bundle_claims)")
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(bundle_claims)")}
+        assert ("expected_scope_digest" in columns) is (old_version == 25)
     original_log = (tmp_path / "events.jsonl").read_bytes()
 
     backend = _reopen(tmp_path)
@@ -78,7 +82,7 @@ def test_supported_upgrade_preserves_legacy_claims_and_authoritative_log(tmp_pat
         assert migrated.expected_scope_digest is None
         assert migrated.model_dump(mode="json", exclude={"expected_scope_digest"}) == original_claim
         connection = backend._require_conn()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 26
         assert "closure" in {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
         assert [tuple(row) for row in connection.execute("SELECT * FROM claims ORDER BY id")] == original_members
         assert [tuple(row) for row in connection.execute("SELECT * FROM events ORDER BY rowid")] == original_events
@@ -94,13 +98,13 @@ def test_supported_upgrade_preserves_legacy_claims_and_authoritative_log(tmp_pat
         backend.close()
 
 
-def test_reserved_schema_23_refuses_before_ddl_or_log_changes(tmp_path):
+def test_future_schema_refuses_before_ddl_or_log_changes(tmp_path):
     backend, _, _ = _seed_claim(tmp_path)
     backend.close()
     with sqlite3.connect(tmp_path / "state.db") as connection:
         connection.execute("ALTER TABLE bundle_claims DROP COLUMN expected_scope_digest")
         connection.execute("ALTER TABLE tasks DROP COLUMN closure")
-        connection.execute("PRAGMA user_version = 23")
+        connection.execute("PRAGMA user_version = 27")
     before_database = (tmp_path / "state.db").read_bytes()
     before_log = (tmp_path / "events.jsonl").read_bytes()
     backend = SqliteBackend(
@@ -110,8 +114,8 @@ def test_reserved_schema_23_refuses_before_ddl_or_log_changes(tmp_path):
     try:
         with pytest.raises(SchemaMismatch) as error:
             backend.initialize()
-        assert error.value.actual == 23
-        assert error.value.expected == 25
+        assert error.value.actual == 27
+        assert error.value.expected == 26
         assert (tmp_path / "state.db").read_bytes() == before_database
         assert (tmp_path / "events.jsonl").read_bytes() == before_log
     finally:

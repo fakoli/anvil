@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.20 (schema 25)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.21 (schema 26)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1279,6 +1279,15 @@ create -> claim -> packet/progress -> member submit -> complete
        -> checkpoint/reconcile
 ```
 
+### `anvil bundle withdraw` { #bundle-withdraw }
+
+`anvil bundle withdraw B001 --reason "Plan is no longer needed" --actor lead`
+withdraws a pristine planned bundle. Only its coordinator may withdraw it, and
+any member claim/evidence history, bundle claim/review history, or delivery
+checkpoint causes refusal. Withdrawal releases the unused reservation without
+changing member tasks or deleting the bundle's immutable history. It does not
+cancel active work; use the existing release/replan flow for claimed bundles.
+
 See [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md) for runnable
 coordinator-only and bounded-delegation flows, replan recovery, adoption, and delivery
 semantics.
@@ -1643,8 +1652,8 @@ GitHub-specific alias.
 **Synopsis:** Print the paste-ready MCP server config block for a target MCP
 client, with the `anvil` server pointed at this checkout's `bin/anvil-mcp` by
 **absolute path** (not `${CLAUDE_PLUGIN_ROOT}`). Generated config exposes the
-lean 26-tool execution surface by default. Add `ANVIL_MCP_PLANNING=1` to the
-emitted server environment when the client needs all 38 tools. The command is
+lean 27-tool execution surface by default. Add `ANVIL_MCP_PLANNING=1` to the
+emitted server environment when the client needs all 39 tools. The command is
 read-only and project-free (mirrors `anvil describe`):
 it never opens a backend, runs from any directory, and only *prints* config — it
 never mutates the client's own settings file. In text mode the config goes to

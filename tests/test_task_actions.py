@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from anvil.claims.manager import ClaimManager
 from anvil.project_snapshot import read_project_snapshot
-from anvil.state.backend import EventRejected, SchemaMismatch, TransactionAborted
+from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.models import EventDraft, TaskStatus
 from anvil.state.sqlite import SqliteBackend
 from anvil.task_actions import available_task_actions, transition_task
@@ -121,7 +121,7 @@ def test_expired_active_claim_still_requires_custody_reconciliation(board_backen
         _act(board_backend, "close", resolution="cancelled", reason="Stop")
 
 
-def test_schema_22_upgrade_is_additive_and_23_refuses_before_writes(tmp_path, frozen_clock):
+def test_schema_22_and_23_upgrade_is_additive(tmp_path, frozen_clock):
     for version in (22, 23):
         directory = tmp_path / str(version)
         directory.mkdir()
@@ -134,17 +134,13 @@ def test_schema_22_upgrade_is_additive_and_23_refuses_before_writes(tmp_path, fr
         with sqlite3.connect(database) as connection:
             connection.execute("ALTER TABLE tasks DROP COLUMN closure")
             connection.execute(f"PRAGMA user_version = {version}")
-        before = database.read_bytes(), events.read_bytes()
-        if version == 23:
-            with pytest.raises(SchemaMismatch):
-                backend.initialize()
-            assert (database.read_bytes(), events.read_bytes()) == before
-        else:
-            backend.initialize()
-            with sqlite3.connect(database) as connection:
-                assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
-                assert "closure" in {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
-            backend.close()
+        before_log = events.read_bytes()
+        backend.initialize()
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 26
+            assert "closure" in {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+        assert events.read_bytes() == before_log
+        backend.close()
 
 
 def test_generic_status_event_cannot_forge_or_reopen_closed(board_backend):

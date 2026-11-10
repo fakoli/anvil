@@ -35,8 +35,10 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v20     | Transactional claim Git bindings | `claims` and `bundle_claims` add nullable `git_metadata` containing the validated selected base, exact claim-start identity, branch, repository root, and shared/isolated target. Historical claims remain unbound. |
 | v21     | Revision-bound PRD lifecycle | `prds` adds canonical material/content identity and the exact source/material/content lineage reviewed or approved. Pre-v21 review and approval state is preserved in the audit log but demoted to unbound `draft`; Anvil never fabricates proof that historical content was reviewed. |
 | v22     | Coordinated root-set claim binding | `claims` adds nullable immutable owner reservation/request/digest/root facts for coordinated multi-root claims. Historical claim rows remain unbound. |
-| v23     | Reserved bundle-withdraw line | Not supported by this candidate; refused before mutation. |
+| v23     | Pristine bundle withdrawal | Introduces guarded `bundle.withdrawn` events and the terminal `withdrawn` bundle state. |
 | v24     | Kanban closure dispositions | Adds nullable typed `tasks.closure`; non-success closure remains separate from completed dependencies. |
+| v25     | Scoped bundle execution | Adds nullable `bundle_claims.expected_scope_digest` to the winning claim. |
+| v26     | Combined withdrawal and Kanban engine | Integrates v23 withdrawal semantics with v24/v25; fences older readers that cannot understand both lines. |
 
 Canonical PRD titles require no new schema migration: `prds.title` has existed
 since v7. Historical rows and legacy events that have no title remain `""`;
@@ -295,13 +297,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v25, including additive v22→v24 closure and v24→v25 scoped-grant steps) that already lives in
+(currently v26, including the integrated v23 withdrawal, v24 closure and v25 scoped-grant steps) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v25
+Schema migration  : v3 -> v26
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -309,7 +311,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v25.
+Migrated state.db v3 -> v26.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 
@@ -319,16 +321,24 @@ Behaviour:
   accessor (read-only; never migrates as a side effect of detection).
 - **Dry-run by default** — reports `from → to` and exits without touching the
   db. `--yes` applies.
-- **Backs up `state.db`** (and any `-wal`/`-shm` sidecars) to
-  `state.db.pre-schema-migration.bak` before mutating, and refuses to clobber
-  an existing backup from a prior attempt.
-- **Refuses while any claim is active** — same guard as `migrate-events`. A
-  mid-flight agent reads/appends to the projection; migrating it out from under
-  the agent corrupts its next write.
+- **Backs up one consistent SQLite snapshot** to `state.db.pre-schema-migration.bak`.
+  Committed WAL data is included; restoring that database requires no sidecars.
+  Matching `.bak.events.jsonl` and `.bak.config.yaml` files retain the authority log
+  and configuration. Backups are owner-readable and an existing artifact is never
+  overwritten. An integrity check completes before any live migration.
+- **Refuses active task and bundle custody**. Ordinary backend initialization also
+  checks existing custody before any live SQLite open or migration, so updating
+  the executable does not bypass this guard. Expired-but-active rows remain
+  protected until the owning workflow releases them; migration never expires,
+  accepts or force-releases work.
+- **Serializes preflight, backup and apply under the engine event lock**, including
+  replay of a private log copy to check canonical custody. Replay errors are failed
+  gates. A CLI/MCP invocation opens a fresh backend; a previously retained writable
+  backend also checks its schema under the append lock before emitting events.
 - **Idempotent** — once the db is at the current `SCHEMA_VERSION`, re-running is
   a reported no-op that mutates nothing.
 - **`--json`** emits the standard envelope
-  (`{"ok": true, "command": "migrate state", "data": {"from_version", "to_version", "applied", "migrated", "backup"}}`).
+  (`{"ok": true, "command": "migrate state", "data": {"from_version", "to_version", "applied", "migrated", "backup", "backup_artifacts"}}`).
 
 The `replay` escape hatch below remains available; `migrate state` is the
 in-place, row-preserving path, while `replay` rebuilds `state.db` from the audit
@@ -406,11 +416,11 @@ state migrates additively when opened by the native engine. Completed tasks
 remain `accepted`/`done`; non-success closures use `closed` with a disposition,
 reason and actor. A duplicate also records its canonical target task.
 
-The separate schema23 bundle-withdraw line is reserved. **v23→v24 is refused
-before mutation**: this candidate does not contain that line's integration.
-Keep the compatible schema23 reader for that state until its migration and
-replay semantics are explicitly integrated and tested. Do not lower the schema
-marker or initialize a replacement project to bypass this refusal.
+Schema26 integrates the former schema23 withdrawal line. Schema23 upgrades add
+the closure and scoped-claim columns while preserving bundle withdrawal events,
+terminal membership, and claim/evidence history. Migration does not reinterpret
+a withdrawn bundle as completed work. Never lower the schema marker or initialize
+a replacement project to bypass a compatibility refusal.
 
 
 ### v24→v25: scoped execution grants
@@ -421,6 +431,16 @@ and historical acceptance replay are preserved. New digest-bound claims require
 independent members, retain exact project/PRD/member scope, and enforce finalized
 bundle review before member acceptance, including replay.
 
-The supported v22 upgrade proceeds through v24 to v25. The separate schema23
-bundle-withdrawal line remains incompatible: v23→v25 refuses before mutation.
-Do not delete or restamp that State to bypass the refusal.
+### v25→v26: combined engine compatibility
+
+The schema fence advances even though this step adds no columns: a schema25
+reader cannot understand `bundle.withdrawn`. Schema26 supports the complete
+22→23→24→25→26 ladder and refuses future versions before mutation. Old readers
+refuse upgraded State; restart their CLI/MCP service on the released executable
+when convenient, without terminating unrelated model or cloud sessions.
+
+Before fleet promotion, rehearse each distinct State lineage from a protected
+copy. Verify complete projection preservation, unchanged authority-log bytes,
+query-only readback and restoration from the retained backup. A successful
+source release is not evidence that every live State migrated. Keep failed
+replay/custody gates explicit and leave those stores on compatible software.

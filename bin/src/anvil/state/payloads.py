@@ -982,6 +982,45 @@ class BundleSupersededPayload(BaseModel):
         return value.astimezone(datetime.UTC)
 
 
+class BundleWithdrawnPayload(BaseModel):
+    """Irreversibly withdraw an unclaimed, unevidenced planned bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    withdrawn_by_actor: str
+    reason: str
+    withdrawn_at: datetime.datetime
+
+    @field_validator("bundle_id", "creation_event_id", "withdrawn_by_actor")
+    @classmethod
+    def _validate_withdrawal_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle withdrawal fields must not be blank")
+        return value
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_withdrawal_reason(cls, value: str) -> str:
+        if (
+            not value.strip()
+            or len(value.encode("utf-8")) > 4096
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ValueError(
+                "bundle withdrawal reason must be non-empty printable UTF-8 up to 4096 bytes"
+            )
+        return value
+
+    @field_validator("withdrawn_at", mode="after")
+    @classmethod
+    def _validate_withdrawn_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("withdrawn_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
 class BundleMemberClaimPayload(BaseModel):
     """One internal task authorization under a public bundle claim."""
 
@@ -2157,6 +2196,7 @@ __all__ = [
     "BundlePlanAcknowledgedPayload",
     "BundleCheckpointRecordedPayload",
     "BundleSupersededPayload",
+    "BundleWithdrawnPayload",
     "BundleReviewRecordedPayload",
     "BundleStatusChangedPayload",
     "ClaimCreatedPayload",

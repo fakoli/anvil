@@ -1,6 +1,6 @@
 # Anvil concurrency and approval: source findings and bounded measurements
 
-Observed 2026-11-09 America/Los_Angeles. Research only; no policy change or production State mutation. Source: `/data/workspaces/anvil-web-kanban`, base `362c3446edc7ab80919718624bfd95d996634fc6` plus the uncommitted Kanban changes. The benchmark JSON records hashes of the relevant source files, Python 3.11.16, and SQLite 3.53.1.
+Observed 2026-11-09 America/Los_Angeles. Research only; no policy change or production State mutation. Source: an isolated Kanban worktree, base `362c3446edc7ab80919718624bfd95d996634fc6` plus the uncommitted Kanban changes. The benchmark JSON records hashes of the relevant source files, Python 3.11.16, and SQLite 3.53.1.
 
 ## Main finding
 

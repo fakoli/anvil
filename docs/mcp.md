@@ -27,7 +27,8 @@ The toolset is organized by lifecycle phase:
   `update_task_status`)
 - **Execution bundles** (`create_bundle`, `list_bundles`, `get_bundle`, `claim_bundle`,
   `generate_bundle_packet`, `submit_bundle_progress`, `record_bundle_review`,
-  `finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`)
+  `finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`,
+  `withdraw_bundle`)
 - **Review gate** (`apply_review_decision`)
 - **Decision resolution** (`find_decisions`)
 - **Introspection** (`describe_surface`)
@@ -42,7 +43,7 @@ claim path remains usable.
 
 ## Tool surface gating
 
-All 38 tools are registered, but the live stdio server exposes only the **26 execution
+All 39 tools are registered, but the live stdio server exposes only the **27 execution
 tools** on the wire by default — the turn-to-turn loop an agent runs while doing work:
 
 `get_next_task`, `claim_task`, `release_task`, `renew_claim`, `submit_progress`,
@@ -51,7 +52,7 @@ tools** on the wire by default — the turn-to-turn loop an agent runs while doi
 `get_dependency_graph`, `list_bundles`, `get_bundle`, `claim_bundle`,
 `generate_bundle_packet`, `submit_bundle_progress`, `record_bundle_review`,
 `finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`,
-`get_attempt_view`, `read_evidence_preflight`
+`get_attempt_view`, `read_evidence_preflight`, `withdraw_bundle`
 
 The other **12 planning tools** are hidden by default so steady-state execution clients
 never pay their schema cost on every turn:
@@ -61,10 +62,10 @@ never pay their schema cost on every turn:
 `create_bundle`
 
 Set `ANVIL_MCP_PLANNING=1` (any of `1`/`true`/`yes`/`on`) in the server's environment to
-keep all 38 tools on the wire — use it for the planning phase, or run a second server
+keep all 39 tools on the wire — use it for the planning phase, or run a second server
 entry with the flag set. No tool is removed by the gate: introspection surfaces
 (`anvil describe`, the `--help` tool list, the Docker catalog smoke test) always report
-all 38.
+all 39.
 
 ---
 
@@ -960,6 +961,13 @@ Requires `actor` and returns `BundleDetailResponse`. A replacement created after
 source reaches `replan_required` may retain the same member task IDs; supersession reopens
 shared review-state tasks for fresh replacement evidence without deleting prior evidence.
 
+### `withdraw_bundle`
+
+Withdraws a pristine planned `bundle_id`, requiring an explicit coordinator
+`actor` and nonempty `reason`. Refuses bundle or member claim history, member
+evidence, bundle reviews and delivery checkpoints. Returns `BundleDetailResponse`;
+the terminal withdrawal preserves membership, task state and immutable history.
+
 See [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md) for ownership,
 bounded delegation, stalled-worker recovery, review rework, adoption, supersession, and
 delivery examples.
@@ -1549,7 +1557,7 @@ describe` uses — the CLI and MCP surfaces can never disagree — so it never n
 to be initialized. This tool is planning-gated (hidden from the wire unless
 `ANVIL_MCP_PLANNING=1`; see [Tool surface gating](#tool-surface-gating)), but the
 introspection surfaces themselves (`anvil describe`, the `--help` tool list, the Docker
-catalog smoke test) always report the full 38-tool surface regardless of the gate.
+catalog smoke test) always report the full 39-tool surface regardless of the gate.
 
 **Inputs**
 
@@ -1559,15 +1567,15 @@ None.
 
 ```json
 {
-  "api_version": "23",
-  "engine_version": "0.6.20",
-  "display_version": "0.6.20",
+  "api_version": "24",
+  "engine_version": "0.6.21",
+  "display_version": "0.6.21",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.20",
+  "tag": "v0.6.21",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 25,
+  "schema_version": 26,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],
@@ -1649,7 +1657,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.20","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
+{"error":{"code":"schema_mismatch","database_schema":23,"direction":"newer","engine_version":"0.6.21","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":22}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh

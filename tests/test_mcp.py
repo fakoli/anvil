@@ -521,11 +521,11 @@ def _run(coro: Any) -> Any:
 
 
 # ===========================================================================
-# Test: list_tools — all 38 registered (full surface, planning gate off)
+# Test: list_tools — all 39 registered (full surface, planning gate off)
 # ===========================================================================
 
 # The 12 one-shot planning tools, tagged ``planning`` and hidden from the live
-# wire surface by default (L2). The remaining 26 are the always-on execution
+# wire surface by default (L2). The remaining 27 are the always-on execution
 # surface.
 _PLANNING_TOOLS = {
     "init_project", "parse_prd", "assess_prd", "review_prd", "plan_tasks", "score_tasks",
@@ -540,7 +540,7 @@ _EXECUTION_TOOLS = {
     "get_dependency_graph", "update_task_status", "get_project_status",
     "list_bundles", "get_bundle", "claim_bundle", "generate_bundle_packet",
     "submit_bundle_progress", "record_bundle_review", "finalize_bundle_review",
-    "checkpoint_bundle", "reconcile_bundle", "supersede_bundle",
+    "checkpoint_bundle", "reconcile_bundle", "supersede_bundle", "withdraw_bundle",
     "get_attempt_view", "read_evidence_preflight",
 }
 _ALL_TOOLS = _PLANNING_TOOLS | _EXECUTION_TOOLS
@@ -760,7 +760,7 @@ class TestListTools:
 
         names = _run(run())
         assert _ALL_TOOLS <= names, f"Missing tools: {_ALL_TOOLS - names}"
-        assert len(_ALL_TOOLS) == 38
+        assert len(_ALL_TOOLS) == 39
 
 
 # ===========================================================================
@@ -791,7 +791,7 @@ class TestPlanningSurfaceGate:
         assert names.isdisjoint(_PLANNING_TOOLS), (
             f"Planning tools leaked into default surface: {names & _PLANNING_TOOLS}"
         )
-        assert len(names) == 26
+        assert len(names) == 27
 
     def test_env_flag_exposes_full_surface(self) -> None:
         from anvil.mcp_server import apply_surface_gate
@@ -800,7 +800,7 @@ class TestPlanningSurfaceGate:
         assert exposed is True
         names = self._wire_names()
         assert _ALL_TOOLS <= names
-        assert len(names & _ALL_TOOLS) == 38
+        assert len(names & _ALL_TOOLS) == 39
 
     @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "On"])
     def test_truthy_values_enable(self, val: str) -> None:
@@ -821,11 +821,11 @@ class TestPlanningSurfaceGate:
         # Disable twice, then enable, then disable — converges each time.
         apply_surface_gate(mcp, env={})
         apply_surface_gate(mcp, env={})
-        assert len(self._wire_names()) == 26
+        assert len(self._wire_names()) == 27
         apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
-        assert len(self._wire_names() & _ALL_TOOLS) == 38
+        assert len(self._wire_names() & _ALL_TOOLS) == 39
         apply_surface_gate(mcp, env={})
-        assert len(self._wire_names()) == 26
+        assert len(self._wire_names()) == 27
 
     def test_gated_planning_tool_is_uncallable_but_returns_when_enabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -845,7 +845,7 @@ class TestPlanningSurfaceGate:
         with pytest.raises(ToolError):
             _run(call_gated())
 
-        # Enabled: it returns the full 38-tool manifest (introspection is
+        # Enabled: it returns the full 39-tool manifest (introspection is
         # registry-based, so it reports the whole engine surface).
         apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
 
@@ -854,9 +854,9 @@ class TestPlanningSurfaceGate:
                 return _data(await c.call_tool("describe_surface", {}))
 
         manifest = _run(call_enabled())
-        assert manifest["mcp"]["count"] == 38
+        assert manifest["mcp"]["count"] == 39
 
-    def test_registry_still_reports_all_38_when_gated(self) -> None:
+    def test_registry_still_reports_all_39_when_gated(self) -> None:
         # describe/mcp_tool_names introspect the registry, NOT the wire surface,
         # so the documented "full engine surface" never shrinks under the gate.
         from anvil.cli.describe import mcp_tool_names
@@ -865,7 +865,7 @@ class TestPlanningSurfaceGate:
         apply_surface_gate(mcp, env={})
         names = set(mcp_tool_names())
         assert _ALL_TOOLS <= names
-        assert len(names) == 38
+        assert len(names) == 39
 
 
 class TestBundleTools:
@@ -876,6 +876,51 @@ class TestBundleTools:
         _add_task(state_dir, task_id="T001", likely_files=["src/one.py"])
         _add_task(state_dir, task_id="T002", likely_files=["src/two.py"])
         _add_task(state_dir, task_id="T003", likely_files=["src/three.py"])
+
+    def test_withdraw_bundle_mutates_once_and_bounds_bad_identifier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                result = _data(
+                    await client.call_tool(
+                        "withdraw_bundle",
+                        {
+                            "bundle_id": "B001",
+                            "reason": "operator correction",
+                            "actor": "coordinator",
+                        },
+                    )
+                )
+                assert result["bundle"]["status"] == "withdrawn"
+                before = events_path.read_bytes()
+                with pytest.raises(ToolError, match="Bundle identifier is invalid") as exc_info:
+                    await client.call_tool(
+                        "withdraw_bundle",
+                        {
+                            "bundle_id": "x" * 1_048_576,
+                            "reason": "operator correction",
+                            "actor": "coordinator",
+                        },
+                    )
+                assert len(str(exc_info.value)) < 4096
+                assert events_path.read_bytes() == before
+
+        _run(run())
 
     def test_claim_bundle_releases_when_source_changes_during_linearization(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

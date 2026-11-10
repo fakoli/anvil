@@ -42,7 +42,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -129,6 +129,7 @@ from anvil.state.payloads import (
     BundleReviewRecordedPayload,
     BundleStatusChangedPayload,
     BundleSupersededPayload,
+    BundleWithdrawnPayload,
     ClaimCreatedPayload,
     ClaimReleasedPayload,
     ClaimRenewedPayload,
@@ -299,7 +300,18 @@ _BUNDLE_TRANSITIONS: dict[BundleStatus, frozenset[BundleStatus]] = {
     ),
     BundleStatus.completed: frozenset(),
     BundleStatus.superseded: frozenset(),
+    BundleStatus.withdrawn: frozenset(),
 }
+
+_TERMINAL_BUNDLE_STATUS_VALUES = tuple(
+    status.value for status in TERMINAL_BUNDLE_STATUSES
+)
+_TERMINAL_BUNDLE_STATUS_PLACEHOLDERS = ", ".join(
+    "?" for _ in _TERMINAL_BUNDLE_STATUS_VALUES
+)
+_CHECKPOINT_FORBIDDEN_BUNDLE_STATUS_VALUES = frozenset(
+    {BundleStatus.superseded.value, BundleStatus.withdrawn.value}
+)
 
 
 # ``_check_*`` runs in append()'s validation phase and is handed the *draft*
@@ -598,6 +610,67 @@ def _read_schema_from_rollback_snapshot(db_path: Path) -> int:
         raise SchemaProbeFailed(
             "Database schema could not be inspected without mutating live state."
         ) from exc
+
+
+@contextmanager
+def _stable_database_copy(db_path: str | os.PathLike[str]) -> Iterator[Path]:
+    """Copy a stable DB/WAL/journal set without opening live SQLite files.
+
+    Callers hold the event lock. Rechecks detect concurrent checkpoint cleanup
+    by already-open readers; recovery and backup operations stay in scratch.
+    """
+    database = Path(db_path)
+    suffixes = ("", "-wal", "-journal")
+    try:
+        for _ in range(3):
+            captured = {
+                suffix: path.read_bytes()
+                for suffix in suffixes
+                if (path := Path(f"{database}{suffix}")).exists()
+            }
+            if "" not in captured:
+                raise SchemaProbeFailed("Migration database is unavailable.")
+            with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
+                scratch_db = Path(temporary) / "state.db"
+                for suffix, content in captured.items():
+                    Path(f"{scratch_db}{suffix}").write_bytes(content)
+                confirmed = {
+                    suffix: path.read_bytes()
+                    for suffix in suffixes
+                    if (path := Path(f"{database}{suffix}")).exists()
+                }
+                if captured != confirmed:
+                    continue
+                yield scratch_db
+                return
+        raise SchemaProbeFailed(
+            "State changed during migration custody inspection; retry when idle."
+        )
+    except SchemaProbeFailed:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise SchemaProbeFailed(
+            "Migration State could not be inspected without live mutation."
+        ) from exc
+
+
+def _require_idle_schema_upgrade(db_path: str) -> None:
+    """Refuse older State with task or bundle custody before live SQLite open."""
+    database = Path(db_path)
+    if not database.is_file() or database.stat().st_size == 0:
+        return
+    with _stable_database_copy(database) as scratch_db:
+        with closing(sqlite3.connect(scratch_db)) as connection:
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )}
+            for table in ("claims", "bundle_claims"):
+                if table in tables and connection.execute(
+                    f"SELECT 1 FROM {table} WHERE status = 'active' LIMIT 1"
+                ).fetchone() is not None:
+                    raise SchemaProbeFailed(
+                        "Active task or bundle custody prevents schema migration."
+                    )
 
 
 def _wal_checksum(
@@ -1015,7 +1088,7 @@ class SqliteBackend:
         """Refuse incompatible versions before opening live state for writes."""
         if on_disk == SCHEMA_VERSION:
             return
-        if on_disk > SCHEMA_VERSION or on_disk < 0 or on_disk == 23:
+        if on_disk > SCHEMA_VERSION or on_disk < 0:
             raise SchemaMismatch(
                 actual=on_disk,
                 expected=SCHEMA_VERSION,
@@ -1027,10 +1100,7 @@ class SqliteBackend:
         # the ladder before any live DDL so an accidental gap cannot partially
         # reshape an old database and only then fail.
         available_steps = [from_version for from_version, _ in cls._MIGRATIONS]
-        # 23 belongs to the separate bundle-withdrawal engine. The supported
-        # chain upgrades <=22 straight to24; it must never bless that engine's
-        # unknown event semantics merely because its DDL happens to match.
-        required_steps = [version for version in range(2, SCHEMA_VERSION) if version != 23]
+        required_steps = list(range(2, SCHEMA_VERSION))
         if available_steps != required_steps:
             raise SchemaMismatch(
                 actual=on_disk,
@@ -1049,9 +1119,10 @@ class SqliteBackend:
         # compatibility before creating the stable coordination token.  The
         # authoritative probe is repeated under the token below.
         if os.path.exists(self._db_path) and not os.path.exists(self._events_path):
-            self._validate_probed_schema_version(
-                schema_probe(self._db_path)
-            )
+            version = schema_probe(self._db_path)
+            self._validate_probed_schema_version(version)
+            if version != SCHEMA_VERSION:
+                _require_idle_schema_upgrade(self._db_path)
         with _schema_initialization_lock(self._db_path, self._events_path):
             self._initialize_under_lock()
 
@@ -1079,8 +1150,12 @@ class SqliteBackend:
         retry on the next open, instead of looking "already current".
         """
         if self._conn is not None:
-            # Already initialised — verify version and return.
+            # Already initialised — retained backends share the same custody guard.
             try:
+                version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                self._validate_probed_schema_version(version)
+                if version != SCHEMA_VERSION:
+                    _require_idle_schema_upgrade(self._db_path)
                 self._check_schema_version()
             except BaseException:
                 self.close()
@@ -1101,6 +1176,8 @@ class SqliteBackend:
                 "Database schema changed during compatibility inspection; retry when idle."
             )
         self._validate_probed_schema_version(confirmed_version)
+        if confirmed_version != SCHEMA_VERSION:
+            _require_idle_schema_upgrade(self._db_path)
 
         conn: sqlite3.Connection | None = None
         try:
@@ -4380,7 +4457,7 @@ class SqliteBackend:
         # already grew current-shaped tables) still runs that step's helpers:
         # they no-op via duplicate-column tolerance / IF NOT EXISTS, so running
         # the full ordered ladder from ``on_disk`` is always safe.
-        if on_disk > SCHEMA_VERSION or on_disk < 0 or on_disk == 23:
+        if on_disk > SCHEMA_VERSION or on_disk < 0:
             raise SchemaMismatch(
                 actual=on_disk,
                 expected=SCHEMA_VERSION,
@@ -5245,7 +5322,7 @@ class SqliteBackend:
                 raise
 
     def _m_to_v24(self, conn: sqlite3.Connection) -> None:
-        """Supported v22 → v24 jump; v23 State is refused before any DDL."""
+        """v23 → v24: retain an audited non-success task closure."""
         if "closure" not in {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}:
             conn.execute("ALTER TABLE tasks ADD COLUMN closure TEXT")
 
@@ -5254,6 +5331,13 @@ class SqliteBackend:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(bundle_claims)")}
         if "expected_scope_digest" not in columns:
             conn.execute("ALTER TABLE bundle_claims ADD COLUMN expected_scope_digest TEXT")
+    def _m_to_v23(self, conn: sqlite3.Connection) -> None:
+        """v22 -> v23: fence older readers from bundle withdrawal events."""
+        del conn
+
+    def _m_to_v26(self, conn: sqlite3.Connection) -> None:
+        """Fence schema-25 readers that do not understand bundle withdrawal."""
+        del conn
 
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
@@ -5276,8 +5360,10 @@ class SqliteBackend:
         (19, _m_to_v20),
         (20, _m_to_v21),
         (21, _m_to_v22),
-        (22, _m_to_v24),
+        (22, _m_to_v23),
+        (23, _m_to_v24),
         (24, _m_to_v25),
+        (25, _m_to_v26),
     ]
 
     @staticmethod
@@ -5399,6 +5485,14 @@ class SqliteBackend:
                         self._sleep_fn(min(next(delays), remaining))
                 try:
                     _require_no_event_recovery(self._db_path)
+                    # An already-open process must not write after another
+                    # engine has upgraded this State beyond its semantics.
+                    version = self._require_conn().execute("PRAGMA user_version").fetchone()[0]
+                    if version != SCHEMA_VERSION:
+                        raise SchemaMismatch(
+                            actual=version, expected=SCHEMA_VERSION,
+                            direction="newer" if version > SCHEMA_VERSION else "older",
+                        )
                     self._append_lock_depth = 1
                     yield
                 finally:
@@ -6450,6 +6544,11 @@ class SqliteBackend:
                 BundleSupersededPayload,
                 self._check_bundle_superseded,
                 self._write_bundle_superseded,
+            ),
+            "bundle.withdrawn": ActionSpec(
+                BundleWithdrawnPayload,
+                self._check_bundle_withdrawn,
+                self._write_bundle_withdrawn,
             ),
             "bundle.claimed": ActionSpec(
                 BundleClaimedPayload,
@@ -8883,17 +8982,17 @@ class SqliteBackend:
                         "bundle.status_changed: only the coordinator may reopen a plan."
                     )
                 overlap = conn.execute(
-                    """SELECT b.id, m.task_id
+                    f"""SELECT b.id, m.task_id
                          FROM execution_bundle_members source
                          JOIN execution_bundle_members m
                            ON m.task_id = source.task_id
                           AND m.bundle_id != source.bundle_id
                          JOIN execution_bundles b ON b.id = m.bundle_id
                         WHERE source.bundle_id = ?
-                          AND b.status NOT IN ('completed', 'superseded')
+                          AND b.status NOT IN ({_TERMINAL_BUNDLE_STATUS_PLACEHOLDERS})
                         ORDER BY b.id, m.task_id
                         LIMIT 1""",
-                    (payload.bundle_id,),
+                    (payload.bundle_id, *_TERMINAL_BUNDLE_STATUS_VALUES),
                 ).fetchone()
                 if overlap is not None:
                     raise EventRejected(
@@ -9278,16 +9377,16 @@ class SqliteBackend:
             if coordinator is None or event.actor != coordinator[0]:
                 return
             if conn.execute(
-                """SELECT 1
+                f"""SELECT 1
                      FROM execution_bundle_members source
                      JOIN execution_bundle_members other
                        ON other.task_id = source.task_id
                       AND other.bundle_id != source.bundle_id
                      JOIN execution_bundles b ON b.id = other.bundle_id
                     WHERE source.bundle_id = ?
-                      AND b.status NOT IN ('completed', 'superseded')
+                      AND b.status NOT IN ({_TERMINAL_BUNDLE_STATUS_PLACEHOLDERS})
                     LIMIT 1""",
-                (payload.bundle_id,),
+                (payload.bundle_id, *_TERMINAL_BUNDLE_STATUS_VALUES),
             ).fetchone():
                 return
         if payload.to_status in {
@@ -9698,8 +9797,8 @@ class SqliteBackend:
         ).fetchone()
         if row is None or row[0] != payload.creation_event_id:
             raise EventRejected("bundle.checkpoint_recorded: bundle generation not found.")
-        if row[1] == BundleStatus.superseded.value:
-            raise EventRejected("bundle.checkpoint_recorded: bundle is superseded.")
+        if row[1] in _CHECKPOINT_FORBIDDEN_BUNDLE_STATUS_VALUES:
+            raise EventRejected("bundle.checkpoint_recorded: bundle is unavailable.")
         if row[3] != payload.checkpoint.recorded_by:
             raise EventRejected(
                 "bundle.checkpoint_recorded: only the coordinator may checkpoint."
@@ -9738,7 +9837,7 @@ class SqliteBackend:
             or payload.checkpoint.recorded_at != event_time
             or row is None
             or row[0] != payload.creation_event_id
-            or row[1] == BundleStatus.superseded.value
+            or row[1] in _CHECKPOINT_FORBIDDEN_BUNDLE_STATUS_VALUES
             or row[4] != payload.checkpoint.recorded_by
             or datetime.datetime.fromisoformat(row[2]) > event_time
         ):
@@ -9804,6 +9903,126 @@ class SqliteBackend:
             datetime.datetime.fromisoformat(replacement[4]),
         ) > event.timestamp.astimezone(datetime.UTC):
             raise EventRejected("bundle.superseded: supersession predates replacement state.")
+
+    @staticmethod
+    def _check_bundle_withdrawn(
+        conn: sqlite3.Connection,
+        payload: BundleWithdrawnPayload,
+        event: EventDraft,
+    ) -> None:
+        """Allow only a coordinator to withdraw a pristine planned generation."""
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.withdrawn: event target mismatch.")
+        if event.actor != payload.withdrawn_by_actor:
+            raise EventRejected("bundle.withdrawn: event actor mismatch.")
+        if payload.withdrawn_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.withdrawn: withdrawn_at must match event time.")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT creation_event_id, coordinator, status, checkpoint, updated_at "
+                "FROM execution_bundles WHERE id = ?",
+                (payload.bundle_id,),
+            ).fetchone()
+            if row is None or row[0] != payload.creation_event_id:
+                raise EventRejected("bundle.withdrawn: bundle generation not found.")
+            if row[1] != payload.withdrawn_by_actor:
+                raise EventRejected("bundle.withdrawn: only the coordinator may withdraw.")
+            if row[2] != BundleStatus.planned.value:
+                raise EventRejected("bundle.withdrawn: bundle must be planned.")
+            if row[3] is not None:
+                raise EventRejected("bundle.withdrawn: bundle has a delivery checkpoint.")
+            if datetime.datetime.fromisoformat(row[4]) > event.timestamp.astimezone(
+                datetime.UTC
+            ):
+                raise EventRejected("bundle.withdrawn: withdrawal predates bundle state.")
+            if conn.execute(
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ? LIMIT 1",
+                (payload.bundle_id,),
+            ).fetchone():
+                raise EventRejected("bundle.withdrawn: bundle has claim history.")
+            if conn.execute(
+                """SELECT 1 FROM execution_bundle_members m
+                     JOIN evidence e ON e.task_id = m.task_id
+                    WHERE m.bundle_id = ? LIMIT 1""",
+                (payload.bundle_id,),
+            ).fetchone():
+                raise EventRejected("bundle.withdrawn: member tasks have evidence history.")
+            if conn.execute(
+                """SELECT 1 FROM execution_bundle_members m
+                     JOIN claims c ON c.task_id = m.task_id
+                    WHERE m.bundle_id = ? LIMIT 1""",
+                (payload.bundle_id,),
+            ).fetchone():
+                raise EventRejected("bundle.withdrawn: member tasks have claim history.")
+            if conn.execute(
+                "SELECT 1 FROM bundle_review_verdicts WHERE bundle_id = ? LIMIT 1",
+                (payload.bundle_id,),
+            ).fetchone():
+                raise EventRejected("bundle.withdrawn: bundle has review history.")
+        finally:
+            conn.execute("COMMIT")
+
+    @staticmethod
+    def _write_bundle_withdrawn(
+        conn: sqlite3.Connection,
+        payload: BundleWithdrawnPayload,
+        event: Event,
+    ) -> None:
+        """Project a valid withdrawal without changing membership or task state."""
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.withdrawn_by_actor
+            or payload.withdrawn_at != event_time
+        ):
+            return
+        row = conn.execute(
+            "SELECT creation_event_id, coordinator, status, checkpoint, updated_at "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != payload.creation_event_id
+            or row[1] != payload.withdrawn_by_actor
+            or row[2] != BundleStatus.planned.value
+            or row[3] is not None
+            or datetime.datetime.fromisoformat(row[4]) > event_time
+            or conn.execute(
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ? LIMIT 1",
+                (payload.bundle_id,),
+            ).fetchone()
+            or conn.execute(
+                """SELECT 1 FROM execution_bundle_members m
+                     JOIN evidence e ON e.task_id = m.task_id
+                    WHERE m.bundle_id = ? LIMIT 1""",
+                (payload.bundle_id,),
+            ).fetchone()
+            or conn.execute(
+                """SELECT 1 FROM execution_bundle_members m
+                     JOIN claims c ON c.task_id = m.task_id
+                    WHERE m.bundle_id = ? LIMIT 1""",
+                (payload.bundle_id,),
+            ).fetchone()
+            or conn.execute(
+                "SELECT 1 FROM bundle_review_verdicts WHERE bundle_id = ? LIMIT 1",
+                (payload.bundle_id,),
+            ).fetchone()
+        ):
+            return
+        conn.execute(
+            "UPDATE execution_bundles SET status = ?, updated_at = ? "
+            "WHERE id = ? AND creation_event_id = ? AND status = ?",
+            (
+                BundleStatus.withdrawn.value,
+                event_time.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+                BundleStatus.planned.value,
+            ),
+        )
 
     @staticmethod
     def _write_bundle_superseded(
@@ -12524,7 +12743,31 @@ class SqliteBackend:
         try:
             incoming_files = canonical_claim_file_scope(payload.expected_files or [])
         except BundlePlanningError:
-            return
+            # Early standalone claims allowed glob scopes. Dropping those
+            # immutable facts also drops their evidence and breaks later review
+            # replay. Preserve only the pre-binding historical shape; live
+            # append and every modern claim still require portable exact paths.
+            if not self._replaying or payload.model_fields_set.intersection({
+                "actor_input", "generation", "attestation_context", "git_metadata", "root_set",
+            }):
+                return
+            if not all(isinstance(path, str) for path in payload.expected_files):
+                return
+            try:
+                canonical_claim_file_scope(
+                    path.translate(str.maketrans("*?[]", "xxxx"))
+                    for path in payload.expected_files
+                )
+            except BundlePlanningError:
+                return
+            # A historical glob cannot be compared to an exact modern bundle
+            # reservation. Refuse rather than assume their scopes are disjoint.
+            if conn.execute(
+                "SELECT 1 FROM claims WHERE status = 'active' "
+                "AND bundle_claim_id IS NOT NULL LIMIT 1"
+            ).fetchone():
+                return
+            incoming_files = set(payload.expected_files)
         task_group_row = conn.execute(
             "SELECT conflict_groups FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()

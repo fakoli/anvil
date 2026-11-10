@@ -144,7 +144,7 @@ Before creating the tag:
 Until `0.6.1` is published, the currently installed plugin bundle contains the required CLI at pinned commit `9fe02c0`:
 
 ```powershell
-uv run --project 'C:\Users\sdoum\.codex\plugins\cache\anvil\anvil\0.6.0\bin' `
+uv run --project "$env:USERPROFILE\.codex\plugins\cache\anvil\anvil\0.6.0\bin" `
   python -m anvil.cli prd source-name --prd context-agentic-benchmarks
 ```
 

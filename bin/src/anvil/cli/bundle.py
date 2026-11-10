@@ -769,3 +769,29 @@ def supersede_bundle(
         emit_success(command, {"bundle": dump_model(bundle)})
         return
     typer.echo(f"Superseded bundle '{bundle_id}' with '{replacement_bundle_id}'.")
+
+
+@bundle_app.command("withdraw")
+def withdraw_bundle(
+    bundle_id: str,
+    reason: str = typer.Option(..., "--reason"),  # noqa: B008
+    actor: str | None = typer.Option(None, "--actor"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Withdraw a pristine planned bundle while preserving its history."""
+    from anvil.bundles.delivery import BundleDeliveryError
+
+    command = "bundle withdraw"
+    _, backend = _state(cwd, command, json_output)
+    try:
+        _delivery_manager(backend, resolve_actor(actor)).withdraw(bundle_id, reason=reason)
+        bundle = backend.get_bundle(bundle_id)
+    except (BundleDeliveryError, ValueError) as exc:
+        _fail(command, str(exc), json_output)
+    finally:
+        backend.close()
+    if json_output:
+        emit_success(command, {"bundle": dump_model(bundle)})
+        return
+    typer.echo(f"Withdrew pristine bundle '{bundle_id}'.")

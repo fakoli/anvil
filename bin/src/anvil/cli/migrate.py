@@ -25,12 +25,17 @@ projection, and rewriting it out from under the agent corrupts its next write.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import sqlite3
+import time
+from contextlib import closing
 from pathlib import Path
 
 import typer
 
 from anvil.cli._helpers import (
+    BoundedSchemaProbe,
     _open_backend,
     _preflight_schema_compatibility,
     _require_state_dir,
@@ -300,48 +305,48 @@ def migrate_events(
 @migrate_app.command("state", help=_MIGRATE_STATE_HELP)
 def migrate_state(
     yes: bool = typer.Option(  # noqa: B008
-        False,
-        "--yes",
-        help="Apply the migration. Without this flag the command is a dry run.",
+        False, "--yes", help="Apply the migration. Without this flag this is a dry run.",
     ),
     json_output: bool = JSON_OPTION,
 ) -> None:
-    """Upgrade .anvil/state.db to the current engine schema version.
-
-    T009/F006. The ordered, idempotent forward migration chain covers every
-    supported on-disk predecessor through ``SCHEMA_VERSION``. It already lives
-    inside ``SqliteBackend._check_schema_version`` and runs automatically on
-    ``initialize()``. This command promotes that in-init
-    migration to an explicit, backed-up, dry-run-by-default operation — it does
-    NOT add a new migration framework.
-
-    Flow:
-
-    1. Read the TRUE on-disk ``schema_version`` via ``read_db_schema_version``
-       (the T007 accessor) — without migrating.
-    2. If already at ``SCHEMA_VERSION``, report a no-op and exit 0.
-    3. Refuse while any claim is active (same guard as ``migrate-events``): a
-       mid-flight agent reads/writes the projection, and a schema change under
-       it would corrupt its next write.
-    4. Dry-run by default — report the from→to versions and exit. With ``--yes``,
-       copy ``state.db`` to ``state.db.pre-schema-migration.bak`` and then run
-       the existing engine migration by calling ``initialize()`` (which captures
-       the pre-DDL version and runs the forward branches up to ``SCHEMA_VERSION``).
-    """
+    """Preview or apply an idle-State upgrade under the engine's writer lock."""
     from anvil.cli._helpers import BoundedSchemaProbe
-    from anvil.state.backend import SchemaMismatch
-    command = "migrate state"
+    from anvil.state.backend import SchemaProbeFailed
+    from anvil.state.sqlite import SqliteBackend, _schema_initialization_lock
 
     state_dir = _resolve_state_dir(None)
-    _require_state_dir(state_dir, command=command, json_output=json_output)
-
+    _require_state_dir(state_dir, command="migrate state", json_output=json_output)
     db_path = state_dir / "state.db"
-
-    # 1. TRUE on-disk version, read WITHOUT migrating (T007 accessor). A missing
-    #    db reports 0 — there is nothing to migrate, and initialize() would
-    #    create a fresh db already stamped at SCHEMA_VERSION.
+    events_path = state_dir / "events.jsonl"
     schema_probe = BoundedSchemaProbe()
+    try:
+        from_version = schema_probe(db_path)
+        SqliteBackend.validate_schema_compatibility(from_version)
+        if from_version == SCHEMA_VERSION:
+            _migrate_state_locked(state_dir, schema_probe, yes=yes, json_output=json_output)
+            return
+        # A migration must not initialize a competing project or create a missing
+        # authority log. The stable log is also the cross-process writer token.
+        if not db_path.is_file() or not events_path.is_file():
+            raise SchemaProbeFailed("Schema migration requires an existing database and event log.")
+        with _schema_initialization_lock(str(db_path), str(events_path)):
+            _migrate_state_locked(state_dir, schema_probe, yes=yes, json_output=json_output)
+    finally:
+        schema_probe.close()
+
+
+def _migrate_state_locked(
+    state_dir: Path, schema_probe: BoundedSchemaProbe, *, yes: bool, json_output: bool
+) -> None:
+    """Own preflight, backup and apply as one operation against an idle log."""
+    from anvil.state.backend import SchemaMismatch
+    from anvil.state.sqlite import SqliteBackend
+
+    command = "migrate state"
+    db_path = state_dir / "state.db"
+    # Re-probe under the lock: a pre-lock observation cannot authorize writes.
     from_version = schema_probe(db_path)
+    SqliteBackend.validate_schema_compatibility(from_version)
 
     # 2. Already current → idempotent no-op (covers "re-running migrate is a
     #    no-op" once the db has been brought up to SCHEMA_VERSION).
@@ -376,16 +381,8 @@ def migrate_state(
             direction="newer",
         )
 
-    # 3. Active-claim guard (same contract as migrate-events). Open the backend,
-    #    but DO NOT let initialize() migrate yet on a non-dry run path — we open
-    #    via the standalone read above, so opening the backend to list claims
-    #    would already run the migration. Avoid that by querying claims through
-    #    a short-lived read that does not migrate: open in dry-run order.
-    #
-    #    We must list active claims, which requires an initialized backend, and
-    #    initialize() runs the migration. To keep the dry run side-effect-free,
-    #    list claims against a SCRATCH copy of the db so the real db is never
-    #    mutated until --yes.
+    # Replay a private authority-log copy; opening live State here would migrate
+    # before the active task and bundle custody check had completed.
     try:
         active_ids = _active_claim_ids_without_migrating(state_dir, db_path)
     except BaseException:
@@ -405,6 +402,27 @@ def migrate_state(
         raise typer.Exit(code=1)
 
     backup_path = db_path.with_name(db_path.name + _DB_BACKUP_SUFFIX)
+
+    # Retain one SQLite-consistent DB plus the exact authority log/config.
+    # All copies share the event lock with admission and migration. No WAL
+    # sidecars are required to restore the standalone backup database.
+    backup_artifacts = (
+        backup_path,
+        backup_path.with_name(backup_path.name + ".events.jsonl"),
+        backup_path.with_name(backup_path.name + ".config.yaml"),
+    )
+    # Old migration attempts may have retained sidecars under the former format.
+    conflicting_artifacts = (*backup_artifacts, *(
+        backup_path.with_name(backup_path.name + suffix) for suffix in ("-wal", "-shm")
+    ))
+    existing_artifact = next((path for path in conflicting_artifacts if path.exists()), None)
+    if existing_artifact is not None:
+        msg = ("A schema-migration backup artifact already exists; "
+               "retain and reconcile it before retrying.")
+        if json_output:
+            fail(command, msg, code="backup_exists")
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=1)
 
     # 4a. Dry run (default): report and exit, mutating nothing.
     if not yes:
@@ -427,54 +445,32 @@ def migrate_state(
         typer.echo("\nDry run — nothing written. Re-run with --yes to apply.")
         return
 
-    # 4b. Apply (--yes): refuse to clobber a leftover backup, copy state.db, then
-    #     run the existing engine migration by initializing the backend (which
-    #     captures the pre-DDL version and runs the forward branches).
-    if backup_path.exists():
-        schema_probe.close()
-        msg = (
-            f"backup {backup_path} already exists (previous migration "
-            "attempt?). Move it aside before re-running."
-        )
-        if json_output:
-            fail(command, msg, code="backup_exists")
-        typer.echo(f"Error: {msg}", err=True)
-        raise typer.Exit(code=1)
-
-    # Copy the db AND its WAL/SHM sidecars so the backup is a faithful restore
-    # point. Own every absent destination as one cleanup set before the first
-    # copy; a partial copy failure must not strand a backup that blocks retry.
-    backup_artifacts = tuple(
-        backup_path.with_name(backup_path.name + suffix)
-        for suffix in ("", "-wal", "-shm")
-    )
-    existing_artifact = next(
-        (artifact for artifact in backup_artifacts if artifact.exists()), None
-    )
-    if existing_artifact is not None:
-        schema_probe.close()
-        msg = (
-            f"backup artifact {existing_artifact} already exists (previous migration "
-            "attempt?). Move it aside before re-running."
-        )
-        if json_output:
-            fail(command, msg, code="backup_exists")
-        typer.echo(f"Error: {msg}", err=True)
-        raise typer.Exit(code=1)
-
+    created_artifacts: list[Path] = []
     try:
-        shutil.copy2(db_path, backup_path)
-        for sidecar_suffix in ("-wal", "-shm"):
-            sidecar = db_path.with_name(db_path.name + sidecar_suffix)
-            if sidecar.exists():
-                shutil.copy2(
-                    sidecar,
-                    backup_path.with_name(backup_path.name + sidecar_suffix),
-                )
+        # Exclusive creation means cleanup can only remove files this attempt owns.
+        with os.fdopen(os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"):
+            pass
+        created_artifacts.append(backup_path)
+        _backup_database(db_path, backup_path)
+        for original, destination in (
+            (state_dir / "events.jsonl", backup_artifacts[1]),
+            (state_dir / "config.yaml", backup_artifacts[2]),
+        ):
+            if original.exists():
+                with os.fdopen(os.open(
+                    destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                ), "wb") as output:
+                    created_artifacts.append(destination)
+                    with original.open("rb") as source:
+                        shutil.copyfileobj(source, output)
+        from anvil.cli.repair import _fsync_directory, _fsync_file
+
+        for artifact in created_artifacts:
+            _fsync_file(artifact)
+        _fsync_directory(state_dir)
     except BaseException:
-        for artifact in backup_artifacts:
+        for artifact in created_artifacts:
             artifact.unlink(missing_ok=True)
-        schema_probe.close()
         raise
 
     try:
@@ -483,7 +479,7 @@ def migrate_state(
         # Compatibility refusal happens before live mutation. Remove only the
         # backup artifacts created by this attempt, then let the root boundary
         # render the closed path-free diagnostic.
-        for artifact in backup_artifacts:
+        for artifact in created_artifacts:
             artifact.unlink(missing_ok=True)
         raise
 
@@ -501,6 +497,7 @@ def migrate_state(
                 "to_version": to_version,
                 "applied": True,
                 "backup": str(backup_path),
+                "backup_artifacts": [str(path) for path in created_artifacts],
             },
         )
         return
@@ -512,40 +509,53 @@ def migrate_state(
     )
 
 
+def _backup_database(db_path: Path, backup_path: Path) -> None:
+    """Create a bounded SQLite snapshot, including committed WAL contents."""
+    deadline = time.monotonic() + 10.0
+
+    def check_deadline(_status: int, _remaining: int, _total: int) -> None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Timed out creating the schema-migration database backup.")
+
+    from anvil.state.sqlite import _stable_database_copy
+
+    with _stable_database_copy(db_path) as scratch_db:
+        with closing(sqlite3.connect(scratch_db)) as source:
+            with closing(sqlite3.connect(backup_path)) as destination:
+                source.backup(destination, pages=256, progress=check_deadline, sleep=0.01)
+                destination.execute("PRAGMA journal_mode=DELETE")
+                if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise ValueError("Schema-migration backup failed its integrity check.")
+
+
 def _active_claim_ids_without_migrating(state_dir: Path, db_path: Path) -> list[str]:
-    """Return active claim ids, listing them WITHOUT migrating the live state.db.
-
-    The active-claim guard must run on the DRY-RUN path too, but opening the
-    real backend calls ``initialize()`` — which would migrate the live db before
-    the user passed ``--yes``. To keep the dry run side-effect-free we replay the
-    event log into a SCRATCH db (built from the current schema DDL) and list
-    active claims there. The scratch db reflects the same canonical claim state
-    as the live db (both derive from ``events.jsonl``) without touching it.
-
-    If there is no event log yet (a brand-new project), there are no claims.
-    """
-    events_path = state_dir / "events.jsonl"
-    if not events_path.exists():
-        return []
-
+    """Replay a private log copy; never initialize or replay against the live log."""
     import tempfile
 
     from anvil.clock import SystemClock
     from anvil.config import read_events_storage
     from anvil.state.sqlite import SqliteBackend
 
+    events_path = state_dir / "events.jsonl"
+    if not events_path.exists():
+        return []
     with tempfile.TemporaryDirectory() as tmpdir:
-        scratch_db = str(Path(tmpdir) / "scratch.db")
+        scratch_root = Path(tmpdir)
+        scratch_events = scratch_root / "events.jsonl"
+        shutil.copy2(events_path, scratch_events)
         backend = SqliteBackend(
-            db_path=scratch_db,
-            events_path=str(events_path),
+            db_path=str(scratch_root / "scratch.db"),
+            events_path=str(scratch_events),
             clock=SystemClock(),
             events_storage=read_events_storage(state_dir / "config.yaml"),
         )
         backend.initialize()
         try:
-            backend.replay_from_empty(str(events_path))
-            return [c.id for c in backend.list_active_claims()]
+            backend.replay_from_empty(str(scratch_events))
+            return sorted({
+                *(claim.id for claim in backend.list_active_claims()),
+                *(claim.id for claim in backend.list_bundle_claims(status="active")),
+            })
         finally:
             backend.close()
 
