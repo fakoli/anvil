@@ -35,6 +35,8 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v20     | Transactional claim Git bindings | `claims` and `bundle_claims` add nullable `git_metadata` containing the validated selected base, exact claim-start identity, branch, repository root, and shared/isolated target. Historical claims remain unbound. |
 | v21     | Revision-bound PRD lifecycle | `prds` adds canonical material/content identity and the exact source/material/content lineage reviewed or approved. Pre-v21 review and approval state is preserved in the audit log but demoted to unbound `draft`; Anvil never fabricates proof that historical content was reviewed. |
 | v22     | Coordinated root-set claim binding | `claims` adds nullable immutable owner reservation/request/digest/root facts for coordinated multi-root claims. Historical claim rows remain unbound. |
+| v23     | Reserved bundle-withdraw line | Not supported by this candidate; refused before mutation. |
+| v24     | Kanban closure dispositions | Adds nullable typed `tasks.closure`; non-success closure remains separate from completed dependencies. |
 
 Canonical PRD titles require no new schema migration: `prds.title` has existed
 since v7. Historical rows and legacy events that have no title remain `""`;
@@ -293,13 +295,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v22, including the final v21→v22 step) that already lives in
+(currently v25, including additive v22→v24 closure and v24→v25 scoped-grant steps) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v22
+Schema migration  : v3 -> v25
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -307,7 +309,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v22.
+Migrated state.db v3 -> v25.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 
@@ -395,3 +397,30 @@ anvil replay \
 
 Compare the scratch projection before any separately authorized replacement of
 live state; replay itself never performs that replacement.
+
+
+## Schema24: task closure metadata
+
+Schema24 adds nullable closure metadata to task projections. Existing schema22
+state migrates additively when opened by the native engine. Completed tasks
+remain `accepted`/`done`; non-success closures use `closed` with a disposition,
+reason and actor. A duplicate also records its canonical target task.
+
+The separate schema23 bundle-withdraw line is reserved. **v23→v24 is refused
+before mutation**: this candidate does not contain that line's integration.
+Keep the compatible schema23 reader for that state until its migration and
+replay semantics are explicitly integrated and tested. Do not lower the schema
+marker or initialize a replacement project to bypass this refusal.
+
+
+### v24→v25: scoped execution grants
+
+Adds nullable `bundle_claims.expected_scope_digest` to the winning coordinator
+claim projection. Existing claim rows remain unscoped; their sequential workflow
+and historical acceptance replay are preserved. New digest-bound claims require
+independent members, retain exact project/PRD/member scope, and enforce finalized
+bundle review before member acceptance, including replay.
+
+The supported v22 upgrade proceeds through v24 to v25. The separate schema23
+bundle-withdrawal line remains incompatible: v23→v25 refuses before mutation.
+Do not delete or restamp that State to bypass the refusal.

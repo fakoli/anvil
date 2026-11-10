@@ -30,7 +30,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from anvil.claims.conflicts import canonical_claim_file_scope
 from anvil.clock import Clock
+from anvil.planning.inference import BundlePlanningError
 from anvil.state import transitions
 from anvil.state.backend import BackendError
 from anvil.state.models import (
@@ -452,7 +454,7 @@ class ClaimManager:
         for claim in active_claims:
             if claim.claimed_by == self._actor:
                 continue
-            locked_by_others.update(claim.expected_files)
+            locked_by_others.update(canonical_claim_file_scope(claim.expected_files))
 
         if not locked_by_others:
             # No foreign locks at all — the base pick is already safe.
@@ -486,7 +488,7 @@ class ClaimManager:
                 continue
             if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
                 continue
-            if set(task.likely_files) & locked_by_others:
+            if canonical_claim_file_scope(task.likely_files) & locked_by_others:
                 continue
             candidates.append(task)
 
@@ -1418,7 +1420,10 @@ class ClaimManager:
         if not expected_files:
             return []
 
-        files_set = set(expected_files)
+        try:
+            files_set = canonical_claim_file_scope(expected_files)
+        except BundlePlanningError as exc:
+            raise ClaimError(f"Invalid claim file scope: {exc}") from exc
         active_claims = self._backend.list_active_claims()
         warnings: list[ConflictWarning] = []
 
@@ -1430,7 +1435,12 @@ class ClaimManager:
             if active_claim.claimed_by == self._actor:
                 continue
 
-            overlap = sorted(files_set & set(active_claim.expected_files))
+            try:
+                overlap = sorted(
+                    files_set & canonical_claim_file_scope(active_claim.expected_files)
+                )
+            except BundlePlanningError as exc:
+                raise ClaimError(f"Invalid claim file scope: {exc}") from exc
             if overlap:
                 warnings.append(
                     ConflictWarning(

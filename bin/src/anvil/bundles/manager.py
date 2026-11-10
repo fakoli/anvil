@@ -5,11 +5,13 @@ from __future__ import annotations
 import datetime
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from anvil.actors import ActorIdentityError, canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
+from anvil.claims.conflicts import canonical_claim_file_scope
 from anvil.clock import Clock
 from anvil.context.packets import (
     BundleMemberPacketContext,
@@ -18,6 +20,7 @@ from anvil.context.packets import (
     render_bundle_packet,
 )
 from anvil.naming import session_discriminator
+from anvil.planning.inference import BundlePlanningError
 from anvil.review.gates import evaluate_claims, evidence_complete
 from anvil.state.backend import Backend, BackendError
 from anvil.state.models import (
@@ -92,12 +95,12 @@ class BundleManager:
         worktree_path: str | None = None,
         git_metadata: ClaimGitMetadata | None = None,
         pre_log_check: Callable[[], None] | None = None,
+        expected_scope_digest: str | None = None,
     ) -> BundleClaimResult:
         from anvil.roots.registry import (
             RootSetError,
             RootSetRegistry,
             assert_unscoped_claim_allowed,
-            live_claim_append_authorized,
             ordinary_claim_coordinator_held,
         )
 
@@ -111,16 +114,62 @@ class BundleManager:
                     return self.claim(
                         bundle_id, branch=branch, worktree_path=worktree_path,
                         git_metadata=git_metadata, pre_log_check=pre_log_check,
+                        expected_scope_digest=expected_scope_digest,
                     )
             else:
                 pass
         except RootSetError as exc:
             raise BundleError(f"{exc.code}: {exc}") from exc
+        lock_factory = getattr(self._backend, "claim_operation_lock", None)
+        with lock_factory() if lock_factory is not None else nullcontext():
+            return self._claim_locked(
+                bundle_id, branch=branch, worktree_path=worktree_path,
+                git_metadata=git_metadata, pre_log_check=pre_log_check,
+                expected_scope_digest=expected_scope_digest,
+            )
+
+    def _claim_locked(
+        self, bundle_id: str, *, branch: str | None, worktree_path: str | None,
+        git_metadata: ClaimGitMetadata | None, pre_log_check: Callable[[], None] | None,
+        expected_scope_digest: str | None,
+    ) -> BundleClaimResult:
+        from anvil.roots.registry import live_claim_append_authorized
+
+        if expected_scope_digest is not None:
+            from anvil.bundles.execution import (
+                BundleExecutionPlanError,
+                bundle_execution_scope_digest,
+            )
+
+            caller_scope_check = pre_log_check
+
+            def check_scope_before_log() -> None:
+                try:
+                    actual_digest = bundle_execution_scope_digest(self._backend, bundle_id)
+                except BundleExecutionPlanError as exc:
+                    raise BundleError(str(exc)) from exc
+                if actual_digest != expected_scope_digest:
+                    raise BundleError(
+                        "bundle_scope_changed: refresh the execution plan before claiming."
+                    )
+                if caller_scope_check is not None:
+                    caller_scope_check()
+
+            check_scope_before_log()
+            pre_log_check = check_scope_before_log
         bundle = self.preflight(bundle_id)
         tasks = [self._backend.get_task(task_id) for task_id in bundle.task_ids]
         if any(task is None for task in tasks):  # pragma: no cover - preflight
             raise BundleError("Bundle member disappeared after preflight.")
         typed_tasks = [task for task in tasks if task is not None]
+        if expected_scope_digest is not None:
+            member_ids = set(bundle.task_ids)
+            if any(
+                dependency in member_ids for task in typed_tasks for dependency in task.dependencies
+            ):
+                raise BundleError(
+                    "bundle_internal_dependencies: scoped execution requires independent members."
+                )
 
         if any(task.verification.profile is not None for task in typed_tasks):
             caller_check = pre_log_check
@@ -145,9 +194,69 @@ class BundleManager:
                     expected_files.append(path)
         now = self._clock.now()
         claim_id = self._id("BC")
-        member_claims = [
-            {"id": self._id("C"), "task_id": task.id} for task in typed_tasks
-        ]
+        from anvil.claims.progress_attestation import (
+            ProgressAttestationError,
+            capture_claim_progress_context,
+            inspect_local_repository,
+        )
+
+        project = self._backend.get_project()
+        if project is None:
+            raise BundleError("Cannot capture bundle claim context: project not found.")
+        try:
+            if self._project_root is None:
+                raise ProgressAttestationError(
+                    "repository_unavailable", "an explicit project root is required",
+                )
+            repository_snapshot = inspect_local_repository(
+                self._project_root, project_id=project.id,
+            )
+        except ProgressAttestationError as exc:
+            if exc.code not in {"repository_unavailable", "git_unavailable"} or (
+                git_metadata is not None
+            ):
+                raise BundleError(
+                    f"Cannot capture bundle claim context ({exc.code}): {exc}"
+                ) from exc
+            repository_snapshot = None
+        member_claims: list[dict[str, object]] = []
+        for task in typed_tasks:
+            member_id = self._id("C")
+            generation = self._backend.next_claim_generation(task.id)
+            member: dict[str, object] = {
+                "id": member_id, "task_id": task.id, "generation": generation,
+            }
+            if repository_snapshot is None:
+                member_claims.append(member)
+                continue
+            prd = self._backend.get_prd(task.prd_id)
+            if prd is None:
+                raise BundleError("Cannot capture bundle claim context: PRD not found.")
+            try:
+                context = capture_claim_progress_context(
+                    self._project_root,
+                    project_id=project.id,
+                    claim_id=member_id,
+                    claim_generation=generation,
+                    task_id=task.id,
+                    task_snapshot=task,
+                    prd_id=prd.id,
+                    prd_revision=prd.revision,
+                    actor=self._actor,
+                    claim_created_at=now,
+                    expected_paths=task.likely_files,
+                    claim_start_sha=(
+                        git_metadata.claim_start_sha if git_metadata is not None else None
+                    ),
+                    repository_snapshot=repository_snapshot,
+                )
+            except ProgressAttestationError as exc:
+                raise BundleError(
+                    f"Cannot capture bundle claim context ({exc.code}): {exc}"
+                ) from exc
+            else:
+                member["attestation_context"] = context.context_dict()
+            member_claims.append(member)
         draft = EventDraft(
             timestamp=now,
             actor=self._actor,
@@ -174,6 +283,8 @@ class BundleManager:
                     now + datetime.timedelta(minutes=self._lease_minutes)
                 ).isoformat(),
                 "last_heartbeat_at": now.isoformat(),
+                **({"expected_scope_digest": expected_scope_digest}
+                   if expected_scope_digest is not None else {}),
             },
         )
         try:
@@ -258,21 +369,39 @@ class BundleManager:
             for path in task.likely_files:
                 if path not in expected_files:
                     expected_files.append(path)
-        expected_set = set(expected_files)
         bundle_groups = {group for task in tasks for group in task.conflict_groups}
-        for active in self._backend.list_active_claims():
-            active_task = self._backend.get_task(active.task_id)
-            if (
-                active.task_id in members
-                or expected_set.intersection(active.expected_files)
-                or (
-                    active_task is not None
-                    and bundle_groups.intersection(active_task.conflict_groups)
+        try:
+            expected_set = canonical_claim_file_scope(expected_files)
+            if not expected_set and not bundle_groups:
+                # No cross-task scope can overlap. Read custody only for members,
+                # including expired active claims, instead of hydrating the fleet.
+                active_claims = [
+                    claim for task_id in bundle.task_ids
+                    for claim in self._backend.task_action_context(task_id)[0]
+                    if claim.status.value == "active"
+                ]
+            else:
+                active_claims = self._backend.list_active_claims()
+            for active in active_claims:
+                file_overlap = expected_set and expected_set.intersection(
+                    canonical_claim_file_scope(active.expected_files)
                 )
-            ):
-                raise BundleError(
-                    f"Bundle conflicts with active claims: ['{active.id}']."
+                active_task = (
+                    self._backend.get_task(active.task_id) if bundle_groups else None
                 )
+                if (
+                    active.task_id in members
+                    or file_overlap
+                    or (
+                        active_task is not None
+                        and bundle_groups.intersection(active_task.conflict_groups)
+                    )
+                ):
+                    raise BundleError(
+                        f"Bundle conflicts with active claims: ['{active.id}']."
+                    )
+        except BundlePlanningError as exc:
+            raise BundleError(f"Invalid claim file scope: {exc}") from exc
         return bundle
 
     def _require_profile_current(self, task: Task) -> None:
@@ -440,6 +569,7 @@ class BundleManager:
             requirement.id: requirement
             for requirement in self._backend.list_requirements(prd_id=bundle.prd_id)
         }
+        bundle_claim = self._backend.get_bundle_claim(bundle_id)
         contexts: list[BundleMemberPacketContext] = []
         for task_id in bundle.task_ids:
             task = self._backend.get_task(task_id)
@@ -477,10 +607,14 @@ class BundleManager:
                     ],
                     dependencies=dependencies,
                     assumptions=relevant_assumptions(prd, feature),
+                    member_claim=(
+                        self._backend.get_claim(bundle_claim.member_claim_ids[task_id])
+                        if bundle_claim is not None else None
+                    ),
                 )
             )
         return render_bundle_packet(
-            bundle, contexts, bundle_claim=self._backend.get_bundle_claim(bundle_id)
+            bundle, contexts, bundle_claim=bundle_claim
         )
 
     def mark_implemented(self, bundle_id: str) -> BundleReadiness:

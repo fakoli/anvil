@@ -199,6 +199,11 @@ def test_legacy_has_no_profile_reads_or_new_callback(tmp_path, monkeypatch, bund
         pytest.fail("legacy path touched profile files")
 
     monkeypatch.setattr("anvil.verification_profiles._read_file", forbidden)
+    # Even a valid repository cwd and configured backend root do not supply
+    # an explicitly missing manager root or authorize capturing its identity.
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("anvil.claims.progress_attestation.inspect_local_repository", forbidden)
+    monkeypatch.setattr("anvil.claims.progress_attestation.capture_claim_progress_context", forbidden)
     append = backend.append
     seen = []
     calls = []
@@ -215,8 +220,27 @@ def test_legacy_has_no_profile_reads_or_new_callback(tmp_path, monkeypatch, bund
     _manager(backend, None, bundle).claim("B001" if bundle else "release:T003", **kwargs)
     assert seen == [kwargs]
     assert calls == (["guard"] if callback else [])
+    assert all(claim.attestation_context is None for claim in backend.list_active_claims())
     task = backend.get_task("release:T001")
     assert evaluate_claims(task, None, project_root=root).overall == "passed"
+
+
+@pytest.mark.parametrize("profiles", [False, True])
+def test_git_bound_bundle_requires_explicit_root_without_mutation(tmp_path, monkeypatch, profiles):
+    root, state, backend = _setup(tmp_path, monkeypatch, profiles=profiles)
+    metadata = _metadata(root)
+    before = _snapshot(backend, state)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("anvil.claims.progress_attestation.inspect_local_repository",
+                        lambda *args, **kwargs: pytest.fail("inferred missing root"))
+    monkeypatch.setattr("anvil.verification_profiles._read_file",
+                        lambda *args, **kwargs: pytest.fail("read profile without root"))
+    message = "verification profile refused: invalid_path" if profiles else "repository_unavailable"
+    with pytest.raises(BundleError, match=message):
+        _manager(backend, None, True).claim("B001", git_metadata=metadata)
+    assert _snapshot(backend, state) == before
+    assert not backend.list_active_claims()
+    backend.close()
 
 
 def _evidence(task, *, command=None, exit_code=0, category="completion"):

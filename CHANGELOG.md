@@ -6,6 +6,58 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.20] - 2026-11-09
+
+### Added
+
+- Bounded bundle execution plans shared by CLI and web batch claims, with an
+  exact scope digest checked again under the native claim lock.
+- Disposable CLI and web execution journeys covering independent proof intake,
+  competing claims and separate human acceptance.
+- Process contention benchmark separating ledger latency from reader and CLI time.
+- Claim-bound command proof intake for bundle members, with immutable per-member
+  context in work packets and identical coordinator custody checks during replay.
+- Bounded execution-batch pagination, so later cohorts remain accessible in the
+  web UI without projecting every batch on each request.
+- Reproducible command-proof scale qualification and bounded OpenShell worker
+  validation, with exact ownership, resource limits and failure receipts.
+
+### Changed
+
+- Snapshot validation runs on a consistent private capture after releasing live
+  State locks; overlapping web refreshes share one in-flight read.
+- Shorter lock retry intervals reduce avoidable contention stalls. Verified WAL
+  handling preserves corruption checks and reserved-schema refusal.
+- CLI discovery API advances to 23. Schema25 persists scoped bundle grants;
+  schema24 migrates additively, schema22 follows the supported migration chain,
+  and the separately reserved schema23 line remains refused before mutation.
+- Scoped independent batches require finalized bundle review before member
+  acceptance, including replay. Legacy sequential bundle behavior is preserved.
+- Task-history indexing and one-operation Git identity reuse avoid repeated
+  history scans and repository inspection during cohort claims.
+- Equivalent file spellings retain claim exclusion across ordinary claims,
+  bundles and replay; empty-scope preflight reads only member custody.
+
+## [0.6.19] - 2026-11-09
+
+### Added
+
+- Kanban board with visible drag destinations, keyboard-accessible move actions,
+  evidence-bound approval previews and explicit human confirmation.
+- Guarded native `task-action` command and non-success closure dispositions,
+  including duplicate references, recorded as engine events.
+- Bounded synthetic concurrency benchmark and source-based bulk-approval research.
+
+### Changed
+
+- CLI discovery API advances to 22; schema24 adds closure metadata. Schema22
+  migrates additively; the separate schema23 bundle-withdraw line is refused
+  before mutation and requires an explicit integration before upgrade.
+- Strict or preview-bound approval refuses if a required claim verifier or
+  configured strict merge probe cannot run.
+- Web request admission and worker processes are bounded. Custom readers remain
+  read-only; writes require explicit native enrollment and server opt-in.
+
 ## [0.6.18] - 2026-11-09
 
 ### Added

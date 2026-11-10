@@ -91,11 +91,17 @@ Version history
   without that binding is demoted to draft instead of being guessed.
 - v22: root-set claim bindings — root-set claims retain their immutable owner
   reservation/request/digest binding without changing legacy claim rows.
+- v24: audited non-success task closure and guarded task actions. The supported
+  upgrade is v22 → v24; reserved v23 bundle-withdrawal State is incompatible.
+- v25: persisted bundle execution scope on the winning coordinator claim.
+  The nullable additive column preserves unscoped bundle history.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 22
+# 23 is reserved by the separately developed bundle-withdrawal engine. This
+# branch deliberately does not claim its event semantics or migrate its State.
+SCHEMA_VERSION: int = 25
 
 
 def get_schema_version() -> int:
@@ -223,6 +229,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title                TEXT NOT NULL,
     description          TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'proposed',
+    closure              TEXT,
     priority             TEXT NOT NULL DEFAULT 'medium',
     task_type            TEXT NOT NULL DEFAULT 'feature',
     dependencies         TEXT NOT NULL DEFAULT '[]',
@@ -310,6 +317,7 @@ CREATE TABLE IF NOT EXISTS bundle_claims (
     session_id         TEXT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
     member_claim_ids   TEXT NOT NULL DEFAULT '{}',
+    expected_scope_digest TEXT,
     created_at         TEXT NOT NULL,
     lease_expires_at   TEXT NOT NULL,
     last_heartbeat_at  TEXT NOT NULL,
@@ -473,6 +481,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_target_action ON events (target_id, action);
 
 -- ``task_id`` is still NOT NULL: T026 is the data-only phase, so only task-kind
 -- mappings persist. The SyncMapping model accepts an entity_kind='prd'
@@ -507,7 +516,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 22;
+PRAGMA user_version = 25;
 """
 
 

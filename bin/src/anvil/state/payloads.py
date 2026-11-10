@@ -55,6 +55,7 @@ from anvil.state.models import (
     ProofArtifact,
     ReviewDecision,
     RootSetClaimBinding,
+    TaskClosure,
     TaskRejectionProvenance,
 )
 from anvil.timing_receipts import CommandTimingReceipt
@@ -511,6 +512,10 @@ class TaskCreatedPayload(BaseModel):
     description: str = ""
     status: str = "proposed"
     priority: str = "medium"
+    # Replanning may carry an existing audited closure back through the task
+    # upsert. The engine accepts only the exact already-persisted disposition;
+    # this field never authorizes creating a closed task.
+    closure: TaskClosure | None = None
     # T015: defaults to 'feature' so a payload that predates non-feature task
     # types (or any minimal hand-rolled caller) deserialises unchanged.
     task_type: str = "feature"
@@ -703,6 +708,27 @@ class TaskStatusChangedPayload(BaseModel):
     from_status: str = Field(alias="from")
     to_status: str = Field(alias="to")
     reason: str | None = None
+
+
+class TaskTransitionedPayload(BaseModel):
+    """Bounded board transition with transaction-time stale-state protection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    action: Literal["ready", "backlog", "start", "block", "resume"]
+    expected_status: str
+    expected_updated_at: datetime.datetime
+    reason: str | None = Field(default=None, max_length=4096)
+
+
+class TaskClosedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    expected_status: str
+    expected_updated_at: datetime.datetime
+    closure: TaskClosure
 
 
 class TaskDeletedPayload(BaseModel):
@@ -963,6 +989,14 @@ class BundleMemberClaimPayload(BaseModel):
 
     id: str
     task_id: str
+    generation: StrictInt | None = Field(default=None, ge=1)
+    attestation_context: ClaimAttestationContext | None = None
+
+    @model_validator(mode="after")
+    def _context_requires_generation(self) -> BundleMemberClaimPayload:
+        if self.attestation_context is not None and self.generation is None:
+            raise ValueError("bundle member attestation requires an explicit generation")
+        return self
 
 
 class BundleClaimedPayload(BaseModel):
@@ -973,6 +1007,7 @@ class BundleClaimedPayload(BaseModel):
     id: str = Field(min_length=1)
     bundle_id: str = Field(min_length=1)
     creation_event_id: str = Field(min_length=1)
+    expected_scope_digest: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     claimed_by: str = Field(min_length=1)
     branch: str | None = None
     worktree_path: str | None = None
@@ -1443,9 +1478,18 @@ class TaskAppliedPayload(BaseModel):
     # exact engine-derived object validated under the append lock.
     rejection: TaskRejectionProvenance | None = None
     invalidation: AcceptedAttemptInvalidation | None = None
+    expected_evidence_id: str | None = None
+    expected_task_updated_at: datetime.datetime | None = None
+    # Scoped grants require this version and finalized bundle review live and
+    # on replay. Historical unscoped grants retain their original semantics.
+    bundle_review_guard_version: StrictInt | None = Field(default=None, ge=1, le=1)
 
     @model_validator(mode="after")
     def _validate_rejection_shape(self) -> TaskAppliedPayload:
+        if self.bundle_review_guard_version is not None and self.decision != "accepted":
+            raise ValueError("bundle review guard applies only to acceptance")
+        if (self.expected_evidence_id is None) != (self.expected_task_updated_at is None):
+            raise ValueError("review preconditions require both evidence and task version")
         if self.invalidation is not None and (
             self.decision != "rejected" or self.schema_version != 1
             or self.notes != self.invalidation.reason

@@ -9,7 +9,9 @@ import io
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,6 +22,7 @@ from anvil.claims.progress_attestation import (
     ProgressAttestationError,
     canonical_progress_path,
     capture_claim_progress_context,
+    inspect_local_repository,
     load_progress_attestation,
     load_progress_attestation_base64,
     verify_progress_attestation,
@@ -54,9 +57,8 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-def _context(repo: Path) -> ClaimProgressContext:
-    return capture_claim_progress_context(
-        repo,
+def _context(repo: Path, **overrides: Any) -> ClaimProgressContext:
+    arguments = dict(
         project_id="P-1",
         claim_id="CL-1",
         claim_generation=2,
@@ -68,6 +70,8 @@ def _context(repo: Path) -> ClaimProgressContext:
         claim_created_at=_NOW,
         expected_paths=["src\\feature.txt"],
     )
+    arguments.update(overrides)
+    return capture_claim_progress_context(repo, **arguments)
 
 
 def _payload(
@@ -152,6 +156,120 @@ def test_context_round_trip_is_verbatim_state_shape(repo: Path) -> None:
     )
     assert rebound == context
     assert rebound.model_dump() == durable
+
+
+def test_one_repository_snapshot_keeps_member_task_and_file_checks(repo, monkeypatch):
+    import anvil.claims.progress_attestation as module
+
+    expected = _context(repo)
+    calls = []
+    original = module._git_text
+
+    def record_git_text(root, *arguments):
+        calls.append(arguments)
+        return original(root, *arguments)
+
+    monkeypatch.setattr(module, "_git_text", record_git_text)
+    snapshot = inspect_local_repository(repo, project_id="P-1")
+    first = _context(repo, repository_snapshot=snapshot)
+    second = _context(
+        repo, repository_snapshot=snapshot, claim_id="CL-2", task_id="T008",
+        task_snapshot={"id": "T008", "title": "Independent member"},
+    )
+    assert first == expected
+    assert second.claim_start_sha == first.claim_start_sha
+    assert second.task_revision != first.task_revision
+    assert second.claim_id != first.claim_id
+    assert len(calls) == 2  # One identity read plus verified HEAD; no per-member rev-parse.
+    (repo / "src" / "feature.txt").write_bytes(b"changed after inspection\n")
+    with pytest.raises(ProgressAttestationError, match="modified at claim start"):
+        _context(repo, repository_snapshot=snapshot)
+
+
+@pytest.mark.parametrize("mismatch", ["project", "worktree", "type"])
+def test_repository_snapshot_cannot_cross_project_or_worktree(repo, tmp_path, mismatch):
+    snapshot = inspect_local_repository(repo, project_id="P-1")
+    overrides = {"repository_snapshot": snapshot}
+    if mismatch == "project":
+        overrides["project_id"] = "P-2"
+    elif mismatch == "worktree":
+        linked = tmp_path / "linked"
+        _git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+        repo = linked
+    else:
+        overrides["repository_snapshot"] = object()
+    with pytest.raises(ProgressAttestationError) as caught:
+        _context(repo, **overrides)
+    assert caught.value.code == (
+        "repository_snapshot_invalid" if mismatch == "type" else "repository_snapshot_mismatch"
+    )
+
+
+def test_snapshot_still_verifies_explicit_different_start(repo, monkeypatch):
+    import anvil.claims.progress_attestation as module
+
+    earlier = _git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "feature.txt").write_bytes(b"later commit\n")
+    _git(repo, "commit", "-am", "later")
+    snapshot = inspect_local_repository(repo, project_id="P-1")
+    calls = []
+    original = module._git_text
+
+    def record_git_text(root, *arguments):
+        calls.append(arguments)
+        return original(root, *arguments)
+
+    monkeypatch.setattr(module, "_git_text", record_git_text)
+    context = _context(repo, repository_snapshot=snapshot, claim_start_sha=earlier)
+    assert calls == [("rev-parse", "--verify", f"{earlier}^{{commit}}")]
+    assert context.claim_start_sha == earlier
+    assert context.expected_paths[0].baseline_sha256 == hashlib.sha256(b"before\n").hexdigest()
+    with pytest.raises(ProgressAttestationError):
+        _context(repo, repository_snapshot=snapshot, claim_start_sha="0" * 40)
+
+
+def test_grouped_repository_identity_retains_subdirectory_and_unborn_semantics(repo, tmp_path):
+    root_identity = inspect_local_repository(repo, project_id="P-1")
+    nested_identity = inspect_local_repository(repo / "src", project_id="P-1")
+    assert nested_identity.repository_id == root_identity.repository_id
+    assert nested_identity.root == root_identity.root
+    assert nested_identity.head_oid == root_identity.head_oid
+    assert nested_identity.requested_root == (repo / "src").resolve()
+
+    empty = tmp_path / "unborn"
+    empty.mkdir()
+    with pytest.raises(ProgressAttestationError) as non_git:
+        inspect_local_repository(empty, project_id="P-1")
+    assert non_git.value.code == "repository_unavailable"
+    _git(empty, "init")
+    with pytest.raises(ProgressAttestationError) as unborn:
+        inspect_local_repository(empty, project_id="P-1")
+    assert unborn.value.code == "git_verification_failed"
+
+
+@pytest.mark.parametrize("scenario", ["oversized", "stdout_closed_before_exit"])
+def test_bounded_git_worker_stops_oversized_and_stalled_processes(tmp_path, monkeypatch, scenario):
+    import anvil.claims.progress_attestation as module
+
+    processes = []
+    original = subprocess.Popen
+    script = (
+        "import os,time; os.write(1,b'x'*4096); time.sleep(60)"
+        if scenario == "oversized" else
+        "import os,time; os.close(1); time.sleep(60)"
+    )
+
+    def controlled_process(_arguments, **kwargs):
+        process = original([sys.executable, "-c", script], **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(module.subprocess, "Popen", controlled_process)
+    monkeypatch.setattr(module, "GIT_TIMEOUT_SECONDS", .2)
+    with pytest.raises(ProgressAttestationError) as refused:
+        module._run_git(tmp_path, "rev-parse", "HEAD", output_limit=128)
+    assert refused.value.code == ("git_output_limit" if scenario == "oversized" else "git_timeout")
+    assert len(processes) == 1 and processes[0].poll() is not None
 
 
 def test_context_allows_empty_scope_but_no_attestation_can_target_it(

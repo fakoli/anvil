@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> CLI: 91 executable leaf commands.
+> CLI: 93 executable leaf commands.
 
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.18 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.20 (schema 25)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1192,6 +1192,21 @@ claim boundary; drift refuses without a claim, bundle-status change, or Git muta
 JSON output includes the exact coordinator identity plus structured renew, release,
 progress, and complete argv/environment continuations; no task-submit command is emitted.
 
+`--expected-scope-digest SHA256` binds a claim to a previously inspected bundle
+execution plan. Scoped grants require independent members; internal dependency
+edges refuse before custody is acquired. Their member acceptance requires
+finalized bundle review. Legacy unscoped sequential grants retain their existing
+flow. Changes to the project, bundle, owning PRD lineage or selected members
+refuse under the native claim lock. Unrelated task changes do not invalidate it.
+
+### `anvil bundle execution-plan` { #bundle-execution-plan }
+
+`anvil bundle execution-plan B001 --max-workers 8 --json` returns current member
+custody, a scope digest, blockers, counts and an advisory conflict-free dispatch
+wave. It does not spawn workers or accept evidence. Pending review frees worker
+capacity; dependencies still require `done`. The native 500-member ceiling is a
+planning limit, not a measured concurrency guarantee.
+
 ### `anvil bundle renew` { #bundle-renew }
 
 `anvil bundle renew B001` renews the active coordinator lease after stale-claim reaping.
@@ -2073,9 +2088,34 @@ failed commands; it never chooses a successful prefix or trims the buffer.
 
 ## Web interface
 
-`anvil web` starts the native read-only interface using owner-private persisted
+`anvil web` starts the native Kanban interface in read-only mode using owner-private persisted
 enrollment, independent of the launch directory. `anvil web enroll PATH` adds
 an existing project; `anvil web list --json` lists enrollment;
 `anvil web remove ID` removes presentation enrollment only.
 
+Use `anvil web --allow-writes --actor human` to enable confirmed human workflow
+actions for repositories using the installation’s native reader. `--config PATH`
+selects the enrollment catalog; `--port NUMBER` overrides its loopback port.
+Separate readers remain read-only. Each browser move previews the exact task
+and requires confirmation; approval uses the existing strict `apply` gates.
+
 See [web setup, reader compatibility and access limits](how-to/web-interface.md).
+
+## `anvil task-action`
+
+Apply a supported task move directly through the state engine, without a browser
+session or preview. This is the short CLI path for agents and operators:
+
+```sh
+anvil task-action T001 ready --actor human
+anvil task-action T002 close --actor human --resolution duplicate --duplicate-of T001 --reason "Covered by T001"
+```
+
+Actions: `ready`, `backlog`, `start`, `block`, `resume`, `close`. Starting,
+blocking and resuming require the actor’s current claim. Closure requires
+`--reason` and `--resolution`; `duplicate` also requires `--duplicate-of`.
+Resolutions are `duplicate`, `cancelled`, `wont_do`, `obsolete` and
+`cannot_reproduce`. Named-campaign task IDs use `campaign:T001`.
+`--json` returns the resulting task and status. Invalid transitions or custody
+return `transition_refused` without a state change. Claim acquisition, evidence
+submission and human acceptance still use `claim`, `submit` and `apply`.

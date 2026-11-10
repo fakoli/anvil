@@ -61,6 +61,47 @@ def test_legacy_exact_serialization(repository):
     require_profile_current(legacy, repository)
 
 
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="O_PATH is unavailable")
+def test_search_only_ancestors_preserve_leaf_read_permissions(repository):
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses ordinary file read permissions")
+    ref = reference(repository)
+    expected = resolve_profile(repository, ref)
+    tools = repository / "tools"
+    source = tools / "verify.py"
+    tools.chmod(0o111)
+    try:
+        assert resolve_profile(repository, ref) == expected
+        source.chmod(0)
+        with pytest.raises(ProfileError, match="file_unavailable"):
+            resolve_profile(repository, ref)
+    finally:
+        tools.chmod(0o755)
+        source.chmod(0o644)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory descriptors")
+def test_directory_anchors_work_without_o_path(repository, monkeypatch):
+    ref = reference(repository)
+    expected = resolve_profile(repository, ref)
+    # The fallback retains ordinary directory-read permission requirements.
+    readable_ancestors = True
+    for directory in (repository / "tools", repository, *repository.parents):
+        try:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except PermissionError:
+            readable_ancestors = False
+            break
+        else:
+            os.close(descriptor)
+    monkeypatch.delattr(os, "O_PATH", raising=False)
+    if readable_ancestors:
+        assert resolve_profile(repository, ref) == expected
+    else:
+        with pytest.raises(ProfileError, match="file_unavailable"):
+            resolve_profile(repository, ref)
+
+
 @pytest.mark.parametrize("platform", ["linux", "darwin", "windows"])
 def test_deterministic_immutable_binding(repository, platform):
     ref = reference(repository, platform=platform)

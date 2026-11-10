@@ -353,18 +353,46 @@ def capture_claim_progress_context(
     claim_created_at: dt.datetime,
     expected_paths: Sequence[str],
     claim_start_sha: str | None = None,
+    repository_snapshot: _LocalRepository | None = None,
 ) -> ClaimProgressContext:
-    """Capture immutable claim-start Git, task, and expected-path identities."""
-    local = _local_repository(project_root, project_id=project_id)
+    """Capture immutable claim-start Git, task, and expected-path identities.
+
+    A bundle coordinator may reuse one ``inspect_local_repository`` result for
+    members of the same synchronous, locked claim operation. Its captured HEAD
+    is the common baseline, not a cache of current HEAD. Each member still
+    captures its own task identity and checks its expected paths afresh.
+    """
+    if repository_snapshot is None:
+        local = _local_repository(project_root, project_id=project_id)
+    else:
+        if not isinstance(repository_snapshot, _LocalRepository):
+            raise ProgressAttestationError(
+                "repository_snapshot_invalid", "repository snapshot is invalid"
+            )
+        try:
+            requested = Path(project_root).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ProgressAttestationError(
+                "repository_unavailable", "project repository path is unavailable"
+            ) from exc
+        if (
+            requested != repository_snapshot.requested_root
+            or project_id != repository_snapshot.project_id
+        ):
+            raise ProgressAttestationError(
+                "repository_snapshot_mismatch", "repository snapshot belongs to another project"
+            )
+        local = repository_snapshot
     planned_start = claim_start_sha or local.head_oid
     _validate_oid(planned_start, local.object_format)
-    resolved_start = _git_text(
-        local.root, "rev-parse", "--verify", f"{planned_start}^{{commit}}"
-    )
-    if resolved_start != planned_start:
-        raise ProgressAttestationError(
-            "claim_start_invalid", "planned claim start does not resolve exactly"
+    if planned_start != local.head_oid:
+        resolved_start = _git_text(
+            local.root, "rev-parse", "--verify", f"{planned_start}^{{commit}}"
         )
+        if resolved_start != planned_start:
+            raise ProgressAttestationError(
+                "claim_start_invalid", "planned claim start does not resolve exactly"
+            )
     paths = _canonical_expected_paths(expected_paths)
     baselines = tuple(
         PathBaseline(
@@ -627,6 +655,8 @@ def verify_progress_attestation(
 
 @dataclass(frozen=True, slots=True)
 class _LocalRepository:
+    requested_root: Path
+    project_id: str
     root: Path
     common_dir: Path
     object_format: Literal["sha1", "sha256"]
@@ -766,7 +796,14 @@ def _local_repository(project_root: Path, *, project_id: str) -> _LocalRepositor
             "repository_unavailable", "project repository path is unavailable"
         ) from exc
     try:
-        top = Path(_git_text(requested, "rev-parse", "--show-toplevel")).resolve(strict=True)
+        identity_fields = _git_text(
+            requested, "rev-parse", "--path-format=absolute", "--show-toplevel",
+            "--git-common-dir", "--show-object-format",
+        ).splitlines()
+        if len(identity_fields) != 3:
+            raise ProgressAttestationError("git_output_invalid", "Git identity is ambiguous")
+        top_raw, common_raw, object_format = identity_fields
+        top = Path(top_raw).resolve(strict=True)
     except ProgressAttestationError as exc:
         if exc.code != "git_verification_failed":
             raise
@@ -777,7 +814,6 @@ def _local_repository(project_root: Path, *, project_id: str) -> _LocalRepositor
         raise ProgressAttestationError(
             "repository_unavailable", "Git worktree root is unavailable"
         ) from exc
-    common_raw = _git_text(top, "rev-parse", "--path-format=absolute", "--git-common-dir")
     common_path = Path(common_raw)
     if not common_path.is_absolute():
         common_path = top / common_path
@@ -787,7 +823,6 @@ def _local_repository(project_root: Path, *, project_id: str) -> _LocalRepositor
         raise ProgressAttestationError(
             "repository_unavailable", "Git common directory is unavailable"
         ) from exc
-    object_format = _git_text(top, "rev-parse", "--show-object-format")
     if object_format not in {"sha1", "sha256"}:
         raise ProgressAttestationError("git_object_format", "unsupported Git object format")
     head = _git_text(top, "rev-parse", "--verify", "HEAD^{commit}")
@@ -803,6 +838,8 @@ def _local_repository(project_root: Path, *, project_id: str) -> _LocalRepositor
         max_string_bytes=8_192,
     )
     return _LocalRepository(
+        requested_root=requested,
+        project_id=project_id,
         root=top,
         common_dir=common,
         object_format=object_format,
@@ -873,27 +910,29 @@ def _run_git(
                 if not chunk:
                     break
                 output.extend(chunk)
+            if len(output) <= output_limit:
+                # Wait in the bounded worker: Popen.wait(timeout=...) otherwise
+                # polls with sleeps on POSIX, adding latency to every Git read.
+                process.wait()
         except BaseException as exc:  # pragma: no cover - OS pipe failure
             problem.append(exc)
 
     reader = threading.Thread(target=read_stdout, daemon=True)
     reader.start()
-    try:
-        return_code = process.wait(timeout=GIT_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as exc:
+    reader.join(timeout=GIT_TIMEOUT_SECONDS)
+    if reader.is_alive():
         process.kill()
         process.wait()
         reader.join(timeout=1)
-        raise ProgressAttestationError("git_timeout", "Git verification timed out") from exc
-    reader.join(timeout=1)
-    if reader.is_alive():
+        raise ProgressAttestationError("git_timeout", "Git verification timed out")
+    if problem or len(output) > output_limit:
         process.kill()
-        raise ProgressAttestationError("git_timeout", "Git output did not close")
+        process.wait()
     if problem:
         raise ProgressAttestationError("git_unavailable", "cannot read Git output") from problem[0]
     if len(output) > output_limit:
         raise ProgressAttestationError("git_output_limit", "Git output exceeds the verifier limit")
-    if return_code not in accepted_codes:
+    if process.returncode not in accepted_codes:
         raise ProgressAttestationError("git_verification_failed", "Git verification failed")
     return bytes(output)
 
@@ -1100,7 +1139,7 @@ def _hash_contained_regular_file(root: Path, portable_path: str) -> str | None:
 
 
 def _hash_file_posix(root: Path, portable_path: str) -> str | None:
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0)
     for name in ("O_CLOEXEC", "O_NOFOLLOW"):
         directory_flags |= getattr(os, name, 0)
     file_flags = os.O_RDONLY

@@ -228,7 +228,12 @@ def test_profiled_bundle_selected_state_final_guard_and_public_shared_frontier(t
         for member in public["members"]:
             claim = claims[member["current"]["claim"]["id"]]
             assert claim.bundle_claim_id == backend.get_bundle_claim("B001").id
-            assert claim.attestation_context is None
+            creation = next(item for item in draft.payload_json["member_claims"] if item["id"] == claim.id)
+            assert claim.attestation_context is not None
+            assert claim.attestation_context.model_dump(mode="json") == creation["attestation_context"]
+            assert claim.generation == creation["generation"]
+            for field in ("repository_id", "claim_start_sha", "prd_id", "prd_revision", "task_revision"):
+                assert member["current"]["claim"]["proof_attribution"][field] == getattr(claim.attestation_context, field)
             assert member["task"]["verification"] == backend.get_task(claim.task_id).verification.model_dump(mode="json")
         assert public["custody"]["runner_stop"] == "unknown"
         assert public["source_delivery"]["deployed"] == "unknown"

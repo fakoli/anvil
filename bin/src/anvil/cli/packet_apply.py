@@ -361,14 +361,16 @@ def _claim_verdict_block(
     task: object,
     evidence: object,
     cwd: Path | None,
+    *,
+    require_success: bool = False,
 ) -> object:
     """GateVerdict for tasks that declare an evidence CONTRACT, else None.
 
     evidence-contracts:T005 — the contract surface is task.claims or
     artifact_assertions (auto-strict per the locked decision); command-
     proof-only tasks keep the advisory/strict_evidence behavior. The gate
-    is total by design; a crash here is a bug and fails OPEN with a loud
-    stderr warning (merge-check precedent) so apply is never bricked.
+    remains advisory for informational calls. Strict or preview-bound approval
+    must refuse when its required verifier cannot run.
     """
     has_contract = bool(
         getattr(task, "claims", None)
@@ -388,7 +390,9 @@ def _claim_verdict_block(
 
         project_root = (cwd or Path.cwd()).resolve()
         return evaluate_claims(task, evidence, project_root=project_root)
-    except Exception:  # noqa: BLE001 — never brick apply on a gate bug
+    except Exception as exc:  # noqa: BLE001 — preserve advisory reporting
+        if require_success:
+            raise RuntimeError("Required claim verification could not run.") from exc
         typer.echo(
             "Warning: claim gate could not run (internal error); "
             "contract enforcement skipped for this call.",
@@ -1301,6 +1305,14 @@ def apply(
             "> default (advisory). --reject is never affected."
         ),
     ),
+    expected_evidence_id: str | None = typer.Option(  # noqa: B008
+        None, "--expected-evidence-id", hidden=True,
+        help="Require the exact evidence attempt shown in the review preview.",
+    ),
+    expected_task_updated_at: str | None = typer.Option(  # noqa: B008
+        None, "--expected-task-updated-at", hidden=True,
+        help="Require the exact task revision shown in the review preview.",
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1340,6 +1352,33 @@ def apply(
     the gate is shown but approval proceeds.
     """
     import os
+
+    preview_updated_at: datetime.datetime | None = None
+    if expected_evidence_id is not None or expected_task_updated_at is not None:
+        try:
+            if (
+                expected_evidence_id is None
+                or not expected_evidence_id.strip()
+                or len(expected_evidence_id) > 255
+                or any(ord(character) < 32 for character in expected_evidence_id)
+                or expected_task_updated_at is None
+                or approve == reject
+                or invalidation_preview
+                or invalidate_accepted is not None
+            ):
+                raise ValueError
+            preview_updated_at = datetime.datetime.fromisoformat(expected_task_updated_at)
+            if preview_updated_at.tzinfo is None:
+                raise ValueError
+        except ValueError:
+            message = (
+                "Review preview requires --expected-evidence-id and a timezone-aware "
+                "--expected-task-updated-at together with --approve or --reject."
+            )
+            if json_output:
+                fail("apply", message, code="bad_request")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from None
 
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="apply", json_output=json_output)
@@ -1399,6 +1438,19 @@ def apply(
                 fail("apply", f"task '{task_id}' not found.", code="not_found")
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
             raise typer.Exit(code=1)
+
+        if preview_updated_at is not None:
+            preview_evidence = backend.get_latest_evidence(task_id)
+            if (
+                task.updated_at != preview_updated_at
+                or preview_evidence is None
+                or preview_evidence.id != expected_evidence_id
+            ):
+                message = "The task or evidence changed after preview; review it again."
+                if json_output:
+                    fail("apply", message, code="stale_preview")
+                typer.echo(f"Error: {message}", err=True)
+                raise typer.Exit(code=1)
 
         if invalidation_preview or invalidate_accepted is not None:
             from anvil.clock import SystemClock
@@ -1469,6 +1521,14 @@ def apply(
             )
             raise typer.Exit(code=1)
 
+        if approve:
+            bundle_blocker = backend.bundle_member_acceptance_blocker(task_id)
+            if bundle_blocker is not None:
+                if json_output:
+                    fail("apply", bundle_blocker, code="bundle_review_required")
+                typer.echo(f"Error: {bundle_blocker}", err=True)
+                raise typer.Exit(code=1)
+
         # retro-opps T007 — cheap base-freshness probe alongside the evidence
         # gate. Computed once for review-only AND --approve; --reject is never
         # affected (rejecting a stale branch is exactly the right move).
@@ -1480,13 +1540,26 @@ def apply(
 
         # evidence-contracts:T005 — per-claim contract verdict, computed once
         # for review-only AND --approve; --reject is never affected.
-        contract_verdict = (
-            _claim_verdict_block(
-                task, backend.get_latest_evidence(task_id), cwd
-            )
-            if not reject
-            else None
+        require_verification = approve and (
+            preview_updated_at is not None or _resolve_strict_evidence(strict, state_dir)
         )
+        try:
+            if require_verification and merge_mode == "strict" and merge_block is None:
+                raise RuntimeError("Required merge verification could not run.")
+            contract_verdict = (
+                _claim_verdict_block(
+                    task, backend.get_latest_evidence(task_id), cwd,
+                    require_success=require_verification,
+                )
+                if not reject
+                else None
+            )
+        except RuntimeError as exc:
+            message = f"{exc} Task remains in needs_review."
+            if json_output:
+                fail("apply", message, code="verifier_unavailable")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from exc
 
         # evidence-contracts:T008 — advisory intent linter, same lifecycle as
         # the verdict (review-only + approve, never on reject). Never gates.
@@ -1786,10 +1859,17 @@ def apply(
             "decision": decision,
             "notes": reason,
         }
+        if preview_updated_at is not None:
+            payload["expected_evidence_id"] = expected_evidence_id
+            payload["expected_task_updated_at"] = preview_updated_at.isoformat()
         if approve:
-            current_attempt = backend.get_latest_evidence(task_id)
-            if current_attempt is not None:
-                payload["review_attempt_id"] = current_attempt.id
+            payload["bundle_review_guard_version"] = 1
+            if expected_evidence_id is not None:
+                payload["review_attempt_id"] = expected_evidence_id
+            else:
+                current_attempt = backend.get_latest_evidence(task_id)
+                if current_attempt is not None:
+                    payload["review_attempt_id"] = current_attempt.id
         rejection_provenance: TaskRejectionProvenance | None = None
         if reject:
             from anvil.state.backend import EventRejected
@@ -1815,7 +1895,17 @@ def apply(
             target_id=task_id,
             payload_json=payload,
         )
-        applied_event = backend.append(draft)
+        from anvil.state.backend import EventRejected
+
+        try:
+            applied_event = backend.append(draft)
+        except EventRejected as exc:
+            if preview_updated_at is None:
+                raise
+            if json_output:
+                fail("apply", str(exc), code="review_refused")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from None
 
         # B48 part 2: on acceptance, emit a portable signed AcceptanceProof.
         # Best-effort and file-only (never blocks the accept, never touches

@@ -178,7 +178,7 @@ class TestVerification:
 
 class TestTaskStatusEnum:
     def test_task_status_enum_values_count(self) -> None:
-        """All 11 task statuses are present."""
+        """All 12 task statuses are present."""
         expected = {
             "proposed",
             "drafted",
@@ -191,6 +191,7 @@ class TestTaskStatusEnum:
             "accepted",
             "done",
             "rejected",
+            "closed",
         }
         actual = {s.value for s in TaskStatus}
         assert actual == expected

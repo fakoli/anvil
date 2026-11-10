@@ -51,6 +51,8 @@ from pydantic import BaseModel
 from anvil import signing
 from anvil.actors import canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
+from anvil.claims.conflicts import canonical_claim_file_scope
+from anvil.planning.inference import BundlePlanningError
 from anvil.state.backend import (
     BackendError,  # noqa: F401
     EventRejected,
@@ -149,6 +151,7 @@ from anvil.state.payloads import (
     SyncMappingDeletedPayload,
     SyncMappingUpsertedPayload,
     TaskAppliedPayload,
+    TaskClosedPayload,
     TaskCreatedPayload,
     TaskDeletedPayload,
     TaskDependenciesBatchEditedPayload,
@@ -156,6 +159,7 @@ from anvil.state.payloads import (
     TaskScoredPayload,
     TaskStatusChangedPayload,
     TaskSyncedFromRemotePayload,
+    TaskTransitionedPayload,
 )
 from anvil.state.schema import DDL, SCHEMA_VERSION
 
@@ -409,16 +413,19 @@ def _idempotent_no_op(
 
 # Overall contention budget matches SQLite's busy_timeout (5 s).
 _FLOCK_TIMEOUT_S = 5.0
-_FLOCK_BACKOFF_INITIAL_S = 0.010
-_FLOCK_BACKOFF_CAP_S = 0.500
+_FLOCK_BACKOFF_INITIAL_S = 0.001
+_FLOCK_BACKOFF_CAP_S = 0.002
 _FLOCK_BACKOFF_JITTER = 0.10
 
 
 def _flock_backoff_delays(
     rand: Callable[[], float] = random.random,
 ) -> Iterator[float]:
-    """Yield flock retry delays: exponential from 10 ms to a 500 ms cap, ±10% jitter.
+    """Yield flock retry delays: exponential from 1 ms to a 2 ms cap, ±10% jitter.
 
+    A short first retry avoids adding 10 ms to a sub-millisecond write. Slow
+    holders still back off to the bounded cap rather than polling continuously.
+    The short cap avoids half-second stalls while other workers keep committing.
     Fixed-interval polling starves late arrivals under a coordinated
     multi-agent wave: every waiter wakes on the same tick, the same few
     claimants win repeatedly, and the rest burn their whole 5 s budget in
@@ -600,9 +607,8 @@ def _wal_checksum(
     if len(content) % 8:
         raise SchemaProbeFailed("WAL checksum input is not 8-byte aligned.")
     s0, s1 = seed
-    for offset in range(0, len(content), 8):
-        first = int.from_bytes(content[offset : offset + 4], byteorder)
-        second = int.from_bytes(content[offset + 4 : offset + 8], byteorder)
+    byte_format = {"little": "<II", "big": ">II"}[byteorder]
+    for first, second in struct.iter_unpack(byte_format, content):
         s0 = (s0 + first + s1) & 0xFFFFFFFF
         s1 = (s1 + second + s0) & 0xFFFFFFFF
     return s0, s1
@@ -616,8 +622,35 @@ def _schema_version_from_database_bytes(database_header: bytes) -> int:
     return int.from_bytes(database_header[60:64], "big")
 
 
+class _VerifiedWalPrefix(NamedTuple):
+    content: bytes
+    checksum: tuple[int, int]
+    latest_page_one: bytes | None
+    committed_page_one: bytes | None
+
+
+_WAL_SCHEMA_PREFIX_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_WAL_SCHEMA_PREFIX_CACHE: _VerifiedWalPrefix | None = None
+_WAL_SCHEMA_PREFIX_CACHE_LOCK = threading.Lock()
+
+
 def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
-    """Return committed ``user_version`` by replaying only WAL page-1 frames."""
+    """Read committed ``user_version``, reusing only byte-identical verified frames.
+
+    One bounded immutable prefix avoids checksumming the same WAL again under
+    the event lock after the initial outside-lock probe. Every call still reads
+    the current bytes and compares the entire prefix, including header/salts.
+    No file identity, timestamp, size, path, or digest grants cache reuse.
+    """
+    global _WAL_SCHEMA_PREFIX_CACHE
+    with _WAL_SCHEMA_PREFIX_CACHE_LOCK:
+        verified_prefix = _WAL_SCHEMA_PREFIX_CACHE
+        if (
+            verified_prefix is not None
+            and not wal_content.startswith(verified_prefix.content)
+        ):
+            _WAL_SCHEMA_PREFIX_CACHE = None
+            verified_prefix = None
     main_version = _schema_version_from_database_bytes(database_header)
     if not wal_content:
         return main_version
@@ -642,6 +675,11 @@ def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
     latest_page_one: bytes | None = None
     committed_page_one: bytes | None = None
     offset = 32
+    if verified_prefix is not None:
+        running = verified_prefix.checksum
+        latest_page_one = verified_prefix.latest_page_one
+        committed_page_one = verified_prefix.committed_page_one
+        offset = len(verified_prefix.content)
     while offset + frame_size <= len(wal_content):
         header = wal_content[offset : offset + 24]
         page = wal_content[offset + 24 : offset + frame_size]
@@ -650,19 +688,29 @@ def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
         )
         if (frame_salt1, frame_salt2) != (salt1, salt2):
             break
-        running = _wal_checksum(
+        frame_checksum = _wal_checksum(
             header[:8] + page,
             byteorder=checksum_byteorder,
             seed=running,
         )
-        if running != (stored1, stored2):
+        if frame_checksum != (stored1, stored2):
             break
+        running = frame_checksum
         if page_number == 1:
             latest_page_one = page
         if database_size:
             committed_page_one = latest_page_one
         offset += frame_size
 
+    # Ignore an invalid/incomplete tail, exactly as SQLite does. Only complete,
+    # checksum-verified frames enter the cache; the tail must be checked again.
+    with _WAL_SCHEMA_PREFIX_CACHE_LOCK:
+        _WAL_SCHEMA_PREFIX_CACHE = (
+            _VerifiedWalPrefix(
+                wal_content[:offset], running, latest_page_one, committed_page_one,
+            )
+            if offset <= _WAL_SCHEMA_PREFIX_CACHE_MAX_BYTES else None
+        )
     if committed_page_one is None:
         return main_version
     return _schema_version_from_database_bytes(committed_page_one[:100])
@@ -967,7 +1015,7 @@ class SqliteBackend:
         """Refuse incompatible versions before opening live state for writes."""
         if on_disk == SCHEMA_VERSION:
             return
-        if on_disk > SCHEMA_VERSION or on_disk < 0:
+        if on_disk > SCHEMA_VERSION or on_disk < 0 or on_disk == 23:
             raise SchemaMismatch(
                 actual=on_disk,
                 expected=SCHEMA_VERSION,
@@ -979,7 +1027,10 @@ class SqliteBackend:
         # the ladder before any live DDL so an accidental gap cannot partially
         # reshape an old database and only then fail.
         available_steps = [from_version for from_version, _ in cls._MIGRATIONS]
-        required_steps = list(range(2, SCHEMA_VERSION))
+        # 23 belongs to the separate bundle-withdrawal engine. The supported
+        # chain upgrades <=22 straight to24; it must never bless that engine's
+        # unknown event semantics merely because its DDL happens to match.
+        required_steps = [version for version in range(2, SCHEMA_VERSION) if version != 23]
         if available_steps != required_steps:
             raise SchemaMismatch(
                 actual=on_disk,
@@ -3309,6 +3360,22 @@ class SqliteBackend:
         ).fetchall()
         return [self._row_to_claim(row) for row in rows]
 
+    def task_action_context(self, task_id: str) -> tuple[list[Claim], bool]:
+        """Read only the selected task's custody, including expired active leases."""
+        conn = self._require_conn()
+        claims = [self._row_to_claim(row) for row in conn.execute(
+            "SELECT * FROM claims WHERE task_id = ?", (task_id,),
+        )]
+        terminal = tuple(str(status) for status in TERMINAL_BUNDLE_STATUSES)
+        placeholders = ",".join("?" for _ in terminal)
+        bundle_owned = conn.execute(
+            "SELECT 1 FROM execution_bundle_members AS members "
+            "JOIN execution_bundles AS bundles ON bundles.id = members.bundle_id "
+            f"WHERE members.task_id = ? AND bundles.status NOT IN ({placeholders}) LIMIT 1",
+            (task_id, *terminal),
+        ).fetchone() is not None
+        return claims, bundle_owned
+
     def list_reviews(self) -> list[Review]:
         """Return all Review rows sorted by id ASC.
 
@@ -4313,7 +4380,7 @@ class SqliteBackend:
         # already grew current-shaped tables) still runs that step's helpers:
         # they no-op via duplicate-column tolerance / IF NOT EXISTS, so running
         # the full ordered ladder from ``on_disk`` is always safe.
-        if on_disk > SCHEMA_VERSION or on_disk < 0:
+        if on_disk > SCHEMA_VERSION or on_disk < 0 or on_disk == 23:
             raise SchemaMismatch(
                 actual=on_disk,
                 expected=SCHEMA_VERSION,
@@ -5177,6 +5244,17 @@ class SqliteBackend:
             if "duplicate column" not in str(exc).lower():
                 raise
 
+    def _m_to_v24(self, conn: sqlite3.Connection) -> None:
+        """Supported v22 → v24 jump; v23 State is refused before any DDL."""
+        if "closure" not in {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}:
+            conn.execute("ALTER TABLE tasks ADD COLUMN closure TEXT")
+
+    def _m_to_v25(self, conn: sqlite3.Connection) -> None:
+        """v24 → v25: bind scoped authorization to the winning bundle claim."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(bundle_claims)")}
+        if "expected_scope_digest" not in columns:
+            conn.execute("ALTER TABLE bundle_claims ADD COLUMN expected_scope_digest TEXT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -5198,6 +5276,8 @@ class SqliteBackend:
         (19, _m_to_v20),
         (20, _m_to_v21),
         (21, _m_to_v22),
+        (22, _m_to_v24),
+        (24, _m_to_v25),
     ]
 
     @staticmethod
@@ -6312,6 +6392,13 @@ class SqliteBackend:
                 TaskStatusChangedPayload,
                 self._check_task_status_changed,
                 self._write_task_status_changed,
+            ),
+            "task.transitioned": ActionSpec(
+                TaskTransitionedPayload,
+                self._check_task_transitioned, self._write_task_transitioned,
+            ),
+            "task.closed": ActionSpec(
+                TaskClosedPayload, self._check_task_closed, self._write_task_closed,
             ),
             # v1.15.0 — orphan cleanup on re-parse.
             "task.deleted": ActionSpec(
@@ -8568,13 +8655,15 @@ class SqliteBackend:
 
         placeholders = ",".join("?" for _ in bundle.task_ids)
         task_rows = conn.execute(
-            f"SELECT id, prd_id FROM tasks WHERE id IN ({placeholders})",
+            f"SELECT id, prd_id, status FROM tasks WHERE id IN ({placeholders})",
             tuple(bundle.task_ids),
         ).fetchall()
         tasks_by_id = {row[0]: row[1] for row in task_rows}
         missing = [task_id for task_id in bundle.task_ids if task_id not in tasks_by_id]
         if missing:
             raise EventRejected(f"bundle.created: member tasks not found: {missing}.")
+        if any(row[2] == "closed" for row in task_rows):
+            raise EventRejected("bundle.created: closed tasks cannot enter a bundle.")
         cross_prd = [
             task_id
             for task_id in bundle.task_ids
@@ -8642,6 +8731,14 @@ class SqliteBackend:
         ).fetchone():
             return
         placeholders = ",".join("?" for _ in bundle.task_ids)
+        if conn.execute(
+            f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) AND status = 'closed' LIMIT 1",
+            tuple(bundle.task_ids),
+        ).fetchone():
+            # A closure and bundle creation may each be valid on divergent
+            # branches. The first ordered fact owns the task; never synthesize
+            # a live bundle containing a task already closed by that history.
+            return
         terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
         terminal_placeholders = ",".join("?" for _ in terminal)
         existing_membership = conn.execute(
@@ -10068,6 +10165,55 @@ class SqliteBackend:
             ),
         )
 
+    def _bundle_member_contexts_match(
+        self, conn: sqlite3.Connection, payload: BundleClaimedPayload,
+    ) -> bool:
+        """Validate persisted child bindings identically for append and replay."""
+        from anvil.claims.progress_attestation import (
+            ProgressAttestationError,
+            canonical_progress_path,
+        )
+
+        repository_binding: tuple[str, str] | None = None
+        for member in payload.member_claims:
+            generation = conn.execute(
+                "SELECT COALESCE(MAX(generation), 0) + 1 FROM claims WHERE task_id = ?",
+                (member.task_id,),
+            ).fetchone()[0]
+            if member.generation is not None and member.generation != generation:
+                return False
+            context = member.attestation_context
+            if context is None:
+                continue  # Historical bundle claims did not capture this context.
+            task_row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?",
+                (member.task_id,),
+            ).fetchone()
+            if task_row is None:
+                return False
+            try:
+                task = self._row_to_task(task_row, conn)
+                if context.task_revision != task_snapshot_revision(task):
+                    return False
+                paths = [canonical_progress_path(path) for path in task.likely_files]
+            except (CanonicalJsonRefusal, ProgressAttestationError, TypeError, ValueError):
+                return False
+            prd = conn.execute("SELECT revision FROM prds WHERE id = ?", (task.prd_id,)).fetchone()
+            if prd is None or (context.prd_id, context.prd_revision) != (task.prd_id, prd[0]):
+                return False
+            if [entry.path for entry in context.expected_paths] != paths:
+                return False
+            binding = (context.repository_id, context.claim_start_sha)
+            if repository_binding is not None and binding != repository_binding:
+                return False
+            repository_binding = binding
+            if (
+                payload.git_metadata is not None
+                and context.claim_start_sha != payload.git_metadata.claim_start_sha
+            ):
+                return False
+        return True
+
     def _check_bundle_claimed(
         self,
         conn: sqlite3.Connection,
@@ -10105,6 +10251,16 @@ class SqliteBackend:
                 )
             if row[0] != payload.creation_event_id:
                 raise EventRejected("bundle.claimed: creation event does not match.")
+            if payload.expected_scope_digest is not None:
+                from anvil.bundles.execution import bundle_execution_scope_digest
+
+                if (
+                    bundle_execution_scope_digest(self, payload.bundle_id)
+                    != payload.expected_scope_digest
+                ):
+                    raise EventRejected(
+                        "bundle_scope_changed: refresh the execution plan before claiming."
+                    )
             if row[1] != payload.claimed_by:
                 raise EventRejected(
                     f"bundle.claimed: coordinator is '{row[1]}', not "
@@ -10152,13 +10308,23 @@ class SqliteBackend:
                 (payload.bundle_id,),
             ).fetchall()
             member_ids = [member[0] for member in member_rows]
+            member_set = set(member_ids)
             supplied_ids = [member.task_id for member in payload.member_claims]
+            if payload.expected_scope_digest is not None and any(
+                dependency in member_set
+                for member in member_rows for dependency in json.loads(member[2] or "[]")
+            ):
+                raise EventRejected(
+                    "bundle_internal_dependencies: scoped execution requires independent members."
+                )
             for member_id in member_ids:
                 self._check_invalidation_claim_actor(conn, member_id, payload.claimed_by)
             if supplied_ids != member_ids:
                 raise EventRejected(
                     "bundle.claimed: member claims must match stored member order."
                 )
+            if not self._bundle_member_contexts_match(conn, payload):
+                raise EventRejected("bundle.claimed: member claim context or generation mismatch.")
             not_ready = [row[0] for row in member_rows if row[1] != "ready"]
             if not_ready:
                 raise EventRejected(
@@ -10225,9 +10391,11 @@ class SqliteBackend:
                 "WHERE c.status = 'active' ORDER BY c.id"
             ).fetchall()
             conflicts: list[str] = []
-            expected_set = set(expected_files)
+            expected_set = canonical_claim_file_scope(expected_files)
             for active in active_rows:
-                overlap = sorted(expected_set & set(json.loads(active[2] or "[]")))
+                overlap = expected_set and expected_set.intersection(
+                    canonical_claim_file_scope(json.loads(active[2] or "[]"))
+                )
                 group_overlap = sorted(
                     bundle_groups & set(json.loads(active[3] or "[]"))
                 )
@@ -10237,6 +10405,8 @@ class SqliteBackend:
                 raise EventRejected(
                     f"bundle.claimed: conflicts with active claims: {conflicts}."
                 )
+        except BundlePlanningError as exc:
+            raise EventRejected(f"bundle.claimed: invalid claim file scope: {exc}") from exc
         finally:
             conn.execute("COMMIT")
 
@@ -10275,6 +10445,14 @@ class SqliteBackend:
             ).fetchone()
         ):
             return
+        if payload.expected_scope_digest is not None:
+            from anvil.bundles.execution import bundle_execution_scope_digest
+
+            if (
+                bundle_execution_scope_digest(self, payload.bundle_id)
+                != payload.expected_scope_digest
+            ):
+                return
         member_ids = [member.task_id for member in payload.member_claims]
         placeholders = ",".join("?" for _ in member_ids)
         if conn.execute(
@@ -10296,6 +10474,14 @@ class SqliteBackend:
             (payload.bundle_id,),
         ).fetchall()
         if [row[0] for row in replay_members] != member_ids:
+            return
+        if not self._bundle_member_contexts_match(conn, payload):
+            return
+        member_set = set(member_ids)
+        if payload.expected_scope_digest is not None and any(
+            dependency in member_set
+            for member in replay_members for dependency in json.loads(member[2] or "[]")
+        ):
             return
         graph = analyze_bundle_graph(
             member_ids,
@@ -10332,18 +10518,23 @@ class SqliteBackend:
             dep_status = {row[0]: row[1] for row in dep_rows}
             if any(dep_status.get(dep) != "done" for dep in external_dependencies):
                 return
-        expected_set = set(expected_files)
-        for active in conn.execute(
-            "SELECT c.task_id, c.expected_files, t.conflict_groups "
-            "FROM claims c JOIN tasks t ON t.id = c.task_id "
-            "WHERE c.status = 'active' ORDER BY c.id"
-        ).fetchall():
-            if (
-                active[0] in member_set
-                or expected_set.intersection(json.loads(active[1] or "[]"))
-                or bundle_groups.intersection(json.loads(active[2] or "[]"))
-            ):
-                return
+        try:
+            expected_set = canonical_claim_file_scope(expected_files)
+            for active in conn.execute(
+                "SELECT c.task_id, c.expected_files, t.conflict_groups "
+                "FROM claims c JOIN tasks t ON t.id = c.task_id "
+                "WHERE c.status = 'active' ORDER BY c.id"
+            ).fetchall():
+                if (
+                    active[0] in member_set
+                    or (expected_set and expected_set.intersection(
+                        canonical_claim_file_scope(json.loads(active[1] or "[]"))
+                    ))
+                    or bundle_groups.intersection(json.loads(active[2] or "[]"))
+                ):
+                    return
+        except BundlePlanningError:
+            return
         if conn.execute(
             f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) "
             "AND status != 'ready' LIMIT 1",
@@ -10366,8 +10557,9 @@ class SqliteBackend:
             """INSERT INTO bundle_claims
                (id, bundle_id, claimed_by, status, branch, worktree_path,
                 git_metadata, session_id, expected_files, member_claim_ids, created_at,
-                lease_expires_at, last_heartbeat_at, released_at, release_reason)
-               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                lease_expires_at, last_heartbeat_at, expected_scope_digest,
+                released_at, release_reason)
+               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
             (
                 payload.id,
                 payload.bundle_id,
@@ -10389,6 +10581,7 @@ class SqliteBackend:
                 payload.created_at.isoformat(),
                 payload.lease_expires_at.isoformat(),
                 payload.last_heartbeat_at.isoformat(),
+                payload.expected_scope_digest,
             ),
         )
         member_rows = conn.execute(
@@ -10397,9 +10590,11 @@ class SqliteBackend:
             "ORDER BY m.position",
             (payload.bundle_id,),
         ).fetchall()
-        claims_by_task = {member.task_id: member.id for member in payload.member_claims}
+        claims_by_task = {member.task_id: member for member in payload.member_claims}
         for task_id, likely_files_json in member_rows:
-            claim_id = claims_by_task[task_id]
+            member = claims_by_task[task_id]
+            claim_id = member.id
+            context = member.attestation_context
             conn.execute(
                 """INSERT INTO claims
                    (id, task_id, claimed_by, claim_type, status, branch,
@@ -10410,7 +10605,7 @@ class SqliteBackend:
                    VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?, ?,
                            (SELECT COALESCE(MAX(generation), 0) + 1
                               FROM claims WHERE task_id = ?),
-                           NULL, ?, ?, ?, NULL, NULL)""",
+                           ?, ?, ?, ?, NULL, NULL)""",
                 (
                     claim_id,
                     task_id,
@@ -10428,8 +10623,11 @@ class SqliteBackend:
                     ),
                     payload.session_id,
                     payload.id,
-                    likely_files_json or "[]",
+                    json.dumps([entry.path for entry in context.expected_paths])
+                    if context is not None else likely_files_json or "[]",
                     task_id,
+                    json.dumps(context.model_dump(mode="json"), sort_keys=True)
+                    if context is not None else None,
                     payload.created_at.isoformat(),
                     payload.lease_expires_at.isoformat(),
                     payload.last_heartbeat_at.isoformat(),
@@ -10995,7 +11193,7 @@ class SqliteBackend:
                 code="live_omitted_prd",
             )
         try:
-            Task.model_validate(task_dict)
+            task = Task.model_validate(task_dict)
         except Exception as exc:
             recovery_owner = self._task_created_recovery_owner(conn, event)
             if recovery_owner is not None:
@@ -11007,6 +11205,8 @@ class SqliteBackend:
             raise EventRejected(
                 f"task.created: invalid Task payload: {exc}"
             ) from exc
+        if not self._task_upsert_preserves_closure(conn, task):
+            raise EventRejected("task.created: closure must match the existing audited disposition")
 
     @staticmethod
     def _dependency_batch_has_cycle(dep_map: dict[str, list[str]]) -> bool:
@@ -11221,6 +11421,9 @@ class SqliteBackend:
             raise
         task_dict = self._normalize_task_payload(conn, payload_data, event)
         task = Task.model_validate(task_dict)
+        if not self._task_upsert_preserves_closure(conn, task):
+            # Replay never mints a disposition through a metadata upsert.
+            return
         self._insert_task_row(conn, task)
 
     @staticmethod
@@ -11322,7 +11525,7 @@ class SqliteBackend:
         Was two validation guards in the old handler (empty ``subtasks`` list;
         invalid subtask payload); both now reject up front.
         """
-        _ = (conn, event)
+        _ = event
         if not payload.subtasks:
             raise EventRejected(
                 "task.expanded payload has empty 'subtasks' list; nothing to expand."
@@ -11330,11 +11533,15 @@ class SqliteBackend:
         for subtask_data in payload.subtasks:
             normalized = self._normalize_subtask(subtask_data, payload.parent_task_id)
             try:
-                Task.model_validate(normalized)
+                subtask = Task.model_validate(normalized)
             except Exception as exc:
                 raise EventRejected(
                     f"task.expanded: invalid subtask payload: {exc}"
                 ) from exc
+            if not self._task_upsert_preserves_closure(conn, subtask):
+                raise EventRejected(
+                    "task.expanded: closure must match the existing audited disposition"
+                )
 
     def _write_task_expanded(
         self,
@@ -11358,9 +11565,14 @@ class SqliteBackend:
         """
         _ = event
         parent_task_id: str = payload.parent_task_id
+        subtasks = []
         for subtask_data in payload.subtasks:
             normalized = self._normalize_subtask(subtask_data, parent_task_id)
             subtask = Task.model_validate(normalized)
+            if not self._task_upsert_preserves_closure(conn, subtask):
+                return  # Preserve atomic expansion when merged history loses a closure.
+            subtasks.append(subtask)
+        for subtask in subtasks:
             self._insert_task_row(conn, subtask)
 
     def _check_task_status_changed(
@@ -11381,6 +11593,8 @@ class SqliteBackend:
         task_id: str = payload.task_id
         from_status: str = payload.from_status
         to_status: str = payload.to_status
+        if "closed" in (from_status, to_status):
+            raise EventRejected("closed dispositions require the guarded task.closed action")
 
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -11422,6 +11636,8 @@ class SqliteBackend:
         ``from_status``; the WHERE-status guard remains as a defensive belt but
         always matches here.
         """
+        if "closed" in (payload.from_status, payload.to_status):
+            return  # Replay cannot forge or reopen an audited closure.
         timestamp: str = event.timestamp.isoformat()
         conn.execute(
             """
@@ -11432,6 +11648,116 @@ class SqliteBackend:
                AND status = ?
             """,
             (payload.to_status, timestamp, payload.task_id, payload.from_status),
+        )
+
+    def _checked_board_action(
+        self, conn: sqlite3.Connection,
+        payload: TaskTransitionedPayload | TaskClosedPayload,
+        event: EventDraft, action: str,
+    ) -> Task:
+        """Check identity, custody and exact task version inside the append transaction."""
+        from anvil.task_actions import permitted_task_actions
+
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("task action target mismatch")
+        if canonicalize_new_actor(event.actor) != event.actor:
+            raise EventRejected("task action actor must be canonical")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
+        if row is None:
+            raise EventRejected("task action target not found")
+        task = self._row_to_task(row, conn)
+        if task.status != payload.expected_status or task.updated_at != payload.expected_updated_at:
+            raise EventRejected("stale_task: task changed since preview; refresh before retrying")
+        claims, bundle_owned = self.task_action_context(task.id)
+        if action not in permitted_task_actions(
+            task, event.actor, claims, bundle_owned, self._clock.now(),
+        ):
+            raise EventRejected(
+                "task_action_refused: stage, readiness or custody does not permit this action"
+            )
+        return task
+
+    def _check_task_transitioned(
+        self, conn: sqlite3.Connection, payload: TaskTransitionedPayload, event: EventDraft,
+    ) -> None:
+        self._checked_board_action(conn, payload, event, payload.action)
+        if payload.action == "block" and not (payload.reason or "").strip():
+            raise EventRejected("blocking a task requires a reason")
+
+    def _write_task_transitioned(
+        self, conn: sqlite3.Connection, payload: TaskTransitionedPayload, event: Event,
+    ) -> None:
+        if self._replaying and not self._task_action_replay_allowed(
+            conn, payload, event, payload.action,
+        ):
+            return
+        targets = {"ready": "ready", "backlog": "drafted", "start": "in_progress",
+                   "block": "blocked", "resume": "in_progress"}
+        conn.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            (targets[payload.action], event.timestamp.isoformat(), payload.task_id,
+             payload.expected_status),
+        )
+
+    @staticmethod
+    def _task_action_version_matches(
+        conn: sqlite3.Connection, payload: TaskTransitionedPayload | TaskClosedPayload,
+    ) -> bool:
+        row = conn.execute(
+            "SELECT status, updated_at FROM tasks WHERE id = ?", (payload.task_id,),
+        ).fetchone()
+        return bool(
+            row is not None and row[0] == payload.expected_status
+            and datetime.datetime.fromisoformat(row[1]) == payload.expected_updated_at
+        )
+
+    def _task_action_replay_allowed(
+        self, conn: sqlite3.Connection,
+        payload: TaskTransitionedPayload | TaskClosedPayload, event: Event, action: str,
+    ) -> bool:
+        """Recheck custody at event time after ordering divergent histories."""
+        from anvil.task_actions import permitted_task_actions
+
+        if not self._task_action_version_matches(conn, payload):
+            return False
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
+        task = self._row_to_task(row, conn)
+        claims, bundle_owned = self.task_action_context(task.id)
+        return action in permitted_task_actions(
+            task, event.actor, claims, bundle_owned, event.timestamp,
+        )
+
+    def _check_task_closed(
+        self, conn: sqlite3.Connection, payload: TaskClosedPayload, event: EventDraft,
+    ) -> None:
+        self._checked_board_action(conn, payload, event, "close")
+        closure = payload.closure
+        if closure.closed_by != event.actor or closure.closed_at != event.timestamp:
+            raise EventRejected("closure audit identity mismatch")
+        if closure.duplicate_of is not None and (
+            closure.duplicate_of == payload.task_id
+            or conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?", (closure.duplicate_of,),
+            ).fetchone() is None
+        ):
+            raise EventRejected("duplicate target must name a different existing task")
+
+    def _write_task_closed(
+        self, conn: sqlite3.Connection, payload: TaskClosedPayload, event: Event,
+    ) -> None:
+        if self._replaying and not self._task_action_replay_allowed(conn, payload, event, "close"):
+            return
+        if payload.closure.duplicate_of is not None and conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (payload.closure.duplicate_of,),
+        ).fetchone() is None:
+            # A prior ordered deletion wins over a divergent duplicate closure.
+            return
+        conn.execute(
+            "UPDATE tasks SET status = 'closed', closure = ?, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            (payload.closure.model_dump_json(), event.timestamp.isoformat(), payload.task_id,
+             payload.expected_status),
         )
 
     # ------------------------------------------------------------------
@@ -11466,6 +11792,11 @@ class SqliteBackend:
         """
         _ = event
         task_id = payload.task_id
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE json_extract(closure, '$.duplicate_of') = ? LIMIT 1",
+            (task_id,),
+        ).fetchone() is not None:
+            raise EventRejected("task.deleted: task is referenced by an audited duplicate closure")
 
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -11531,6 +11862,14 @@ class SqliteBackend:
         not touch the events table.
         """
         task_id = payload.task_id
+
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE json_extract(closure, '$.duplicate_of') = ? LIMIT 1",
+            (task_id,),
+        ).fetchone() is not None:
+            # Symmetric replay rule: a prior duplicate closure protects its
+            # referenced task from a later deletion authored on another branch.
+            return
 
         # 3. Rewrite conflict_groups.task_ids JSON arrays to remove this task.
         # Explicit Row indexing (row["id"]) is safer than positional unpack —
@@ -11637,12 +11976,14 @@ class SqliteBackend:
         """
         _ = event
         row = conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (payload.task_id,)
+            "SELECT status FROM tasks WHERE id = ?", (payload.task_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(
                 f"task.synced_from_remote: task '{payload.task_id}' not found."
             )
+        if payload.status == "closed" or row[0] == "closed":
+            raise EventRejected("remote synchronization cannot create or overwrite a closure")
 
     def _write_task_synced_from_remote(
         self,
@@ -11679,6 +12020,9 @@ class SqliteBackend:
         status: str = payload.status
         timestamp: str = event.timestamp.isoformat()
 
+        if status == "closed":
+            return  # Remote state cannot author an Anvil closure disposition.
+
         conn.execute(
             """
             UPDATE tasks
@@ -11686,7 +12030,7 @@ class SqliteBackend:
                    description = ?,
                    status = ?,
                    updated_at = ?
-             WHERE id = ?
+             WHERE id = ? AND status != 'closed'
             """,
             (title, description, status, timestamp, task_id),
         )
@@ -11948,7 +12292,10 @@ class SqliteBackend:
         mirror ``ClaimManager.check_conflicts``' self/own-task skips). With
         ``payload.force`` set, the overlap is logged and allowed through.
         """
-        new_files: set[str] = {str(f) for f in (payload.expected_files or [])}
+        try:
+            new_files = canonical_claim_file_scope(payload.expected_files or [])
+        except BundlePlanningError as exc:
+            raise EventRejected(f"claim.created: invalid claim file scope: {exc}") from exc
         if not new_files:
             return
 
@@ -11969,10 +12316,14 @@ class SqliteBackend:
             if other_actor == payload.claimed_by and other_bundle_claim_id is None:
                 continue
             try:
-                other_files = set(json.loads(row[3] or "[]"))
+                other_files = canonical_claim_file_scope(json.loads(row[3] or "[]"))
             except (json.JSONDecodeError, TypeError):
                 continue
-            overlap = sorted(new_files & {str(f) for f in other_files})
+            except BundlePlanningError as exc:
+                raise EventRejected(
+                    f"claim.created: invalid active claim file scope: {exc}"
+                ) from exc
+            overlap = sorted(new_files & other_files)
             if not overlap:
                 continue
             if payload.force and other_bundle_claim_id is None:
@@ -12123,6 +12474,10 @@ class SqliteBackend:
 
         if event.target_kind != "claim" or event.target_id != claim_id:
             return
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ? AND status = 'closed'", (task_id,),
+        ).fetchone():
+            return  # A prior closure wins over a divergent claim creation.
 
         # A claim ID identifies one immutable creation fact. Merged branches
         # can independently reuse an ID for different tasks; the first
@@ -12166,7 +12521,10 @@ class SqliteBackend:
             (task_id,),
         ).fetchone():
             return
-        incoming_files = set(payload.expected_files or [])
+        try:
+            incoming_files = canonical_claim_file_scope(payload.expected_files or [])
+        except BundlePlanningError:
+            return
         task_group_row = conn.execute(
             "SELECT conflict_groups FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
@@ -12178,7 +12536,12 @@ class SqliteBackend:
             "JOIN tasks t ON t.id = c.task_id WHERE c.status = 'active' "
             "AND c.bundle_claim_id IS NOT NULL"
         ).fetchall():
-            if incoming_files.intersection(json.loads(bundle_child[0] or "[]")):
+            try:
+                if incoming_files and incoming_files.intersection(
+                    canonical_claim_file_scope(json.loads(bundle_child[0] or "[]"))
+                ):
+                    return
+            except BundlePlanningError:
                 return
             if incoming_groups.intersection(json.loads(bundle_child[1] or "[]")):
                 return
@@ -12887,31 +13250,10 @@ class SqliteBackend:
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
-        if row[3] is not None:
-            # Bundle members still use exact claim-bound hook proofs. Only the
-            # active coordinator may submit, while both leases remain valid.
-            parent = conn.execute(
-                "SELECT bc.claimed_by, bc.status, bc.released_at, bc.lease_expires_at, "
-                "bc.member_claim_ids, b.coordinator, b.status "
-                "FROM bundle_claims bc JOIN execution_bundles b ON b.id = bc.bundle_id "
-                "WHERE bc.id = ?", (row[3],),
-            ).fetchone()
-            if parent is None:
-                return False
-            try:
-                members = json.loads(parent[4])
-                parent_expiry = datetime.datetime.fromisoformat(parent[3])
-                if (
-                    parent[0] != payload.submitted_by or parent[1] != "active"
-                    or parent[2] is not None or parent[5] != payload.submitted_by
-                    or parent[6] != "active" or not isinstance(members, dict)
-                    or members.get(payload.task_id) != payload.claim_id
-                    or event_time >= parent_expiry
-                    or (live_now is not None and live_now >= parent_expiry)
-                ):
-                    return False
-            except (TypeError, ValueError, json.JSONDecodeError):
-                return False
+        if row[3] is not None and not self._bundle_proof_custody_matches(
+            conn, row[3], payload, event_time, live_now,
+        ):
+            return False
         project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
         task_row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (payload.task_id,)
@@ -12976,6 +13318,39 @@ class SqliteBackend:
                 return False
         return True
 
+    @staticmethod
+    def _bundle_proof_custody_matches(
+        conn: sqlite3.Connection,
+        bundle_claim_id: str,
+        payload: EvidenceSubmittedPayload,
+        event_time: datetime.datetime,
+        live_now: datetime.datetime | None,
+    ) -> bool:
+        """Imported and hook proofs share the same coordinator custody gate."""
+        parent = conn.execute(
+            "SELECT bc.claimed_by, bc.status, bc.released_at, bc.lease_expires_at, "
+            "bc.member_claim_ids, b.coordinator, b.status "
+            "FROM bundle_claims bc JOIN execution_bundles b ON b.id = bc.bundle_id "
+            "WHERE bc.id = ?", (bundle_claim_id,),
+        ).fetchone()
+        if parent is None:
+            return False
+        try:
+            members = json.loads(parent[4])
+            parent_expiry = datetime.datetime.fromisoformat(parent[3])
+            if (
+                parent[0] != payload.submitted_by or parent[1] != "active"
+                or parent[2] is not None or parent[5] != payload.submitted_by
+                or parent[6] != "active" or not isinstance(members, dict)
+                or members.get(payload.task_id) != payload.claim_id
+                or event_time >= parent_expiry
+                or (live_now is not None and live_now >= parent_expiry)
+            ):
+                return False
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return True
+
     @classmethod
     def _claim_command_proof_batch_matches_claim(
         cls,
@@ -13014,7 +13389,6 @@ class SqliteBackend:
             or row[0] != payload.task_id
             or row[1] != payload.submitted_by
             or row[2] != "active"
-            or row[3] is not None
             or row[5] is None
             or row[8] is not None
         ):
@@ -13041,6 +13415,10 @@ class SqliteBackend:
                 else None
             )
         except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if row[3] is not None and not cls._bundle_proof_custody_matches(
+            conn, row[3], payload, event_time, live_now,
+        ):
             return False
         project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
         task_binding = conn.execute(
@@ -13508,6 +13886,9 @@ class SqliteBackend:
         decision: str = payload.decision
         task_id: str = payload.task_id
 
+        if not self._task_review_binding_matches(conn, payload):
+            raise EventRejected("stale_review: task or evidence changed since preview")
+
         if payload.invalidation is not None:
             self._check_acceptance_invalidation(conn, payload, event)
 
@@ -13519,6 +13900,11 @@ class SqliteBackend:
                 f"got {decision!r}."
             )
         if decision == "accepted":
+            bundle_blocker = self._bundle_member_acceptance_blocker(
+                conn, task_id, guard_version=payload.bundle_review_guard_version,
+            )
+            if bundle_blocker is not None:
+                raise EventRejected(bundle_blocker)
             attempt_row = self._latest_evidence_row(conn, task_id)
             if attempt_row is None:
                 raise EventRejected(
@@ -13577,6 +13963,53 @@ class SqliteBackend:
                 f"Expected 'needs_review', got '{actual_status}'. "
                 "The task may have been reviewed by a concurrent operation."
             )
+
+    def bundle_member_acceptance_blocker(self, task_id: str) -> str | None:
+        """Explain a bundled attempt's review gate without accepting any work."""
+        return self._bundle_member_acceptance_blocker(self._require_conn(), task_id)
+
+    def _bundle_member_acceptance_blocker(
+        self, conn: sqlite3.Connection, task_id: str, *, guard_version: int | None = 1,
+    ) -> str | None:
+        attempt_row = self._latest_evidence_row(conn, task_id)
+        if attempt_row is None:
+            return None  # The ordinary acceptance-evidence guard owns this case.
+        attempt = self._row_to_evidence(attempt_row)
+        member_claim = conn.execute(
+            "SELECT bundle_claim_id FROM claims WHERE id = ? AND task_id = ?",
+            (attempt.claim_id, task_id),
+        ).fetchone()
+        if member_claim is None or member_claim[0] is None:
+            return None  # A standalone attempt is not governed by an old bundle.
+        bundle_claim = conn.execute(
+            "SELECT bundle_id, member_claim_ids, expected_scope_digest "
+            "FROM bundle_claims WHERE id = ?",
+            (member_claim[0],),
+        ).fetchone()
+        reason = (
+            "bundle_review_required: finalize the current bundle review before member acceptance."
+        )
+        if bundle_claim is None:
+            return reason
+        if bundle_claim[2] is None:
+            return None  # Preserve legacy sequential bundle progress and replay.
+        if guard_version != 1:
+            return "bundle_review_required: new member acceptance requires review guard version 1."
+        member_claim_ids = json.loads(bundle_claim[1])
+        if member_claim_ids.get(task_id) != attempt.claim_id:
+            return reason
+        bundle_row = conn.execute(
+            "SELECT status, creation_event_id, review_disposition_event_id "
+            "FROM execution_bundles WHERE id = ?", (bundle_claim[0],),
+        ).fetchone()
+        if (
+            bundle_row is None
+            or bundle_row[0] not in {"reviewed_unintegrated", "integrated", "merged", "completed"}
+            or bundle_row[2] is None
+            or not self._bundle_review_round_passes(conn, bundle_claim[0], bundle_row[1])
+        ):
+            return reason
+        return None
 
     def _legacy_claimed_apply_evidence(
         self,
@@ -13725,6 +14158,23 @@ class SqliteBackend:
             (evidence_event_id, evidence.claim_id, evidence.claim_id),
         )
 
+    def _task_review_binding_matches(
+        self, conn: sqlite3.Connection, payload: TaskAppliedPayload,
+    ) -> bool:
+        """Bind preview decisions during both live append and ordered replay."""
+        if payload.expected_evidence_id is None:
+            return True
+        attempt = self._latest_evidence_row(conn, payload.task_id)
+        task_row = conn.execute(
+            "SELECT updated_at, status FROM tasks WHERE id = ?", (payload.task_id,),
+        ).fetchone()
+        return bool(
+            attempt is not None and task_row is not None
+            and task_row[1] == "needs_review"
+            and self._row_to_evidence(attempt).id == payload.expected_evidence_id
+            and datetime.datetime.fromisoformat(task_row[0]) == payload.expected_task_updated_at
+        )
+
     def _write_task_applied(
         self,
         conn: sqlite3.Connection,
@@ -13759,6 +14209,27 @@ class SqliteBackend:
         genuine unexpected concurrent mutation (infra-class, not a validation
         rejection).
         """
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ? AND status = 'closed'", (payload.task_id,),
+        ).fetchone():
+            # Legacy CLI decisions do not carry preview versions. A closure
+            # ordered first still owns the disposition; the later review fact
+            # remains auditable without reopening the task or aborting replay.
+            return
+        if not self._task_review_binding_matches(conn, payload):
+            # A divergent earlier fact changed the preview's bound inputs.
+            # Retain the event for audit but do not manufacture acceptance or
+            # a Review row for an obsolete decision.
+            return
+        if (
+            payload.decision == "accepted"
+            and self._bundle_member_acceptance_blocker(
+                conn, payload.task_id, guard_version=payload.bundle_review_guard_version,
+            ) is not None
+        ):
+            # Retain a premature acceptance fact for audit without allowing it
+            # to bypass the same disposition-bound quorum required live.
+            return
         task_id: str = payload.task_id
         reviewer: str = payload.reviewer
         decision: str = payload.decision
@@ -14141,6 +14612,19 @@ class SqliteBackend:
     # task.expanded)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _task_upsert_preserves_closure(conn: sqlite3.Connection, task: Task) -> bool:
+        """Task upserts may copy, but never create or alter, audited closure."""
+        if task.closure is None:
+            return task.status.value != "closed"
+        existing = conn.execute(
+            "SELECT status, closure FROM tasks WHERE id = ?", (task.id,),
+        ).fetchone()
+        return bool(
+            existing is not None and existing[0] == "closed" and existing[1] is not None
+            and json.loads(existing[1]) == task.closure.model_dump(mode="json")
+        )
+
     def _insert_task_row(self, conn: sqlite3.Connection, task: Task) -> None:
         """Insert or upsert a Task row in the tasks table.
 
@@ -14151,6 +14635,8 @@ class SqliteBackend:
         preserves the row identity, so foreign keys remain valid even when
         `plan` is re-run after work has begun.
         """
+        if not self._task_upsert_preserves_closure(conn, task):
+            raise TransactionAborted("task upsert cannot create or alter an audited closure")
         data = task.model_dump(mode="json")
         # prd_id is Field(exclude=True) — read it as the in-memory attribute and
         # write the column explicitly (pre-v7 replay carries 'default').
@@ -14366,7 +14852,7 @@ class SqliteBackend:
         # NULL (pre-backfill) means "no claims". Drop so the default applies.
         if d.get("claims") is None:
             d.pop("claims", None)
-        for col in ("scores", "verification"):
+        for col in ("scores", "verification", "closure"):
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])
         return Task.model_validate(d)

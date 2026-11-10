@@ -45,6 +45,53 @@ def _state(cwd: Path | None, command: str, json_output: bool):  # type: ignore[n
     return state_dir, _open_backend(state_dir, project_root=_resolve_project_root(cwd))
 
 
+@bundle_app.command("execution-plan")
+def execution_plan(
+    bundle_id: str,
+    max_workers: int = typer.Option(8, "--max-workers", min=1, max=500),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Inspect bounded dispatch advice without claiming work or validating proof."""
+    from anvil.bundles.execution import BundleExecutionPlanError, build_bundle_execution_plan
+    from anvil.clock import SystemClock
+    from anvil.state.backend import BackendError
+    from anvil.state.sqlite import SqliteBackend, query_only_transaction
+
+    command = "bundle execution-plan"
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command=command, json_output=json_output)
+    try:
+        with query_only_transaction(state_dir / "state.db", state_dir / "events.jsonl") as (
+            connection, _events_file,
+        ):
+            backend = SqliteBackend(
+                db_path=str(state_dir / "state.db"),
+                events_path=str(state_dir / "events.jsonl"),
+                clock=SystemClock(),
+            )
+            backend._conn = connection
+            try:
+                plan = build_bundle_execution_plan(backend, bundle_id, max_workers=max_workers)
+            finally:
+                backend._conn = None
+    except (BundleExecutionPlanError, BackendError, OSError) as exc:
+        _fail(command, str(exc), json_output)
+    if json_output:
+        emit_success(command, plan)
+        return
+    typer.echo(f"Bundle {bundle_id}: {plan['status']} (advisory; no proof verification)")
+    typer.echo(f"Scope: {plan['scope_digest']}")
+    typer.echo("Next wave: " + (", ".join(plan["wave"]) or "none"))
+    for blocker in plan["blockers"]:
+        typer.echo(f"  {blocker}")
+    for member in plan["members"]:
+        reasons = ", ".join(member["blockers"])
+        typer.echo(
+            f"  {member['task_id']}: {member['status']}" + (f" ({reasons})" if reasons else "")
+        )
+
+
 @bundle_app.command("create")
 def create_bundle(
     bundle_id: str,
@@ -191,6 +238,10 @@ def claim_bundle(
     bundle_id: str,
     actor: str | None = typer.Option(None, "--actor"),  # noqa: B008
     shared_tree: bool = typer.Option(False, "--shared-tree"),  # noqa: B008
+    expected_scope_digest: str | None = typer.Option(  # noqa: B008
+        None, "--expected-scope-digest",
+        help="Refuse if the previewed bundle/PRD/member scope changed.",
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
 ) -> None:
@@ -286,6 +337,7 @@ def claim_bundle(
                     bundle_id,
                     branch=metadata.branch if metadata is not None else None,
                     git_metadata=metadata,
+                    expected_scope_digest=expected_scope_digest,
                     pre_log_check=lambda: require_canonical_prd_claim_binding(
                         state_dir,
                         backend.get_prd(bundle.prd_id),

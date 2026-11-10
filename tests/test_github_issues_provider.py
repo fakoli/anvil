@@ -32,7 +32,7 @@ import httpx
 import pytest
 import respx  # httpx-native mocker (responses lib only mocks `requests`)
 
-from anvil.state.models import Task, TaskPriority, TaskStatus
+from anvil.state.models import Task, TaskClosure, TaskPriority, TaskStatus
 from anvil.sync import (
     PROVIDER_REGISTRY,
     AuthenticationFailed,
@@ -53,6 +53,8 @@ from anvil.sync.providers.github_issues import (
     GitHubIssuesProvider,
     _compose_body,
     _parse_github_datetime,
+    _status_to_state,
+    _status_to_state_reason,
     _strip_footer,
 )
 
@@ -74,6 +76,7 @@ def _make_task(
     title: str = "Sample task",
     description: str = "Task body",
     status: TaskStatus = TaskStatus.in_progress,
+    closure: TaskClosure | None = None,
 ) -> Task:
     return Task(
         id=task_id,
@@ -81,6 +84,7 @@ def _make_task(
         title=title,
         description=description,
         status=status,
+        closure=closure,
         priority=TaskPriority.medium,
         created_at=_now(),
         updated_at=_now(),
@@ -402,9 +406,10 @@ class TestPushTaskGhCli:
             task=_make_task(status=TaskStatus.done), mapping=None
         )
         assert ref.external_id == "7"
-        # close must have been called after create.
-        close_calls = [a for a in calls if "close" in a]
+        # Set a completed reason explicitly, including on a previously closed issue.
+        close_calls = [a for a in calls if "state=closed" in a]
         assert close_calls
+        assert "state_reason=completed" in close_calls[0]
 
     def test_create_already_exists_returns_fetched_ref(
         self, monkeypatch, gh_provider
@@ -993,8 +998,12 @@ class TestStatusLabelMapping:
     def test_label_to_status_covers_all_labels(self) -> None:
         assert set(LABEL_TO_STATUS) == set(STATUS_TO_LABEL.values())
 
-    def test_done_is_the_only_closed_status(self) -> None:
+    def test_non_success_closure_is_not_done(self) -> None:
         assert DONE_STATUSES == frozenset({TaskStatus.done})
+        assert _status_to_state(TaskStatus.closed) == "closed"
+        assert _status_to_state_reason(TaskStatus.closed) == "not_planned"
+        assert _status_to_state_reason(TaskStatus.done) == "completed"
+        assert _status_to_state(TaskStatus.accepted) == "open"
 
     def test_rejected_stays_open(self) -> None:
         # Rejected tasks must NOT close the issue — humans need to see them.
@@ -1014,12 +1023,102 @@ class TestStatusLabelMapping:
             (TaskStatus.accepted, "status:accepted"),
             (TaskStatus.done, "status:done"),
             (TaskStatus.rejected, "status:rejected"),
+            (TaskStatus.closed, "status:closed"),
         ],
     )
     def test_status_label_explicit(
         self, status: TaskStatus, label: str
     ) -> None:
         assert STATUS_TO_LABEL[status] == label
+
+
+@pytest.fixture(params=["duplicate", "cancelled", "wont_do", "obsolete", "cannot_reproduce"])
+def closed_task(request) -> Task:
+    """Use a validated closed Task with its required audited disposition."""
+    return _make_task(
+        task_id="T001.1",
+        status=TaskStatus.closed,
+        closure=TaskClosure(
+            resolution=request.param,
+            reason="Scope reviewed.\nThis task will not be delivered.",
+            closed_by="human",
+            closed_at=_now(),
+            duplicate_of="T002" if request.param == "duplicate" else None,
+        ),
+    )
+
+
+class TestClosedTaskSync:
+    @pytest.mark.parametrize("existing_mapping", [False, True])
+    def test_gh_cli_closes_as_not_planned(
+        self, monkeypatch, gh_provider, closed_task, existing_mapping,
+    ) -> None:
+        calls: list[list[str]] = []
+        payload = _make_gh_issue_payload(state="closed", labels=["status:done", "bug"])
+
+        def fake_run(argv, **kwargs):  # noqa: ARG001
+            calls.append(argv)
+            if "create" in argv:
+                return _FakeCompleted(stdout="https://github.com/octo/repo/issues/42\n")
+            return _FakeCompleted(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        mapping = ExternalRef(
+            provider_id="github_issues", external_id="42",
+            url="https://github.com/octo/repo/issues/42",
+        ) if existing_mapping else None
+        assert gh_provider.push_task(task=closed_task, mapping=mapping).external_id == "42"
+
+        close_request = next(call for call in calls if "state=closed" in call)
+        assert close_request[1:4] == ["api", "--method", "PATCH"]
+        assert "repos/octo/repo/issues/42" in close_request
+        assert "state_reason=not_planned" in close_request
+        write_request = next(call for call in calls if ("edit" if existing_mapping else "create") in call)
+        assert "status:closed" in write_request
+        body = write_request[write_request.index("--body") + 1]
+        assert f"**Closure:** {closed_task.closure.resolution}" in body
+        assert closed_task.closure.reason in body
+        assert _strip_footer(body) == closed_task.description
+        if closed_task.closure.duplicate_of:
+            assert "Duplicate of: T002" in body
+        if existing_mapping:
+            assert write_request[write_request.index("--remove-label") + 1] == "status:done"
+            assert "bug" not in write_request
+
+    @pytest.mark.parametrize("existing_mapping", [False, True])
+    def test_http_closes_as_not_planned(
+        self, http_provider, closed_task, existing_mapping,
+    ) -> None:
+        payload = _make_gh_issue_payload(state="closed", labels=["status:done", "bug"])
+        mapping = ExternalRef(
+            provider_id="github_issues", external_id="42",
+            url="https://github.com/octo/repo/issues/42",
+        ) if existing_mapping else None
+        with respx.mock(base_url="https://api.github.com") as mock:
+            if existing_mapping:
+                mock.get("/repos/octo/repo/issues/42").mock(
+                    return_value=httpx.Response(200, json=payload),
+                )
+            else:
+                create = mock.post("/repos/octo/repo/issues").mock(
+                    return_value=httpx.Response(201, json=payload),
+                )
+            update = mock.patch("/repos/octo/repo/issues/42").mock(
+                return_value=httpx.Response(200, json=payload),
+            )
+            assert http_provider.push_task(task=closed_task, mapping=mapping).external_id == "42"
+            update_body = json.loads(update.calls[0].request.content)
+            assert update_body["state"] == "closed"
+            assert update_body["state_reason"] == "not_planned"
+            content_body = update_body if existing_mapping else json.loads(create.calls[0].request.content)
+            assert content_body["labels"] == (
+                ["bug", "status:closed"] if existing_mapping else ["status:closed"]
+            )
+            assert f"**Closure:** {closed_task.closure.resolution}" in content_body["body"]
+            assert closed_task.closure.reason in content_body["body"]
+            assert _strip_footer(content_body["body"]) == closed_task.description
+            if closed_task.closure.duplicate_of:
+                assert "Duplicate of: T002" in content_body["body"]
 
 
 # ===========================================================================

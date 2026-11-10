@@ -78,7 +78,13 @@ def test_raw_creation_uses_actual_target_or_refuses_without_mutation(
         backend.append(draft)
         assert len(backend.list_active_claims()) == (2 if bundle else 1)
         if bundle:
-            assert all(claim.attestation_context is None for claim in backend.list_active_claims())
+            member_contexts = {
+                member["id"]: member["attestation_context"]
+                for member in payload["member_claims"]
+            }
+            for claim in backend.list_active_claims():
+                assert claim.attestation_context is not None
+                assert claim.attestation_context.model_dump(mode="json") == member_contexts[claim.id]
     else:
         with pytest.raises(EventRejected, match="verification profile refused"):
             backend.append(draft, pre_log_check=callback)

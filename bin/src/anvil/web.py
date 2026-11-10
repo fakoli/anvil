@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import signal
 import socket
 import stat
@@ -18,12 +19,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+from concurrent.futures import Future
 from datetime import UTC, datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -38,6 +41,9 @@ MAX_CONFIG_BYTES = 65_536
 MAX_OUTPUT_BYTES = 17 * 1024 * 1024
 READER_TIMEOUT_SECONDS = 20
 MAX_SCRATCH_FILE_BYTES = 64 * 1024 * 1024
+MAX_ACTION_BYTES = 32_768
+PREVIEW_LIFETIME_SECONDS = 300
+_READER_SLOTS = threading.BoundedSemaphore(4)
 
 
 class WebError(ValueError):
@@ -191,7 +197,16 @@ def _kill_reader(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def _reader_output(repository: Repository) -> bytes:
+def _reader_output(repository: Repository, *, mutation: bool = False) -> bytes:
+    if not _READER_SLOTS.acquire(blocking=False):
+        raise WebError("busy", "All readers are busy. Try again shortly.")
+    try:
+        return _bounded_reader_output(repository, mutation=mutation)
+    finally:
+        _READER_SLOTS.release()
+
+
+def _bounded_reader_output(repository: Repository, *, mutation: bool = False) -> bytes:
     environment = os.environ.copy()
     for key in list(environment):
         if key in {"ANVIL_ROOT", "ANVIL_PRD", "ANVIL_STATE_LAYOUT", "PYTHONPATH"} or key.startswith(
@@ -210,7 +225,7 @@ def _reader_output(repository: Repository) -> bytes:
                         "-I",
                         "-m",
                         "anvil.web",
-                        "--reader",
+                        "--writer" if mutation else "--reader",
                         json.dumps(repository.reader_argv),
                     ]
                     if os.name == "posix"
@@ -410,9 +425,140 @@ def enroll_repository(
     return provisional
 
 
-# ponytail: one serialized reader; qualify capacity before introducing parallel project reads.
-class WebHTTPServer(HTTPServer):
-    """Serial reader budget; idle socket deadlines prevent a stalled viewer."""
+class ActionPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    task_id: str = Field(pattern=r"^T[0-9]{3}(?:\.[0-9]+)*$", max_length=128)
+    prd_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", max_length=128)
+    action: Literal["ready", "backlog", "start", "block", "resume", "approve", "reject", "close"]
+    task_version: str = Field(pattern=r"^[0-9a-f]{64}$")
+    snapshot_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ActionConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    preview_id: str = Field(min_length=32, max_length=128)
+    confirmed: Literal[True]
+    reason: str | None = Field(default=None, max_length=4096)
+    resolution: (
+        Literal["duplicate", "cancelled", "wont_do", "obsolete", "cannot_reproduce"] | None
+    ) = None
+    duplicate_of: str | None = Field(default=None, max_length=256)
+
+    @field_validator("confirmed", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError("An explicit confirmation is required")
+        return value
+
+
+class BundlePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    bundle_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=128)
+
+
+class BundleListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    after_bundle_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", max_length=128,
+    )
+    prd_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", max_length=128,
+    )
+
+
+def _native_writer(repository: Repository) -> bool:
+    """A custom read command never implicitly grants execution authority."""
+    from anvil.state.schema import get_schema_version
+
+    return (
+        repository.reader_argv
+        == [sys.executable, "-I", "-m", "anvil.cli", "project", "snapshot", "--json"]
+        and repository.expected_schema_version == get_schema_version()
+    )
+
+
+def _action_worker(
+    repository: Repository, actor: str, operation: str, request: Any = None
+) -> dict[str, Any]:
+    arguments = [
+        sys.executable,
+        "-I",
+        "-m",
+        "anvil.web_actions",
+        operation,
+        json.dumps(
+            {
+                "repository": repository.model_dump(),
+                "actor": actor,
+                "request": request,
+            }
+        ),
+    ]
+    worker = repository.model_copy(update={"reader_argv": arguments})
+    try:
+        response = json.loads(_reader_output(worker, mutation=operation == "execute"))
+        if not isinstance(response, dict):
+            raise ValueError("Invalid worker envelope")
+        if response.get("ok") is False:
+            failure = response.get("error")
+            if not isinstance(failure, dict) or not all(
+                isinstance(failure.get(key), str) and failure[key]
+                for key in ("code", "message")
+            ):
+                raise ValueError("Invalid worker error")
+        elif response.get("ok") is not True or not isinstance(response.get("data"), dict):
+            raise ValueError("Invalid worker result")
+    except WebError as error:
+        if operation == "execute" and error.code != "busy":
+            raise WebError(
+                "outcome_unknown",
+                "The result could not be confirmed. Refresh the board "
+                "and inspect the task before trying another change.",
+            ) from error
+        raise
+    except (ValueError, TypeError) as error:
+        raise WebError(
+            "outcome_unknown" if operation == "execute" else "invalid_response",
+            "The result could not be confirmed. Refresh and inspect the task before retrying.",
+        ) from error
+    if response["ok"] is False:
+        raise WebError(response["error"]["code"], response["error"]["message"])
+    data = response["data"]
+    assert isinstance(data, dict)  # validated above; retain the typed return contract
+    return data
+
+
+class WebHTTPServer(ThreadingHTTPServer):
+    """Eight bounded request threads; four bounded isolated readers across repositories."""
+
+    daemon_threads = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.request_slots = threading.BoundedSemaphore(8)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self.request_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
+                    b"Retry-After: 1\r\nConnection: close\r\n\r\n"
+                )
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.request_slots.release()
 
     def get_request(self) -> tuple[Any, Any]:
         connection, address = super().get_request()
@@ -420,78 +566,108 @@ class WebHTTPServer(HTTPServer):
         return connection, address
 
 
-def make_server(config_path: Path, port: int | None = None) -> WebHTTPServer:
+def make_server(
+    config_path: Path,
+    port: int | None = None,
+    *,
+    allow_writes: bool = False,
+    actor: str | None = None,
+) -> WebHTTPServer:
     config = load_config(config_path)
+    if allow_writes and (not actor or not actor.strip() or len(actor) > 256):
+        raise WebError(
+            "invalid_actor", "--allow-writes requires a nonempty --actor (at most 256 characters)."
+        )
+    if allow_writes:
+        from anvil.actors import ActorIdentityError, canonicalize_new_actor
+
+        try:
+            actor = canonicalize_new_actor(actor or "")
+        except ActorIdentityError as error:
+            raise WebError("invalid_actor", str(error)) from error
     page = files("anvil").joinpath("_data/web/index.html").read_bytes()
+    csrf_token = secrets.token_urlsafe(32)
+    previews: dict[str, tuple[float, Repository, dict[str, Any]]] = {}
+    preview_lock = threading.Lock()
+    reads: dict[str, Future[dict[str, Any]]] = {}
+    read_lock = threading.Lock()
+    read_request_slots = threading.BoundedSemaphore(4)
+
+    def shared_read(
+        repository: Repository, operation: str, request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # Include coalesced waiters in admission so slow board reads cannot
+        # occupy every HTTP thread needed for a mutation.
+        if not read_request_slots.acquire(blocking=False):
+            raise WebError("busy", "Too many concurrent reads. Try again shortly.")
+        try:
+            return coalesced_read(repository, operation, request)
+        finally:
+            read_request_slots.release()
+
+    def coalesced_read(
+        repository: Repository, operation: str, request: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        # Coalesce only overlapping reads. No TTL cache: every later refresh
+        # reads State again and every mutation keeps its own fresh engine checks.
+        key = operation + repository.model_dump_json() + json.dumps(request, sort_keys=True)
+        with read_lock:
+            pending = reads.get(key)
+            owner = pending is None
+            if pending is None:
+                pending = Future()
+                reads[key] = pending
+        if owner:
+            try:
+                if allow_writes and _native_writer(repository):
+                    result = _action_worker(repository, actor or "", operation, request)
+                else:
+                    result = {"snapshot": read_snapshot(repository)}
+                pending.set_result(result)
+            except BaseException as error:
+                pending.set_exception(error)
+            finally:
+                with read_lock:
+                    reads.pop(key, None)
+        return pending.result()
 
     class Handler(BaseHTTPRequestHandler):
         server: WebHTTPServer
 
-        def do_GET(self) -> None:
+        def _authorized_origin(self, *, mutation: bool = False) -> bool:
             hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
             origins = {f"http://{host}" for host in hosts}
             hosts.update(urlsplit(origin).netloc for origin in config.allowed_https_origins)
             origins.update(config.allowed_https_origins)
             origin = self.headers.get("Origin")
-            if (
-                self.headers.get("Host") not in hosts
+            invalid = (
+                len(self.headers.get_all("Host", [])) != 1
+                or len(self.headers.get_all("Origin", [])) > 1
+                or self.headers.get("Host") not in hosts
                 or (origin is not None and origin not in origins)
                 or (
                     self.path.startswith("/api/")
                     and self.headers.get("Sec-Fetch-Site") == "cross-site"
                 )
-            ):
+                or (
+                    mutation
+                    and (origin is None or urlsplit(origin).netloc != self.headers.get("Host"))
+                )
+            )
+            if invalid:
                 self.send_error(403)
-                return
-            try:
-                if self.path == "/":
-                    body, content_type = page, "text/html; charset=utf-8"
-                elif self.path == "/api/catalog":
-                    body, content_type = (
-                        json.dumps(catalog(load_config(config_path))).encode(),
-                        "application/json",
-                    )
-                else:
-                    prefix, suffix = "/api/repositories/", "/snapshot"
-                    if not self.path.startswith(prefix) or not self.path.endswith(suffix):
-                        self.send_error(404)
-                        return
-                    repository_id = self.path[len(prefix) : -len(suffix)]
-                    repository = next(
-                        (
-                            item
-                            for item in load_config(config_path).repositories
-                            if item.id == repository_id
-                        ),
-                        None,
-                    )
-                    if repository is None:
-                        self.send_error(404)
-                        return
-                    snapshot = read_snapshot(repository)
-                    body = json.dumps(
-                        {
-                            "schema_id": "anvil.web.repository.v1",
-                            "observed_at": datetime.now(UTC).isoformat(),
-                            "machine": machine_identity(),
-                            "repository": repository.model_dump(),
-                            "snapshot": snapshot,
-                        }
-                    ).encode()
-                    content_type = "application/json"
-                if len(body) > MAX_OUTPUT_BYTES + MAX_CONFIG_BYTES:
-                    raise WebError("response_limit", "Web response exceeds its bounded budget")
-                self.send_response(200)
-            except WebError as error:
-                body = json.dumps(
-                    {"ok": False, "error": {"code": error.code, "message": str(error)}}
-                ).encode()
-                content_type = "application/json"
-                self.send_response(502)
+            return not invalid
+
+        def _send(
+            self, body: bytes, content_type: str = "application/json", status: int = 200
+        ) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            if status == 503:
+                self.send_header("Retry-After", "1")
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
@@ -499,6 +675,246 @@ def make_server(config_path: Path, port: int | None = None) -> WebHTTPServer:
             )
             self.end_headers()
             self.wfile.write(body)
+
+        def _refuse(self, error: WebError, *, mutation: bool = False) -> None:
+            status = 503 if error.code == "busy" else (409 if mutation else 502)
+            if error.code == "invalid_batch_query":
+                status = 400
+            self._send(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": error.code,
+                            "message": str(error),
+                        },
+                    }
+                ).encode(),
+                status=status,
+            )
+
+        def _repository(self, repository_id: str) -> Repository:
+            repository = next(
+                (
+                    item
+                    for item in load_config(config_path).repositories
+                    if item.id == repository_id
+                ),
+                None,
+            )
+            if repository is None:
+                raise WebError("repository_not_found", "Repository is no longer enrolled.")
+            return repository
+
+        def do_GET(self) -> None:
+            if not self._authorized_origin():
+                return
+            try:
+                if self.path == "/":
+                    body, content_type = page, "text/html; charset=utf-8"
+                elif self.path == "/api/catalog":
+                    data = catalog(load_config(config_path))
+                    data.update(
+                        csrf_token=csrf_token,
+                        workflow={
+                            "enabled": allow_writes,
+                            "actor": actor if allow_writes else None,
+                            "reason": None if allow_writes else "Read-only session.",
+                        },
+                    )
+                    body, content_type = json.dumps(data).encode(), "application/json"
+                else:
+                    request_path, _, query = self.path.partition("?")
+                    bundle_match = re.fullmatch(
+                        r"/api/repositories/([0-9a-f]{24})/bundles", request_path
+                    )
+                    if bundle_match:
+                        try:
+                            if len(query) > 1024:
+                                raise ValueError("Query exceeds its bound")
+                            parameters = parse_qs(
+                                query, keep_blank_values=True, strict_parsing=True,
+                                max_num_fields=2, errors="strict",
+                            )
+                            if any(len(values) != 1 for values in parameters.values()):
+                                raise ValueError("Duplicate query parameter")
+                            selection = BundleListRequest.model_validate({
+                                key: values[0] for key, values in parameters.items()
+                            })
+                        except (ValueError, ValidationError) as error:
+                            raise WebError(
+                                "invalid_batch_query", "Invalid execution-batch page or campaign."
+                            ) from error
+                        repository = self._repository(bundle_match[1])
+                        if not allow_writes or not _native_writer(repository):
+                            raise WebError(
+                                "read_only_repository", "Batch actions need a compatible writer."
+                            )
+                        bundle_body = json.dumps(shared_read(
+                            repository, "bundles", selection.model_dump(),
+                        )).encode()
+                        if len(bundle_body) > MAX_OUTPUT_BYTES:
+                            raise WebError("response_limit", "Batch response exceeds its budget.")
+                        self._send(bundle_body)
+                        return
+                    prefix, suffix = "/api/repositories/", "/snapshot"
+                    if not self.path.startswith(prefix) or not self.path.endswith(suffix):
+                        self.send_error(404)
+                        return
+                    repository_id = self.path[len(prefix) : -len(suffix)]
+                    try:
+                        repository = self._repository(repository_id)
+                    except WebError:
+                        self.send_error(404)
+                        return
+                    if allow_writes and _native_writer(repository):
+                        assert actor is not None
+                        inspected = shared_read(repository, "snapshot")
+                        snapshot = _validate_snapshot(
+                            repository, {"ok": True, "data": inspected["snapshot"]}
+                        )
+                        workflow = inspected["workflow"]
+                    else:
+                        snapshot = shared_read(repository, "snapshot")["snapshot"]
+                        workflow = {
+                            "enabled": False,
+                            "actions": {},
+                            "versions": {},
+                            "closures": {},
+                            "reason": (
+                                "This repository uses a separate reader; "
+                                "changes need a compatible writer."
+                            )
+                            if allow_writes
+                            else "Read-only session.",
+                        }
+                    body = json.dumps(
+                        {
+                            "schema_id": "anvil.web.repository.v1",
+                            "observed_at": datetime.now(UTC).isoformat(),
+                            "machine": machine_identity(),
+                            "repository": repository.model_dump(),
+                            "snapshot": snapshot,
+                            "workflow": workflow,
+                        }
+                    ).encode()
+                    content_type = "application/json"
+                if len(body) > MAX_OUTPUT_BYTES + MAX_CONFIG_BYTES:
+                    raise WebError("response_limit", "Web response exceeds its bounded budget")
+            except WebError as error:
+                self._refuse(error)
+                return
+            self._send(body, content_type)
+
+        def do_POST(self) -> None:
+            if not self._authorized_origin(mutation=True):
+                return
+            if not allow_writes:
+                self.send_error(405)
+                return
+            supplied_csrf = self.headers.get("X-Anvil-CSRF", "")
+            if (
+                len(self.headers.get_all("X-Anvil-CSRF", [])) != 1
+                or not supplied_csrf.isascii()
+                or not secrets.compare_digest(supplied_csrf, csrf_token)
+            ):
+                self.send_error(403)
+                return
+            if (
+                self.headers.get("Content-Type") != "application/json"
+                or self.headers.get("Transfer-Encoding") is not None
+                or len(self.headers.get_all("Content-Length", [])) != 1
+            ):
+                self.send_error(400)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if not 0 < length <= MAX_ACTION_BYTES:
+                self.send_error(413)
+                return
+            match = re.fullmatch(
+                r"/api/repositories/([0-9a-f]{24})/(preview|transition|bundle-preview|bundle-claim)",
+                self.path,
+            )
+            if match is None:
+                self.send_error(404)
+                return
+            try:
+                repository = self._repository(match[1])
+                if not _native_writer(repository):
+                    raise WebError(
+                        "read_only_repository",
+                        "A separate reader cannot be used to change this repository.",
+                    )
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    raise WebError("invalid_request", "Incomplete action request.")
+                assert actor is not None
+                if match[2] in {"preview", "bundle-preview"}:
+                    if match[2] == "bundle-preview":
+                        bundle_request = BundlePreviewRequest.model_validate_json(raw)
+                        result = _action_worker(
+                            repository, actor, "bundle_preview", bundle_request.model_dump()
+                        )
+                    else:
+                        request = ActionPreviewRequest.model_validate_json(raw)
+                        result = _action_worker(repository, actor, "preview", request.model_dump())
+                    binding = result.pop("binding")
+                    preview_id = secrets.token_urlsafe(32)
+                    with preview_lock:
+                        now = time.monotonic()
+                        for key, (expires, _, __) in list(previews.items()):
+                            if expires <= now:
+                                del previews[key]
+                        if len(previews) >= 128:
+                            raise WebError("busy", "Too many pending previews. Try again shortly.")
+                        previews[preview_id] = (now + PREVIEW_LIFETIME_SECONDS, repository, binding)
+                    result["preview_id"] = preview_id
+                else:
+                    confirmation = ActionConfirmation.model_validate_json(raw)
+                    with preview_lock:
+                        pending = previews.pop(confirmation.preview_id, None)
+                    if pending is None or pending[0] <= time.monotonic():
+                        raise WebError(
+                            "preview_expired",
+                            "This preview expired or was already used. Preview the move again.",
+                        )
+                    if pending[1] != repository:
+                        raise WebError(
+                            "repository_changed",
+                            "Repository configuration changed. Preview the move again.",
+                        )
+                    bundle_claim = match[2] == "bundle-claim"
+                    if (pending[2].get("kind") == "bundle_claim") != bundle_claim:
+                        raise WebError(
+                            "preview_kind_mismatch", "Preview does not match this action."
+                        )
+                    if bundle_claim and any(
+                        value is not None for value in (
+                            confirmation.reason, confirmation.resolution, confirmation.duplicate_of
+                        )
+                    ):
+                        raise WebError(
+                            "invalid_request", "Batch claims do not accept task action fields."
+                        )
+                    result = _action_worker(
+                        repository,
+                        actor,
+                        "execute",
+                        {
+                            **confirmation.model_dump(
+                                exclude={"preview_id", "confirmed"}, exclude_none=True
+                            ),
+                            "binding": pending[2],
+                        },
+                    )
+                self._send(json.dumps(result).encode())
+            except ValidationError:
+                self._refuse(WebError("invalid_request", "Invalid action fields."), mutation=True)
+            except WebError as error:
+                self._refuse(error, mutation=True)
 
     return WebHTTPServer(("127.0.0.1", config.port if port is None else port), Handler)
 
@@ -508,12 +924,15 @@ def _exec_reader() -> None:
     if os.name == "posix":
         import resource
 
-        resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_SCRATCH_FILE_BYTES,) * 2)
+        # A reader may only create bounded scratch files. A writer appends to
+        # canonical State, whose size must not be capped by a scratch budget.
+        if sys.argv[1] == "--reader":
+            resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_SCRATCH_FILE_BYTES,) * 2)
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     os.execv(argv[0], argv)
 
 
 if __name__ == "__main__":  # Internal worker; argv comes only from owner configuration.
-    if len(sys.argv) != 3 or sys.argv[1] != "--reader":
+    if len(sys.argv) != 3 or sys.argv[1] not in {"--reader", "--writer"}:
         raise SystemExit(2)
     _exec_reader()

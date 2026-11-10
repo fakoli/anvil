@@ -321,26 +321,17 @@ class GhCliClient:
         add_labels: list[str] | None = None,
         remove_labels: list[str] | None = None,
         state: str | None = None,
+        state_reason: str | None = None,
     ) -> dict[str, Any]:
         """Edit an existing issue; return the post-edit view payload.
 
-        ``state`` accepts ``"open"`` or ``"closed"`` — we translate to
-        ``gh issue close`` / ``gh issue reopen`` because ``gh issue edit``
-        does not have a ``--state`` flag.
+        State changes use separate commands because gh issue edit has no
+        state flag. An explicit closure reason uses gh api PATCH so it also
+        updates already-closed issues.
         """
-        # Apply state transition first (if any). gh issue close/reopen
-        # are separate commands.
+        # Apply state transition first (if any).
         if state == "closed":
-            self._run(
-                [
-                    "issue",
-                    "close",
-                    number,
-                    "--repo",
-                    self.repo,
-                ],
-                parse_json=False,
-            )
+            self.close_issue(number=number, state_reason=state_reason)
         elif state == "open":
             self._run(
                 [
@@ -451,8 +442,20 @@ class GhCliClient:
             )
         return result.data
 
-    def close_issue(self, *, number: str) -> None:
+    def close_issue(self, *, number: str, state_reason: str | None = None) -> None:
         """Close issue ``number``. GitHub cannot truly delete an issue."""
+        if state_reason is not None:
+            # gh issue close returns early for an already-closed issue.
+            # PATCH also corrects its reason without reopening the issue.
+            self._run(
+                [
+                    "api", "--method", "PATCH",
+                    f"repos/{self.repo}/issues/{number}",
+                    "--field", "state=closed",
+                    "--field", f"state_reason={state_reason}",
+                ],
+            )
+            return
         self._run(
             [
                 "issue",

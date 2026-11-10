@@ -174,6 +174,7 @@ class BundleMemberPacketContext:
     requirements: list[Requirement]
     dependencies: list[Task]
     assumptions: list[PRDAssumption]
+    member_claim: Claim | None = None
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,14 @@ def render_bundle_packet(
         child_claim_id = (
             bundle_claim.member_claim_ids.get(task.id) if bundle_claim is not None else None
         )
+        if context.member_claim is not None and (
+            bundle_claim is None
+            or context.member_claim.id != child_claim_id
+            or context.member_claim.task_id != task.id
+            or context.member_claim.bundle_claim_id != bundle_claim.id
+            or context.member_claim.claimed_by != bundle.coordinator
+        ):
+            raise ValueError("bundle packet claim does not match member custody")
         member_json.append(
             {
                 "position": position,
@@ -277,6 +286,10 @@ def render_bundle_packet(
                     for assumption in context.assumptions
                 ],
                 "member_claim_id": child_claim_id,
+                "member_claim": (
+                    context.member_claim.model_dump(mode="json")
+                    if context.member_claim is not None else None
+                ),
             }
         )
         lines.extend(

@@ -178,6 +178,7 @@ class TaskCountsByStatus(BaseModel):
     accepted: int = 0
     done: int = 0
     rejected: int = 0
+    closed: int = 0
 
 
 class PrdStatusEntry(BaseModel):
@@ -4355,6 +4356,7 @@ def apply_review_decision(
         }
         if approve:
             current_attempt = backend.get_latest_evidence(task_id)
+            payload["bundle_review_guard_version"] = 1
             if current_attempt is not None:
                 payload["review_attempt_id"] = current_attempt.id
         if rejection_provenance is not None:

@@ -1,8 +1,10 @@
-# Read-only web interface
+# Kanban web interface
 
 Anvil's native web interface navigates **machine → repository → campaign/PRD →
-task**. It reads the same canonical project snapshots as CLI and MCP consumers.
-Enrollment stores presentation settings, not tasks, claims or a second database.
+task**. The board reads canonical snapshots from Anvil’s SQLite state through
+the state engine, the same source used by CLI and MCP consumers. It does not
+scan task markdown files or keep a second task database. Enrollment stores only
+presentation settings.
 Only the local connected machine is implemented; remote federation is not inferred
 from a label, path or Tailscale connection.
 
@@ -32,13 +34,91 @@ options, for example `anvil web --config /path/to/config.json list --json`. Cust
 
 Select a repository before a campaign. Switching repositories immediately clears
 the previous task set; aborted or late responses cannot populate another
-repository's board. The page renders at most 500 cards at once and reports any clipping; choose a
-campaign to narrow a larger task set. The API retains the complete bounded
+repository's board. The page renders at most 500 cards at once. **Previous** and **Next** reach
+every task in larger campaigns; the page indicator shows the visible range and
+total. Column counts describe the current page. Choosing a repository or campaign
+returns to the first page; refreshing keeps the current page when it still exists. The API retains the complete bounded
 snapshot. Each card retains its exact canonical status, dependencies,
 criteria and verification summary. Source details expose repository root,
 project identity, configured reader, observed schema, digest and event frontier.
-A task in Review or Closed is a workflow state, not proof of a successful
-experiment, deployment or permission to start one.
+A task in In review or Closed is a workflow state, not proof of a successful
+experiment, deployment or permission to start one. Closed tasks show their
+resolution separately from their exact status, including in read-only sessions.
+
+## Move work through the board
+
+The default session is read-only. To enable human workflow actions, launch with
+an explicit actor:
+
+```sh
+anvil web --allow-writes --actor human
+```
+
+Only repositories using this installation’s native reader can be changed. A
+separate compatible reader remains read-only; selecting it never grants writer
+authority. The actor is recorded attribution, not an authentication mechanism.
+Everyone who can use this enabled session acts as that configured actor.
+
+| Column | Canonical task statuses |
+| --- | --- |
+| Backlog | `proposed`, `drafted`, `reviewed`, `rejected` |
+| Ready | `ready` |
+| In progress | `claimed`, `in_progress` |
+| Blocked | `blocked` |
+| In review | `needs_review` |
+| Closed | `accepted`, `done`, `closed` |
+
+Drag a card to a highlighted destination, or use its **Move…** button. The
+board offers named actions from the engine, not arbitrary status assignments.
+Dropping a card opens a preview; the card stays in place until you confirm and
+Anvil accepts the change. Escape cancels. Keyboard and touch users can choose
+the same moves through buttons.
+
+Available actions depend on the task and its current custody. Drafted or
+reviewed work can become Ready when its readiness requirements pass. Ready
+work can return to Backlog. Starting, blocking and resuming work require a
+current claim owned by the configured actor. Evidence submission, detailed
+bundle coordination and protected root operations retain their CLI/MCP paths. A drag does not acquire a lease, run work, fabricate
+evidence or skip directly from Backlog to successful completion.
+
+Open **Execution batches** to inspect current bundles, 50 per page. **Previous
+batches** and **Next batches** navigate every batch in the selected campaign;
+**All campaigns** includes the whole repository. Pages use stable bundle IDs,
+so earlier batches leaving the current list cannot skip later batches. Each page
+reads current State; **Refresh** starts from the first page to include earlier
+additions. A planned bundle
+owned by the session actor offers **Preview batch claim**. Confirmation calls the
+native claim path with an exact project/source/member scope digest; changed scope refuses
+without partial custody. Members must be independent; split dependency chains
+into successive cohorts. This authorizes execution under one coordinator lease;
+it does not start workers or accept completion. Member counts and the next
+advisory wave refresh from the same State used by the CLI. See the
+[concurrent execution journeys](concurrent-execution-journeys.md).
+
+To approve submitted work, move an In review card to Closed and inspect the
+preview’s task, evidence, submitting actor, commit and commands. **Approve and
+close** records acceptance through Anvil’s existing strict `apply` path. Required
+independent reviews and your project validation must be complete before you
+confirm; the displayed evidence summary alone does not establish those reviews.
+**Request changes** returns work to Backlog with a recorded reason.
+
+**Close without completion** records a non-success disposition: Duplicate,
+Cancelled, Won’t do, Obsolete or Cannot reproduce. A reason is required;
+Duplicate also requires an existing task. An unqualified ID such as `T002`
+means the current campaign; `campaign:T002` selects another campaign and
+`default:T002` selects the default campaign. This closure does not satisfy
+dependent tasks’ successful-completion requirements.
+
+Previews expire after five minutes and are single-use. Confirmation checks the
+selected task and evidence again, so another task can advance without
+invalidating your preview. A change to the selected task, evidence or enrollment
+requires a fresh preview. If a response is uncertain, refresh before deciding
+what to do next; the board never retries a mutation automatically.
+
+The web UI is optional for agent throughput. Agents keep using native
+claim/progress/submit/apply operations and may use `anvil task-action` for
+supported direct moves without a browser preview round trip. The same engine
+custody and transition checks apply.
 
 ## Reader identity and compatibility
 
@@ -84,21 +164,28 @@ explicitly allowlisted HTTPS origin in the private config:
 Merge origin settings into the existing file rather than replacing its enrolled
 repositories. Host and Origin checks remain exact; HTTP variants, wildcards,
 foreign origins and cross-site API requests refuse. There is no CORS, remote
-path/argv input, task mutation, arbitrary file server or external asset loading.
+path/argv input, arbitrary file server or external asset loading. Writes require
+the explicit session flag, exact same-origin requests, a session CSRF token and
+a validated action preview. Browser input cannot supply executable commands.
 A private proxy's access policy is the authentication boundary; public exposure
 needs separate design and authorization. Real proxy/service configuration and
 lifecycle belong in the operator's private deployment system. The foreground
 viewer stops with Ctrl-C; it does not install a daemon or boot service itself.
 
-Reads are serialized, with a 20-second child deadline, 17 MiB output ceiling,
-64 MiB per scratch-file ceiling on POSIX, and an isolated temporary directory.
-Windows retains the output/time limits without the POSIX file-size limit.
+The server allows eight request threads and at most four isolated reader workers,
+with a 20-second child deadline, 17 MiB output ceiling and an isolated temporary
+directory. Reader workers also have a 64 MiB per-file ceiling on POSIX; Windows
+retains their output/time limits without that file-size limit. Writer workers
+retain the output/time bounds but have no per-file limit, so existing state
+databases and event logs can grow beyond 64 MiB.
 Canonical provider limits also apply. At most 16 repositories and four HTTPS
 origins are enrolled in a 64 KiB config. Catalog reads contain metadata only;
 `GET /api/repositories/ID/snapshot` reads exactly the selected repository.
 Idle HTTP sockets have a five-second deadline. A refusal remains visible; the
 viewer does not hide it with a previous successful repository's data. This is a
-small single-reader foundation, not a concurrent multi-user capacity claim.
+bounded local board, not a qualified multi-user service. Excess request or
+reader capacity returns a visible busy response; it does not create an unbounded
+queue. The state engine serializes mutations under its existing writer lock.
 
 ## Provenance
 
@@ -110,4 +197,13 @@ adds persisted independent enrollment, repository isolation, canonical payload
 validation and packaged CLI/assets. Anvil's existing MIT license and copyright
 apply; original source attribution is retained.
 
-Automatic reads run every 30 seconds while the page is idle. Keyboard focus or an open details panel pauses automatic reads so inspection remains stable; use Refresh for an immediate read.
+Automatic reads run every 30 seconds while the page is idle. Keyboard focus, an
+open details panel, dragging, a confirmation dialog or a hidden tab pauses
+automatic reads. Turn off **Auto-refresh** to pause explicitly, or use **Refresh**
+for an immediate read. Rendering stays bounded at 500 cards per page; campaign filtering and pagination
+use the current snapshot without extra network reads or per-card requests.
+
+The interaction follows Jira’s [status-to-column mapping](https://support.atlassian.com/jira-software-cloud/docs/configure-columns/),
+[workflow-controlled transitions](https://support.atlassian.com/jira-software-cloud/docs/transition-an-issue/)
+and separate [closure resolutions](https://support.atlassian.com/jira-cloud-administration/docs/what-is-a-resolution-in-jira/).
+Anvil’s own state and evidence rules remain authoritative.

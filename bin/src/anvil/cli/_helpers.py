@@ -985,7 +985,7 @@ def _open_contained_prd_source_posix(
         if len(relative_parent.parts) > 1:
             raise ValueError("managed PRD source parent must be direct")
         resolved_root = containment_root.resolve(strict=True)
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0)
         for flag_name in ("O_CLOEXEC", "O_NOFOLLOW"):
             directory_flags |= getattr(os, flag_name, 0)
         root_descriptor = os.open(resolved_root, directory_flags)

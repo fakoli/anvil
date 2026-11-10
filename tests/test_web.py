@@ -410,3 +410,48 @@ def test_reader_never_forwards_unknown_envelope_fields(enrolled):
         "applied_limits",
         "snapshot_digest",
     }
+
+
+def test_overlapping_refreshes_share_read_but_later_refresh_is_fresh(enrolled, monkeypatch):
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    from tests.test_web_actions import _request, _running_server
+
+    config_path, repositories = enrolled
+    original_read = web.read_snapshot
+    reader_entered, waiter_entered, release_reader = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    calls = []
+
+    class ObservedFuture(Future):
+        def result(self, timeout=None):
+            if not self.done():
+                waiter_entered.set()
+            return super().result(timeout=timeout)
+
+    def blocked_read(repository):
+        calls.append(repository.id)
+        if len(calls) == 1:
+            reader_entered.set()
+            assert release_reader.wait(5)
+        return original_read(repository)
+
+    monkeypatch.setattr(web, "Future", ObservedFuture)
+    monkeypatch.setattr(web, "read_snapshot", blocked_read)
+    with _running_server(config_path) as server, ThreadPoolExecutor(max_workers=2) as executor:
+        path = f"/api/repositories/{repositories[0].id}/snapshot"
+        first = executor.submit(_request, server, path)
+        assert reader_entered.wait(5)
+        second = executor.submit(_request, server, path)
+        try:
+            assert waiter_entered.wait(5)
+        finally:
+            release_reader.set()
+        first_status, first_result = first.result()
+        second_status, second_result = second.result()
+        assert first_status == second_status == 200
+        assert first_result["snapshot"] == second_result["snapshot"]
+        assert calls == [repositories[0].id]
+        assert _request(server, path)[0] == 200
+        assert calls == [repositories[0].id, repositories[0].id]

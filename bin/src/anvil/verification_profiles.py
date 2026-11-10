@@ -92,10 +92,12 @@ def _read_file(root: Path, portable_path: str) -> tuple[bytes, tuple[int, ...]]:
                 if os.name == "nt":
                     descriptor = _windows_open(current, directory=directory)
                 else:
-                    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-                    flags |= getattr(os, "O_CLOEXEC", 0)
+                    flags = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
                     if directory:
-                        flags |= os.O_DIRECTORY
+                        # Pin ancestors without requesting directory enumeration.
+                        flags |= getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
+                    else:
+                        flags |= os.O_RDONLY | os.O_NONBLOCK
                     descriptor = os.open(
                         str(current) if index == 0 else part,
                         flags, dir_fd=descriptor,
