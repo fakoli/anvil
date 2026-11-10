@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
+from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
 from tests.test_bundle_scope_migration import _seed_claim
 from tests.test_bundle_state import _T0, _backend, _create_bundle, _event, _seed
@@ -108,6 +109,45 @@ def test_migration_refuses_custody_when_log_and_projection_disagree(
         assert result.exit_code == 1, result.output
         assert json.loads(result.stdout)["error"]["code"] == "active_claims"
         assert _files(state) == before
+
+
+@pytest.mark.parametrize("missing_projection", [False, True])
+def test_empty_projection_refuses_custody_but_missing_projection_retains_bootstrap(
+    tmp_path, monkeypatch, missing_projection,
+):
+    state = tmp_path / ".anvil"
+    state.mkdir()
+    backend, _, _ = _seed_claim(state)
+    original_projection = serialize_state(backend)
+    backend.close()
+    if missing_projection:
+        (state / "state.db").unlink()
+    else:
+        (state / "state.db").write_bytes(b"")
+    for suffix in ("-wal", "-shm"):
+        (state / f"state.db{suffix}").unlink(missing_ok=True)
+    (state / "config.yaml").write_text("events_storage: local\n", encoding="utf-8")
+    before = _files(state)
+    for options in (["--json"], ["--yes", "--json"]):
+        result = _invoke(tmp_path, monkeypatch, ["migrate", "state", *options])
+        assert result.exit_code == 1, result.output
+        if not missing_projection:
+            assert json.loads(result.stdout)["error"]["code"] == "active_claims"
+        assert _files(state) == before
+    if missing_projection:
+        # A fresh clone can reconstruct active shared claims from its authority;
+        # no prior projection schema exists to upgrade.
+        rebuilt = _backend(state)
+        try:
+            assert serialize_state(rebuilt) == original_projection
+            assert (state / "events.jsonl").read_bytes() == before["events.jsonl"]
+        finally:
+            rebuilt.close()
+    else:
+        with pytest.raises(SchemaProbeFailed, match="Active task or bundle custody"):
+            _backend(state)
+        assert _files(state) == before
+
 
 
 def test_normal_open_refuses_missing_authority_without_creating_log(tmp_path):

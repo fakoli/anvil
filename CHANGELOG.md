@@ -19,7 +19,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   scoped concurrent execution. Discovery API24 includes the withdrawal action.
 - Schema migration holds the native writer lock across custody checks, a
   consistent database backup and upgrade. Active task or bundle custody blocks
-  both explicit migration and automatic migration during ordinary opens.
+  explicit migration and automatic upgrades of existing projections during
+  ordinary opens, including an empty database with active canonical claims.
 - Existing immutable State logs remain unchanged by schema upgrades. Operators
   must restart old clients after upgrading their CLI and State.
 

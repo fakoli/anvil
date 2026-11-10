@@ -659,7 +659,7 @@ def _active_claim_ids_from_event_log(events_path: str, events_storage: str) -> l
     from anvil.clock import SystemClock
 
     authority = Path(events_path)
-    if not authority.exists():
+    if not authority.exists() or authority.stat().st_size == 0:
         return []
     with tempfile.TemporaryDirectory(prefix="anvil-migration-custody-") as temporary:
         scratch_root = Path(temporary)
@@ -687,8 +687,12 @@ def _schema_upgrade_active_claim_ids(
 ) -> list[str]:
     """Share projection and authority admission between preview and apply."""
     database = Path(db_path)
-    if not database.is_file() or database.stat().st_size == 0:
+    # An absent projection is the native fresh-clone/replay bootstrap path.
+    # Explicit migration requires an existing file, including a damaged empty one.
+    if not database.is_file():
         return []
+    if database.stat().st_size == 0:
+        return _active_claim_ids_from_event_log(events_path, events_storage)
     if not Path(events_path).is_file():
         raise SchemaProbeFailed(
             "Existing State authority log is unavailable; schema migration refused."
