@@ -771,3 +771,7 @@ advisory and harmless.
 ## Native web legacy layout selection (PR #257)
 
 **Status**: DEFERRED. The default web reader deliberately clears inherited `ANVIL_STATE_LAYOUT` and uses canonical HOME-workspace state; local-only legacy `.anvil` projects require an explicit trusted reader that sets its own local layout. If both layouts exist, HOME wins. Native per-repository layout selection is outside this read-only foundation; actual HOME-workspace projects are qualified, and no automatic migration or fallback is authorized.
+
+## Native web custom catalog custody (PR #257)
+
+**Status**: DEFERRED. Custom catalog files and their containing paths must be trusted and protected against replacement because reader argv is executable operator configuration. Final-file mode checks and atomic writes do not establish owner/parent custody. Managed deployment must enforce private owner inputs under protected directories; broader custody validation is outside this qualified read-only foundation. This is not authorization for HTTP-supplied commands or untrusted catalogs.

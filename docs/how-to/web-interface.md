@@ -28,7 +28,7 @@ written atomically with owner-only POSIX file permissions. Windows uses the
 owner profile's file ACLs instead of interpreting POSIX write bits. Run enrollment changes
 serially and reload the page afterward. `--config PATH` selects another catalog;
 `--port NUMBER` overrides the configured loopback port. These are web-group
-options, for example `anvil web --config /path/to/config.json list --json`.
+options, for example `anvil web --config /path/to/config.json list --json`. Custom catalogs and every containing path must be trusted and protected against replacement: reader argv is executable operator configuration, and final-file mode checks do not establish owner/parent custody.
 
 Select a repository before a campaign. Switching repositories immediately clears
 the previous task set; aborted or late responses cannot populate another
