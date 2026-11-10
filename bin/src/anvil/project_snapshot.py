@@ -29,6 +29,7 @@ from anvil.read_contracts import (
     ProviderReadLimitsV1,
     ReadErrorCode,
     ReadErrorV1,
+    TaskClosureV1,
     TaskRecordV1,
     TaskScopedRefV1,
     VerificationKindV1,
@@ -38,7 +39,7 @@ from anvil.read_contracts import (
 )
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
-from anvil.state.models import Event, Verification
+from anvil.state.models import Event, TaskClosure, Verification
 from anvil.state.sqlite import query_only_transaction
 
 EVENT_FRONTIER_DOMAIN_V1 = b"anvil.project-event-frontier.v1\0"
@@ -81,23 +82,7 @@ def read_project_snapshot(
             root / "state.db",
             root / "events.jsonl",
         ) as (conn, events_fh):
-            event_cursor, event_identity = _event_cursor(conn, events_fh)
-            payload = _project_payload(conn, applied_limits)
-            payload_digest = snapshot_digest(payload)
-            _enforce_serialized_limits(
-                payload,
-                event_cursor,
-                payload_digest,
-                applied_limits,
-            )
-            response = ProjectSnapshotDataV1(
-                payload=payload,
-                event_cursor=event_cursor,
-                applied_limits=applied_limits,
-                snapshot_digest=payload_digest,
-            )
-            _verify_event_identity(events_fh, event_identity)
-            return response
+            return snapshot_from_transaction(conn, events_fh, limits=applied_limits)
     except ProjectSnapshotError:
         raise
     except FileNotFoundError:
@@ -110,6 +95,24 @@ def read_project_snapshot(
         _refuse(ReadErrorCode.state_unavailable, field="state")
     except (CanonicalJsonRefusal, ValidationError, TypeError, ValueError):
         _refuse(ReadErrorCode.invalid_hierarchy, field="state")
+
+
+def snapshot_from_transaction(
+    conn: sqlite3.Connection, events_fh: BinaryIO,
+    *, limits: ProviderReadLimitsV1 | Mapping[str, Any] | None = None,
+) -> ProjectSnapshotDataV1:
+    """Read the same bounded snapshot inside an already-open query-only transaction."""
+    applied_limits = _validated_limits(limits)
+    event_cursor, event_identity = _event_cursor(conn, events_fh)
+    payload = _project_payload(conn, applied_limits)
+    payload_digest = snapshot_digest(payload)
+    _enforce_serialized_limits(payload, event_cursor, payload_digest, applied_limits)
+    response = ProjectSnapshotDataV1(
+        payload=payload, event_cursor=event_cursor,
+        applied_limits=applied_limits, snapshot_digest=payload_digest,
+    )
+    _verify_event_identity(events_fh, event_identity)
+    return response
 
 
 def _validated_limits(
@@ -234,7 +237,7 @@ def _project_payload(
     dependency_edges = 0
     for row in conn.execute(
         "SELECT id, feature_id, prd_id, title, status, priority, "
-        "json(verification) AS verification, parent_task_id "
+        "json(verification) AS verification, closure, parent_task_id "
         "FROM tasks ORDER BY id"
     ):
         stored_id = _required_string(row["id"])
@@ -295,6 +298,19 @@ def _project_payload(
                 _refuse(ReadErrorCode.missing_target, field="tasks")
             if parent_ref.prd_id != ref.prd_id:
                 _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+        closure = None
+        if row["closure"] is not None:
+            stored_closure = TaskClosure.model_validate_json(row["closure"])
+            duplicate_ref = None
+            if stored_closure.duplicate_of is not None:
+                duplicate_ref = task_refs.get(stored_closure.duplicate_of)
+                if duplicate_ref is None:
+                    _refuse(ReadErrorCode.missing_target, field="tasks")
+            closure = TaskClosureV1(
+                resolution=stored_closure.resolution, reason=stored_closure.reason,
+                closed_by=stored_closure.closed_by, closed_at=stored_closure.closed_at.isoformat(),
+                duplicate_of=duplicate_ref,
+            )
         tasks.append(
             TaskRecordV1(
                 ref=ref,
@@ -304,6 +320,7 @@ def _project_payload(
                 parent_ref=parent_ref,
                 title=_required_string(row["title"]),
                 status=_required_string(row["status"]),
+                closure=closure,
                 priority=_required_string(row["priority"]),
                 dependency_refs=tuple(dependencies),
                 acceptance_criteria=tuple(acceptance),
@@ -787,6 +804,10 @@ def _preflight_storage_limits(
         "length(CAST(verification AS BLOB)))), 0) FROM tasks"
     ).fetchone()
     if int(raw_cell_row[0]) > _MAX_RAW_TASK_JSON_CELL_BYTES:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+    if conn.execute(
+        "SELECT 1 FROM tasks WHERE length(CAST(closure AS BLOB)) > 65536 LIMIT 1"
+    ).fetchone() is not None:
         _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
 
     raw_json_row = conn.execute(

@@ -65,6 +65,8 @@ __all__ = [
     # Constants
     "DEFAULT_PRD_ID",
     "TERMINAL_BUNDLE_STATUSES",
+    "TERMINAL_TASK_STATUSES",
+    "SUCCESSFUL_TASK_STATUSES",
     "MAX_CLAIM_COMMAND_BYTES",
     "MAX_CLAIM_COMMAND_OUTPUT_BYTES",
     "MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES",
@@ -93,6 +95,7 @@ __all__ = [
     "ConflictResolutionStrategy",
     "ProofKind",
     # Models
+    "TaskClosure",
     "Score",
     "Verification",
     "VerificationProfileReference",
@@ -202,6 +205,7 @@ class TaskStatus(enum.StrEnum):
     accepted = "accepted"
     done = "done"
     rejected = "rejected"
+    closed = "closed"
 
 
 # Statuses meaning "finished — no work left". ``rejected`` is deliberately NOT
@@ -210,9 +214,31 @@ class TaskStatus(enum.StrEnum):
 # ``rejected`` (legacy DB or crashed loop) is stuck open work, not a finished
 # task. Single source of truth — `list --open`, sync reconciliation, and any
 # future surface import this rather than hand-rolling their own set.
-TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
+SUCCESSFUL_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
     {TaskStatus.accepted, TaskStatus.done}
 )
+TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = SUCCESSFUL_TASK_STATUSES | {TaskStatus.closed}
+
+
+class TaskClosure(BaseModel):
+    """An audited non-success disposition; never satisfies a dependency."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: Literal["duplicate", "cancelled", "wont_do", "obsolete", "cannot_reproduce"]
+    reason: str = Field(min_length=1, max_length=4096)
+    closed_by: str = Field(min_length=1, max_length=256)
+    closed_at: datetime.datetime
+    duplicate_of: str | None = None
+
+    @model_validator(mode="after")
+    def validate_closure(self) -> TaskClosure:
+        if not self.reason.strip() or not self.closed_by.strip():
+            raise ValueError("closure requires a reason and actor")
+        _require_utc(self.closed_at, "closed_at")
+        if (self.resolution == "duplicate") != (self.duplicate_of is not None):
+            raise ValueError("duplicate resolution requires exactly one duplicate target")
+        return self
 
 
 class TaskPriority(enum.StrEnum):
@@ -1575,6 +1601,13 @@ class Task(BaseModel):
     title: str
     description: str
     status: TaskStatus = TaskStatus.proposed
+    closure: TaskClosure | None = None
+
+    @model_validator(mode="after")
+    def closure_matches_status(self) -> Task:
+        if (self.status == TaskStatus.closed) != (self.closure is not None):
+            raise ValueError("only closed tasks carry a closure disposition")
+        return self
     priority: TaskPriority = TaskPriority.medium
     # task_type defaults to ``feature`` so every pre-existing task (and any
     # caller that omits it) keeps its original meaning — full backward
@@ -1607,6 +1640,8 @@ class Task(BaseModel):
         data = handler(self)
         if not data.get("claims"):
             data.pop("claims", None)
+        if data.get("closure") is None:
+            data.pop("closure", None)
         return data
     parent_task_id: TaskID | None = None
     created_at: datetime.datetime

@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> CLI: 91 executable leaf commands.
+> CLI: 92 executable leaf commands.
 
 > Single-page reference for the `anvil` CLI, including the milestone bundle and
 > coordinated-root lifecycles. The most-used lifecycle
@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.18 (schema 22)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.19 (schema 24)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -2073,9 +2073,34 @@ failed commands; it never chooses a successful prefix or trims the buffer.
 
 ## Web interface
 
-`anvil web` starts the native read-only interface using owner-private persisted
+`anvil web` starts the native Kanban interface in read-only mode using owner-private persisted
 enrollment, independent of the launch directory. `anvil web enroll PATH` adds
 an existing project; `anvil web list --json` lists enrollment;
 `anvil web remove ID` removes presentation enrollment only.
 
+Use `anvil web --allow-writes --actor human` to enable confirmed human workflow
+actions for repositories using the installation’s native reader. `--config PATH`
+selects the enrollment catalog; `--port NUMBER` overrides its loopback port.
+Separate readers remain read-only. Each browser move previews the exact task
+and requires confirmation; approval uses the existing strict `apply` gates.
+
 See [web setup, reader compatibility and access limits](how-to/web-interface.md).
+
+## `anvil task-action`
+
+Apply a supported task move directly through the state engine, without a browser
+session or preview. This is the short CLI path for agents and operators:
+
+```sh
+anvil task-action T001 ready --actor human
+anvil task-action T002 close --actor human --resolution duplicate --duplicate-of T001 --reason "Covered by T001"
+```
+
+Actions: `ready`, `backlog`, `start`, `block`, `resume`, `close`. Starting,
+blocking and resuming require the actor’s current claim. Closure requires
+`--reason` and `--resolution`; `duplicate` also requires `--duplicate-of`.
+Resolutions are `duplicate`, `cancelled`, `wont_do`, `obsolete` and
+`cannot_reproduce`. Named-campaign task IDs use `campaign:T001`.
+`--json` returns the resulting task and status. Invalid transitions or custody
+return `transition_refused` without a state change. Claim acquisition, evidence
+submission and human acceptance still use `claim`, `submit` and `apply`.

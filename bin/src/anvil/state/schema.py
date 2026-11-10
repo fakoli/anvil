@@ -91,11 +91,15 @@ Version history
   without that binding is demoted to draft instead of being guessed.
 - v22: root-set claim bindings — root-set claims retain their immutable owner
   reservation/request/digest binding without changing legacy claim rows.
+- v24: audited non-success task closure and guarded task actions. The supported
+  upgrade is v22 → v24; reserved v23 bundle-withdrawal State is incompatible.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 22
+# 23 is reserved by the separately developed bundle-withdrawal engine. This
+# branch deliberately does not claim its event semantics or migrate its State.
+SCHEMA_VERSION: int = 24
 
 
 def get_schema_version() -> int:
@@ -223,6 +227,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title                TEXT NOT NULL,
     description          TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'proposed',
+    closure              TEXT,
     priority             TEXT NOT NULL DEFAULT 'medium',
     task_type            TEXT NOT NULL DEFAULT 'feature',
     dependencies         TEXT NOT NULL DEFAULT '[]',
@@ -507,7 +512,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 22;
+PRAGMA user_version = 24;
 """
 
 

@@ -19,9 +19,17 @@ from __future__ import annotations
 import enum
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import datetime
 from typing import Any, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from anvil.state.hashing import (
     MAX_CANONICAL_JSON_RESPONSE_BYTES,
@@ -87,6 +95,7 @@ TaskStatusV1: TypeAlias = Literal[
     "accepted",
     "done",
     "rejected",
+    "closed",
 ]
 TaskPriorityV1: TypeAlias = Literal["low", "medium", "high", "critical"]
 ProviderOperationIdV1: TypeAlias = Literal[
@@ -577,6 +586,27 @@ class VerificationSummaryV1(BaseModel):
         return _require_utf8_bytes(value, limit=4096, path="$.verification.label")
 
 
+class TaskClosureV1(BaseModel):
+    model_config = _WIRE_CONFIG
+
+    resolution: Literal["duplicate", "cancelled", "wont_do", "obsolete", "cannot_reproduce"]
+    reason: str = Field(min_length=1, max_length=4096)
+    closed_by: str = Field(min_length=1, max_length=256)
+    closed_at: str = Field(min_length=1, max_length=64)
+    duplicate_of: TaskScopedRefV1 | None = None
+
+    @model_validator(mode="after")
+    def validate_closure(self) -> TaskClosureV1:
+        if not self.reason.strip() or not self.closed_by.strip():
+            raise ValueError("closure requires reason and actor")
+        closed_at = datetime.fromisoformat(self.closed_at)
+        if closed_at.tzinfo is None or closed_at.utcoffset() is None:
+            raise ValueError("closure timestamp must be timezone-aware")
+        if (self.resolution == "duplicate") != (self.duplicate_of is not None):
+            raise ValueError("duplicate closure requires its task reference")
+        return self
+
+
 class TaskRecordV1(BaseModel):
     model_config = _WIRE_CONFIG
 
@@ -590,10 +620,26 @@ class TaskRecordV1(BaseModel):
     parent_ref: TaskScopedRefV1 | None = None
     title: str = Field(min_length=1)
     status: TaskStatusV1
+    closure: TaskClosureV1 | None = None
     priority: TaskPriorityV1
     dependency_refs: tuple[TaskScopedRefV1, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
     verification_summaries: tuple[VerificationSummaryV1, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def omit_absent_closure(self, handler: Any) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if data.get("closure") is None:
+            data.pop("closure", None)
+        return data
+
+    @model_validator(mode="after")
+    def closure_matches_status(self) -> TaskRecordV1:
+        if (self.status == "closed") != (self.closure is not None):
+            raise ValueError("only closed tasks carry a closure disposition")
+        if self.closure is not None and self.closure.duplicate_of == self.ref:
+            raise ValueError("duplicate task cannot refer to itself")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -1377,6 +1423,12 @@ def _validate_hierarchy(snapshot: ProjectSnapshotPayloadV1) -> None:
             raise ValueError("task cannot depend on itself")
         if any(target not in tasks for target in dependency_keys):
             raise ValueError("task dependency target is missing")
+        if (
+            task_record.closure is not None
+            and task_record.closure.duplicate_of is not None
+            and _task_key(task_record.closure.duplicate_of) not in tasks
+        ):
+            raise ValueError("duplicate closure target is missing")
 
     _reject_cycles(
         tasks,

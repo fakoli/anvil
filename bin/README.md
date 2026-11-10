@@ -6,7 +6,7 @@ coordinate on without conflicts.
 
 `anvil-state` installs the `anvil` CLI, the read-only `anvil-web` interface, and the `anvil-mcp` MCP server.
 
-Current release: **v0.6.9** (schema 22, public API contract 15). The release
+Current release: **v0.6.19** (schema 24, public API contract 22). The release
 adds revision-safe PRD lifecycle gates, transactional Git claims, bounded
 provider reads, scoped task routing, and faster no-UAC Windows test feedback;
 see the [full changelog](https://github.com/fakoli/anvil/blob/v0.6.9/CHANGELOG.md).

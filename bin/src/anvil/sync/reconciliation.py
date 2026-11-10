@@ -660,7 +660,7 @@ class ReconciliationEngine:
         """
         # Canonical terminal set (state/models.py) — was a hand-rolled local
         # copy until `list --open` grew a second one and they had to converge.
-        from anvil.state.models import TERMINAL_TASK_STATUSES as _terminal
+        from anvil.state.models import SUCCESSFUL_TASK_STATUSES as _terminal
 
         # ``likely_files`` are CHECKOUT-relative (e.g. ``src/widget.py``), not
         # ``.anvil/``-relative — resolve against the checkout root.

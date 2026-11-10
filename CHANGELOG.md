@@ -6,6 +6,26 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.19] - 2026-11-09
+
+### Added
+
+- Kanban board with visible drag destinations, keyboard-accessible move actions,
+  evidence-bound approval previews and explicit human confirmation.
+- Guarded native `task-action` command and non-success closure dispositions,
+  including duplicate references, recorded as engine events.
+- Bounded synthetic concurrency benchmark and source-based bulk-approval research.
+
+### Changed
+
+- CLI discovery API advances to 22; schema24 adds closure metadata. Schema22
+  migrates additively; the separate schema23 bundle-withdraw line is refused
+  before mutation and requires an explicit integration before upgrade.
+- Strict or preview-bound approval refuses if a required claim verifier or
+  configured strict merge probe cannot run.
+- Web request admission and worker processes are bounded. Custom readers remain
+  read-only; writes require explicit native enrollment and server opt-in.
+
 ## [0.6.18] - 2026-11-09
 
 ### Added

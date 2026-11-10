@@ -38,7 +38,7 @@ from anvil.sync.provider import ExternalRef, ExternalTask, ProviderHealth
 from anvil.sync.registry import register_sync_provider
 
 if TYPE_CHECKING:
-    from anvil.state.models import Task
+    from anvil.state.models import Task, TaskClosure
 
 __all__ = [
     "STATUS_TO_LABEL",
@@ -57,9 +57,9 @@ __all__ = [
 # the GitHub UI and does not collide with user-defined labels.
 #
 # GitHub also has issue *state* (open/closed). ``done`` tasks become
-# closed issues; everything else (including ``rejected``, which is a
-# "won't fix" outcome) stays open. The label is the durable source of
-# truth for *which* fakoli status the task is in; the open/closed bit
+# closed issues; closed tasks close as not planned. Everything else
+# (including rejected, which requires rework) stays open. The label is the
+# durable source of truth for *which* Anvil status the task is in; the open/closed bit
 # is a UX nicety for GitHub's own search filters.
 #
 # Centralised here so push and fetch agree on the mapping verbatim.
@@ -76,6 +76,7 @@ STATUS_TO_LABEL: dict[TaskStatus, str] = {
     TaskStatus.accepted: "status:accepted",
     TaskStatus.done: "status:done",
     TaskStatus.rejected: "status:rejected",
+    TaskStatus.closed: "status:closed",
 }
 
 # Reverse mapping. Built once at import; assertions in
@@ -84,15 +85,19 @@ LABEL_TO_STATUS: dict[str, TaskStatus] = {
     label: status for status, label in STATUS_TO_LABEL.items()
 }
 
-# Statuses that translate to a closed GitHub issue (rather than open).
-# Only ``done`` qualifies — ``rejected`` stays open so a human looking at
-# the repo can see it was actively rejected, not silently archived.
+# Successful completion is distinct from non-success closure.
 DONE_STATUSES: frozenset[TaskStatus] = frozenset({TaskStatus.done})
 
 
 def _status_to_state(status: TaskStatus) -> str:
-    """Return ``"closed"`` for done statuses, ``"open"`` otherwise."""
-    return "closed" if status in DONE_STATUSES else "open"
+    """Return the issue state without treating non-success closure as done."""
+    return "closed" if status in DONE_STATUSES or status == TaskStatus.closed else "open"
+
+
+def _status_to_state_reason(status: TaskStatus) -> str | None:
+    if status == TaskStatus.closed:
+        return "not_planned"
+    return "completed" if status in DONE_STATUSES else None
 
 
 def _all_status_labels() -> set[str]:
@@ -107,13 +112,21 @@ def _all_status_labels() -> set[str]:
 
 _FOOTER_TEMPLATE = "\n\n---\n_synced from anvil task {task_id}_"
 _FOOTER_RE = re.compile(
-    r"\n\n---\n_synced from anvil task ([A-Za-z0-9_\-]+)_\s*$"
+    r"\n\n---\n_synced from anvil task ([A-Za-z0-9_\-.:]+)_"
+    r"(?:\n\n\*\*Closure:\*\*[\s\S]*)?\s*$"
 )
 
 
-def _compose_body(task_description: str, task_id: str) -> str:
+def _compose_body(
+    task_description: str, task_id: str, closure: TaskClosure | None = None,
+) -> str:
     """Return the GitHub-issue body for ``task``: description + footer."""
-    return task_description + _FOOTER_TEMPLATE.format(task_id=task_id)
+    body = task_description + _FOOTER_TEMPLATE.format(task_id=task_id)
+    if closure is not None:
+        body += f"\n\n**Closure:** {closure.resolution}\n\n{closure.reason}"
+        if closure.duplicate_of is not None:
+            body += f"\n\nDuplicate of: {closure.duplicate_of}"
+    return body
 
 
 def _strip_footer(body: str) -> str:
@@ -354,9 +367,10 @@ class GitHubIssuesProvider:
         return its ExternalRef" rather than an error — that's the
         idempotency contract.
         """
-        body = _compose_body(task.description, task.id)
+        body = _compose_body(task.description, task.id, task.closure)
         status_label = STATUS_TO_LABEL[task.status]
         state = _status_to_state(task.status)
+        state_reason = _status_to_state_reason(task.status)
 
         if self._transport == "gh_cli":
             client = self._make_gh_client()
@@ -385,7 +399,9 @@ class GitHubIssuesProvider:
                     raise
                 # Make sure issue state matches if status maps to closed.
                 if state == "closed":
-                    client.close_issue(number=str(payload["number"]))
+                    client.close_issue(
+                        number=str(payload["number"]), state_reason=state_reason,
+                    )
                     payload = client.view_issue(number=str(payload["number"]))
                 return self._payload_to_external_ref(payload)
             else:
@@ -405,6 +421,7 @@ class GitHubIssuesProvider:
                     add_labels=[status_label],
                     remove_labels=to_remove,
                     state=state,
+                    state_reason=state_reason,
                 )
                 return self._payload_to_external_ref(payload)
 
@@ -442,6 +459,7 @@ class GitHubIssuesProvider:
                 payload = client_http.update_issue(
                     number=str(payload["number"]),
                     state="closed",
+                    state_reason=state_reason,
                 )
             return self._payload_to_external_ref(payload)
         else:
@@ -468,6 +486,7 @@ class GitHubIssuesProvider:
                 body=body,
                 labels=new_labels,
                 state=state,
+                state_reason=state_reason,
             )
             return self._payload_to_external_ref(payload)
 

@@ -213,6 +213,10 @@ class Backend(Protocol):
         """
         ...
 
+    def task_action_context(self, task_id: str) -> tuple[list[Claim], bool]:
+        """Return selected task claim history and whether a live bundle owns it."""
+        ...
+
     def list_reviews(self) -> list[Review]:
         """Return all Review rows sorted by id ASC.
 

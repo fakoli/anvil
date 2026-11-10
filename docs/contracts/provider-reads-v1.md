@@ -45,7 +45,7 @@ supported version-1 operation/schema headers, typed API metadata, complete
 canonical payload, applied limits and digest. The observed discovery API is
 reported as provenance, not interpreted as proof of compatibility or source
 identity. A deployment may use an independently qualified API20 reader alongside
-this API21 engine when its canonical version-1 snapshot contract matches.
+this API22 engine when its canonical version-1 snapshot contract matches.
 Operators must qualify each pinned reader against canonical project controls;
 this adapter policy does not authorize generic consumers to ignore their pinned
 discovery API or permit migration, fallback or direct database reads.

@@ -282,7 +282,7 @@ sqlite3 "$STATE_DIR/state.db" .schema
 sqlite3 "$STATE_DIR/state.db" "SELECT id, status, title FROM tasks;"
 ```
 
-The engine's current schema version is reported by `anvil --version` (v22 in
+The engine's current schema version is reported by `anvil --version` (v24 in
 this release). Supported historical databases are auto-upgraded through the
 ordered, additive migration chain when the backend opens (`anvil migrate
 state` is dry-run by default; pass `--yes` to apply it deliberately). Pydantic models in
@@ -290,8 +290,8 @@ state` is dry-run by default; pass `--yes` to apply it deliberately). Pydantic m
 define every entity; the SQLite implementation lives in
 [`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py).
 
-Read-only inspection is safe and concurrent — WAL mode lets readers
-proceed without blocking the CLI's writers. Do not edit rows directly:
+SQLite WAL permits concurrent database reads, but canonical Anvil snapshots
+also validate the event log under its exclusive lock and can delay writers. Do not edit rows directly:
 state mutations should go through the CLI or MCP server so the
 corresponding event lands in `events.jsonl` (the replay guarantee depends
 on every mutation being represented in the log).

@@ -276,6 +276,7 @@ class GithubHttpClient:
         body: str | None = None,
         labels: list[str] | None = None,
         state: str | None = None,
+        state_reason: str | None = None,
         assignees: list[str] | None = None,
     ) -> dict[str, Any]:
         """PATCH /repos/{repo}/issues/{number}; return the updated payload.
@@ -292,6 +293,8 @@ class GithubHttpClient:
             payload["labels"] = labels
         if state is not None:
             payload["state"] = state
+        if state_reason is not None:
+            payload["state_reason"] = state_reason
         if assignees is not None:
             payload["assignees"] = assignees
         response = self._request(

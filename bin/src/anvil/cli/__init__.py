@@ -51,6 +51,7 @@ from anvil.cli.roots import roots_app
 from anvil.cli.run_workflow import run_workflow
 from anvil.cli.scan import scan
 from anvil.cli.sync import sync_app
+from anvil.cli.task_action import task_action
 from anvil.cli.web import web_app
 
 # ---------------------------------------------------------------------------
@@ -180,6 +181,7 @@ app.command("evidence-preflight")(evidence_preflight)
 app.command()(submit)
 app.command()(progress)
 app.command()(apply)
+app.command("task-action")(task_action)
 app.command()(replay)
 app.command("run-workflow")(run_workflow)
 app.command()(backup)

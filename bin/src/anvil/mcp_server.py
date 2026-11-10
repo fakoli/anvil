@@ -178,6 +178,7 @@ class TaskCountsByStatus(BaseModel):
     accepted: int = 0
     done: int = 0
     rejected: int = 0
+    closed: int = 0
 
 
 class PrdStatusEntry(BaseModel):

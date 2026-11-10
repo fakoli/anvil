@@ -33,13 +33,23 @@ def web(
     port: int | None = typer.Option(
         None, "--port", min=1, max=65535, help="Override configured loopback port."
     ),
+    allow_writes: bool = typer.Option(
+        False,
+        "--allow-writes",
+        help="Enable confirmed workflow actions for native-reader repositories.",
+    ),
+    actor: str | None = typer.Option(
+        None, "--actor", help="Operator identity recorded for confirmed actions."
+    ),
 ) -> None:
     """Start the loopback viewer; explicit subcommands manage presentation enrollment."""
     context.ensure_object(dict)
     context.obj["web_config"] = config or default_config_path()
     if context.invoked_subcommand is None:
         try:
-            server = make_server(context.obj["web_config"], port)
+            server = make_server(
+                context.obj["web_config"], port, allow_writes=allow_writes, actor=actor
+            )
         except (OSError, WebError) as error:
             typer.echo(f"Cannot start Anvil web: {error}", err=True)
             raise typer.Exit(1) from error

@@ -149,6 +149,7 @@ from anvil.state.payloads import (
     SyncMappingDeletedPayload,
     SyncMappingUpsertedPayload,
     TaskAppliedPayload,
+    TaskClosedPayload,
     TaskCreatedPayload,
     TaskDeletedPayload,
     TaskDependenciesBatchEditedPayload,
@@ -156,6 +157,7 @@ from anvil.state.payloads import (
     TaskScoredPayload,
     TaskStatusChangedPayload,
     TaskSyncedFromRemotePayload,
+    TaskTransitionedPayload,
 )
 from anvil.state.schema import DDL, SCHEMA_VERSION
 
@@ -967,7 +969,7 @@ class SqliteBackend:
         """Refuse incompatible versions before opening live state for writes."""
         if on_disk == SCHEMA_VERSION:
             return
-        if on_disk > SCHEMA_VERSION or on_disk < 0:
+        if on_disk > SCHEMA_VERSION or on_disk < 0 or on_disk == 23:
             raise SchemaMismatch(
                 actual=on_disk,
                 expected=SCHEMA_VERSION,
@@ -979,7 +981,10 @@ class SqliteBackend:
         # the ladder before any live DDL so an accidental gap cannot partially
         # reshape an old database and only then fail.
         available_steps = [from_version for from_version, _ in cls._MIGRATIONS]
-        required_steps = list(range(2, SCHEMA_VERSION))
+        # 23 belongs to the separate bundle-withdrawal engine. The supported
+        # chain upgrades <=22 straight to24; it must never bless that engine's
+        # unknown event semantics merely because its DDL happens to match.
+        required_steps = [version for version in range(2, SCHEMA_VERSION) if version != 23]
         if available_steps != required_steps:
             raise SchemaMismatch(
                 actual=on_disk,
@@ -3309,6 +3314,22 @@ class SqliteBackend:
         ).fetchall()
         return [self._row_to_claim(row) for row in rows]
 
+    def task_action_context(self, task_id: str) -> tuple[list[Claim], bool]:
+        """Read only the selected task's custody, including expired active leases."""
+        conn = self._require_conn()
+        claims = [self._row_to_claim(row) for row in conn.execute(
+            "SELECT * FROM claims WHERE task_id = ?", (task_id,),
+        )]
+        terminal = tuple(str(status) for status in TERMINAL_BUNDLE_STATUSES)
+        placeholders = ",".join("?" for _ in terminal)
+        bundle_owned = conn.execute(
+            "SELECT 1 FROM execution_bundle_members AS members "
+            "JOIN execution_bundles AS bundles ON bundles.id = members.bundle_id "
+            f"WHERE members.task_id = ? AND bundles.status NOT IN ({placeholders}) LIMIT 1",
+            (task_id, *terminal),
+        ).fetchone() is not None
+        return claims, bundle_owned
+
     def list_reviews(self) -> list[Review]:
         """Return all Review rows sorted by id ASC.
 
@@ -4313,7 +4334,7 @@ class SqliteBackend:
         # already grew current-shaped tables) still runs that step's helpers:
         # they no-op via duplicate-column tolerance / IF NOT EXISTS, so running
         # the full ordered ladder from ``on_disk`` is always safe.
-        if on_disk > SCHEMA_VERSION or on_disk < 0:
+        if on_disk > SCHEMA_VERSION or on_disk < 0 or on_disk == 23:
             raise SchemaMismatch(
                 actual=on_disk,
                 expected=SCHEMA_VERSION,
@@ -5177,6 +5198,11 @@ class SqliteBackend:
             if "duplicate column" not in str(exc).lower():
                 raise
 
+    def _m_to_v24(self, conn: sqlite3.Connection) -> None:
+        """Supported v22 → v24 jump; v23 State is refused before any DDL."""
+        if "closure" not in {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}:
+            conn.execute("ALTER TABLE tasks ADD COLUMN closure TEXT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -5198,6 +5224,7 @@ class SqliteBackend:
         (19, _m_to_v20),
         (20, _m_to_v21),
         (21, _m_to_v22),
+        (22, _m_to_v24),
     ]
 
     @staticmethod
@@ -6312,6 +6339,13 @@ class SqliteBackend:
                 TaskStatusChangedPayload,
                 self._check_task_status_changed,
                 self._write_task_status_changed,
+            ),
+            "task.transitioned": ActionSpec(
+                TaskTransitionedPayload,
+                self._check_task_transitioned, self._write_task_transitioned,
+            ),
+            "task.closed": ActionSpec(
+                TaskClosedPayload, self._check_task_closed, self._write_task_closed,
             ),
             # v1.15.0 — orphan cleanup on re-parse.
             "task.deleted": ActionSpec(
@@ -8568,13 +8602,15 @@ class SqliteBackend:
 
         placeholders = ",".join("?" for _ in bundle.task_ids)
         task_rows = conn.execute(
-            f"SELECT id, prd_id FROM tasks WHERE id IN ({placeholders})",
+            f"SELECT id, prd_id, status FROM tasks WHERE id IN ({placeholders})",
             tuple(bundle.task_ids),
         ).fetchall()
         tasks_by_id = {row[0]: row[1] for row in task_rows}
         missing = [task_id for task_id in bundle.task_ids if task_id not in tasks_by_id]
         if missing:
             raise EventRejected(f"bundle.created: member tasks not found: {missing}.")
+        if any(row[2] == "closed" for row in task_rows):
+            raise EventRejected("bundle.created: closed tasks cannot enter a bundle.")
         cross_prd = [
             task_id
             for task_id in bundle.task_ids
@@ -8642,6 +8678,14 @@ class SqliteBackend:
         ).fetchone():
             return
         placeholders = ",".join("?" for _ in bundle.task_ids)
+        if conn.execute(
+            f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) AND status = 'closed' LIMIT 1",
+            tuple(bundle.task_ids),
+        ).fetchone():
+            # A closure and bundle creation may each be valid on divergent
+            # branches. The first ordered fact owns the task; never synthesize
+            # a live bundle containing a task already closed by that history.
+            return
         terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
         terminal_placeholders = ",".join("?" for _ in terminal)
         existing_membership = conn.execute(
@@ -10995,7 +11039,7 @@ class SqliteBackend:
                 code="live_omitted_prd",
             )
         try:
-            Task.model_validate(task_dict)
+            task = Task.model_validate(task_dict)
         except Exception as exc:
             recovery_owner = self._task_created_recovery_owner(conn, event)
             if recovery_owner is not None:
@@ -11007,6 +11051,8 @@ class SqliteBackend:
             raise EventRejected(
                 f"task.created: invalid Task payload: {exc}"
             ) from exc
+        if not self._task_upsert_preserves_closure(conn, task):
+            raise EventRejected("task.created: closure must match the existing audited disposition")
 
     @staticmethod
     def _dependency_batch_has_cycle(dep_map: dict[str, list[str]]) -> bool:
@@ -11221,6 +11267,9 @@ class SqliteBackend:
             raise
         task_dict = self._normalize_task_payload(conn, payload_data, event)
         task = Task.model_validate(task_dict)
+        if not self._task_upsert_preserves_closure(conn, task):
+            # Replay never mints a disposition through a metadata upsert.
+            return
         self._insert_task_row(conn, task)
 
     @staticmethod
@@ -11322,7 +11371,7 @@ class SqliteBackend:
         Was two validation guards in the old handler (empty ``subtasks`` list;
         invalid subtask payload); both now reject up front.
         """
-        _ = (conn, event)
+        _ = event
         if not payload.subtasks:
             raise EventRejected(
                 "task.expanded payload has empty 'subtasks' list; nothing to expand."
@@ -11330,11 +11379,15 @@ class SqliteBackend:
         for subtask_data in payload.subtasks:
             normalized = self._normalize_subtask(subtask_data, payload.parent_task_id)
             try:
-                Task.model_validate(normalized)
+                subtask = Task.model_validate(normalized)
             except Exception as exc:
                 raise EventRejected(
                     f"task.expanded: invalid subtask payload: {exc}"
                 ) from exc
+            if not self._task_upsert_preserves_closure(conn, subtask):
+                raise EventRejected(
+                    "task.expanded: closure must match the existing audited disposition"
+                )
 
     def _write_task_expanded(
         self,
@@ -11358,9 +11411,14 @@ class SqliteBackend:
         """
         _ = event
         parent_task_id: str = payload.parent_task_id
+        subtasks = []
         for subtask_data in payload.subtasks:
             normalized = self._normalize_subtask(subtask_data, parent_task_id)
             subtask = Task.model_validate(normalized)
+            if not self._task_upsert_preserves_closure(conn, subtask):
+                return  # Preserve atomic expansion when merged history loses a closure.
+            subtasks.append(subtask)
+        for subtask in subtasks:
             self._insert_task_row(conn, subtask)
 
     def _check_task_status_changed(
@@ -11381,6 +11439,8 @@ class SqliteBackend:
         task_id: str = payload.task_id
         from_status: str = payload.from_status
         to_status: str = payload.to_status
+        if "closed" in (from_status, to_status):
+            raise EventRejected("closed dispositions require the guarded task.closed action")
 
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -11422,6 +11482,8 @@ class SqliteBackend:
         ``from_status``; the WHERE-status guard remains as a defensive belt but
         always matches here.
         """
+        if "closed" in (payload.from_status, payload.to_status):
+            return  # Replay cannot forge or reopen an audited closure.
         timestamp: str = event.timestamp.isoformat()
         conn.execute(
             """
@@ -11432,6 +11494,116 @@ class SqliteBackend:
                AND status = ?
             """,
             (payload.to_status, timestamp, payload.task_id, payload.from_status),
+        )
+
+    def _checked_board_action(
+        self, conn: sqlite3.Connection,
+        payload: TaskTransitionedPayload | TaskClosedPayload,
+        event: EventDraft, action: str,
+    ) -> Task:
+        """Check identity, custody and exact task version inside the append transaction."""
+        from anvil.task_actions import permitted_task_actions
+
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("task action target mismatch")
+        if canonicalize_new_actor(event.actor) != event.actor:
+            raise EventRejected("task action actor must be canonical")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
+        if row is None:
+            raise EventRejected("task action target not found")
+        task = self._row_to_task(row, conn)
+        if task.status != payload.expected_status or task.updated_at != payload.expected_updated_at:
+            raise EventRejected("stale_task: task changed since preview; refresh before retrying")
+        claims, bundle_owned = self.task_action_context(task.id)
+        if action not in permitted_task_actions(
+            task, event.actor, claims, bundle_owned, self._clock.now(),
+        ):
+            raise EventRejected(
+                "task_action_refused: stage, readiness or custody does not permit this action"
+            )
+        return task
+
+    def _check_task_transitioned(
+        self, conn: sqlite3.Connection, payload: TaskTransitionedPayload, event: EventDraft,
+    ) -> None:
+        self._checked_board_action(conn, payload, event, payload.action)
+        if payload.action == "block" and not (payload.reason or "").strip():
+            raise EventRejected("blocking a task requires a reason")
+
+    def _write_task_transitioned(
+        self, conn: sqlite3.Connection, payload: TaskTransitionedPayload, event: Event,
+    ) -> None:
+        if self._replaying and not self._task_action_replay_allowed(
+            conn, payload, event, payload.action,
+        ):
+            return
+        targets = {"ready": "ready", "backlog": "drafted", "start": "in_progress",
+                   "block": "blocked", "resume": "in_progress"}
+        conn.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            (targets[payload.action], event.timestamp.isoformat(), payload.task_id,
+             payload.expected_status),
+        )
+
+    @staticmethod
+    def _task_action_version_matches(
+        conn: sqlite3.Connection, payload: TaskTransitionedPayload | TaskClosedPayload,
+    ) -> bool:
+        row = conn.execute(
+            "SELECT status, updated_at FROM tasks WHERE id = ?", (payload.task_id,),
+        ).fetchone()
+        return bool(
+            row is not None and row[0] == payload.expected_status
+            and datetime.datetime.fromisoformat(row[1]) == payload.expected_updated_at
+        )
+
+    def _task_action_replay_allowed(
+        self, conn: sqlite3.Connection,
+        payload: TaskTransitionedPayload | TaskClosedPayload, event: Event, action: str,
+    ) -> bool:
+        """Recheck custody at event time after ordering divergent histories."""
+        from anvil.task_actions import permitted_task_actions
+
+        if not self._task_action_version_matches(conn, payload):
+            return False
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
+        task = self._row_to_task(row, conn)
+        claims, bundle_owned = self.task_action_context(task.id)
+        return action in permitted_task_actions(
+            task, event.actor, claims, bundle_owned, event.timestamp,
+        )
+
+    def _check_task_closed(
+        self, conn: sqlite3.Connection, payload: TaskClosedPayload, event: EventDraft,
+    ) -> None:
+        self._checked_board_action(conn, payload, event, "close")
+        closure = payload.closure
+        if closure.closed_by != event.actor or closure.closed_at != event.timestamp:
+            raise EventRejected("closure audit identity mismatch")
+        if closure.duplicate_of is not None and (
+            closure.duplicate_of == payload.task_id
+            or conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?", (closure.duplicate_of,),
+            ).fetchone() is None
+        ):
+            raise EventRejected("duplicate target must name a different existing task")
+
+    def _write_task_closed(
+        self, conn: sqlite3.Connection, payload: TaskClosedPayload, event: Event,
+    ) -> None:
+        if self._replaying and not self._task_action_replay_allowed(conn, payload, event, "close"):
+            return
+        if payload.closure.duplicate_of is not None and conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (payload.closure.duplicate_of,),
+        ).fetchone() is None:
+            # A prior ordered deletion wins over a divergent duplicate closure.
+            return
+        conn.execute(
+            "UPDATE tasks SET status = 'closed', closure = ?, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            (payload.closure.model_dump_json(), event.timestamp.isoformat(), payload.task_id,
+             payload.expected_status),
         )
 
     # ------------------------------------------------------------------
@@ -11466,6 +11638,11 @@ class SqliteBackend:
         """
         _ = event
         task_id = payload.task_id
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE json_extract(closure, '$.duplicate_of') = ? LIMIT 1",
+            (task_id,),
+        ).fetchone() is not None:
+            raise EventRejected("task.deleted: task is referenced by an audited duplicate closure")
 
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -11531,6 +11708,14 @@ class SqliteBackend:
         not touch the events table.
         """
         task_id = payload.task_id
+
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE json_extract(closure, '$.duplicate_of') = ? LIMIT 1",
+            (task_id,),
+        ).fetchone() is not None:
+            # Symmetric replay rule: a prior duplicate closure protects its
+            # referenced task from a later deletion authored on another branch.
+            return
 
         # 3. Rewrite conflict_groups.task_ids JSON arrays to remove this task.
         # Explicit Row indexing (row["id"]) is safer than positional unpack —
@@ -11637,12 +11822,14 @@ class SqliteBackend:
         """
         _ = event
         row = conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (payload.task_id,)
+            "SELECT status FROM tasks WHERE id = ?", (payload.task_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(
                 f"task.synced_from_remote: task '{payload.task_id}' not found."
             )
+        if payload.status == "closed" or row[0] == "closed":
+            raise EventRejected("remote synchronization cannot create or overwrite a closure")
 
     def _write_task_synced_from_remote(
         self,
@@ -11679,6 +11866,9 @@ class SqliteBackend:
         status: str = payload.status
         timestamp: str = event.timestamp.isoformat()
 
+        if status == "closed":
+            return  # Remote state cannot author an Anvil closure disposition.
+
         conn.execute(
             """
             UPDATE tasks
@@ -11686,7 +11876,7 @@ class SqliteBackend:
                    description = ?,
                    status = ?,
                    updated_at = ?
-             WHERE id = ?
+             WHERE id = ? AND status != 'closed'
             """,
             (title, description, status, timestamp, task_id),
         )
@@ -12123,6 +12313,10 @@ class SqliteBackend:
 
         if event.target_kind != "claim" or event.target_id != claim_id:
             return
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ? AND status = 'closed'", (task_id,),
+        ).fetchone():
+            return  # A prior closure wins over a divergent claim creation.
 
         # A claim ID identifies one immutable creation fact. Merged branches
         # can independently reuse an ID for different tasks; the first
@@ -13508,6 +13702,9 @@ class SqliteBackend:
         decision: str = payload.decision
         task_id: str = payload.task_id
 
+        if not self._task_review_binding_matches(conn, payload):
+            raise EventRejected("stale_review: task or evidence changed since preview")
+
         if payload.invalidation is not None:
             self._check_acceptance_invalidation(conn, payload, event)
 
@@ -13725,6 +13922,23 @@ class SqliteBackend:
             (evidence_event_id, evidence.claim_id, evidence.claim_id),
         )
 
+    def _task_review_binding_matches(
+        self, conn: sqlite3.Connection, payload: TaskAppliedPayload,
+    ) -> bool:
+        """Bind preview decisions during both live append and ordered replay."""
+        if payload.expected_evidence_id is None:
+            return True
+        attempt = self._latest_evidence_row(conn, payload.task_id)
+        task_row = conn.execute(
+            "SELECT updated_at, status FROM tasks WHERE id = ?", (payload.task_id,),
+        ).fetchone()
+        return bool(
+            attempt is not None and task_row is not None
+            and task_row[1] == "needs_review"
+            and self._row_to_evidence(attempt).id == payload.expected_evidence_id
+            and datetime.datetime.fromisoformat(task_row[0]) == payload.expected_task_updated_at
+        )
+
     def _write_task_applied(
         self,
         conn: sqlite3.Connection,
@@ -13759,6 +13973,18 @@ class SqliteBackend:
         genuine unexpected concurrent mutation (infra-class, not a validation
         rejection).
         """
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ? AND status = 'closed'", (payload.task_id,),
+        ).fetchone():
+            # Legacy CLI decisions do not carry preview versions. A closure
+            # ordered first still owns the disposition; the later review fact
+            # remains auditable without reopening the task or aborting replay.
+            return
+        if not self._task_review_binding_matches(conn, payload):
+            # A divergent earlier fact changed the preview's bound inputs.
+            # Retain the event for audit but do not manufacture acceptance or
+            # a Review row for an obsolete decision.
+            return
         task_id: str = payload.task_id
         reviewer: str = payload.reviewer
         decision: str = payload.decision
@@ -14141,6 +14367,19 @@ class SqliteBackend:
     # task.expanded)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _task_upsert_preserves_closure(conn: sqlite3.Connection, task: Task) -> bool:
+        """Task upserts may copy, but never create or alter, audited closure."""
+        if task.closure is None:
+            return task.status.value != "closed"
+        existing = conn.execute(
+            "SELECT status, closure FROM tasks WHERE id = ?", (task.id,),
+        ).fetchone()
+        return bool(
+            existing is not None and existing[0] == "closed" and existing[1] is not None
+            and json.loads(existing[1]) == task.closure.model_dump(mode="json")
+        )
+
     def _insert_task_row(self, conn: sqlite3.Connection, task: Task) -> None:
         """Insert or upsert a Task row in the tasks table.
 
@@ -14151,6 +14390,8 @@ class SqliteBackend:
         preserves the row identity, so foreign keys remain valid even when
         `plan` is re-run after work has begun.
         """
+        if not self._task_upsert_preserves_closure(conn, task):
+            raise TransactionAborted("task upsert cannot create or alter an audited closure")
         data = task.model_dump(mode="json")
         # prd_id is Field(exclude=True) — read it as the in-memory attribute and
         # write the column explicitly (pre-v7 replay carries 'default').
@@ -14366,7 +14607,7 @@ class SqliteBackend:
         # NULL (pre-backfill) means "no claims". Drop so the default applies.
         if d.get("claims") is None:
             d.pop("claims", None)
-        for col in ("scores", "verification"):
+        for col in ("scores", "verification", "closure"):
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])
         return Task.model_validate(d)
