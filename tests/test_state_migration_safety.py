@@ -166,6 +166,18 @@ def test_normal_open_refuses_missing_authority_without_creating_log(tmp_path, em
     assert _files(state) == before
 
 
+def test_current_migration_refuses_missing_authority(tmp_path, monkeypatch):
+    state = _older_state(tmp_path)
+    _backend(state).close()
+    (state / "events.jsonl").unlink()
+    before = _files(state)
+    for options in (["--json"], ["--yes", "--json"]):
+        result = _invoke(tmp_path, monkeypatch, ["migrate", "state", *options])
+        assert result.exit_code == 1, result.output
+        assert json.loads(result.stdout)["error"]["code"] == "schema_probe_failed"
+        assert _files(state) == before
+
+
 @pytest.mark.parametrize("events_storage", ["local", "git"])
 @pytest.mark.parametrize("operation", ["reopen", "initialize", "append", "lock"])
 def test_current_projection_refuses_missing_authority(tmp_path, events_storage, operation):

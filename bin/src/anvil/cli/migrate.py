@@ -322,9 +322,6 @@ def migrate_state(
     try:
         from_version = schema_probe(db_path)
         SqliteBackend.validate_schema_compatibility(from_version)
-        if from_version == SCHEMA_VERSION:
-            _migrate_state_locked(state_dir, schema_probe, yes=yes, json_output=json_output)
-            return
         # A migration must not initialize a competing project or create a missing
         # authority log. The stable log is also the cross-process writer token.
         if not db_path.is_file() or not events_path.is_file():
