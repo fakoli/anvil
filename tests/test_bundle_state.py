@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from anvil.clock import FrozenClock
 from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
+from anvil.clock import FrozenClock
 from anvil.state.backend import EventRejected
 from anvil.state.models import (
     BundleStatus,
