@@ -17,6 +17,23 @@ class BundleDeliveryError(Exception):
     """A bundle delivery mutation was refused."""
 
 
+_MAX_WITHDRAW_BUNDLE_ID_BYTES = 4096
+
+
+def _validate_withdraw_bundle_id(bundle_id: str) -> None:
+    """Refuse hostile identifiers before they reach lookup diagnostics."""
+    try:
+        encoded = bundle_id.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BundleDeliveryError("Bundle identifier is invalid.") from exc
+    if (
+        not bundle_id
+        or len(encoded) > _MAX_WITHDRAW_BUNDLE_ID_BYTES
+        or any(ord(char) < 32 or ord(char) == 127 for char in bundle_id)
+    ):
+        raise BundleDeliveryError("Bundle identifier is invalid.")
+
+
 class BundleDeliveryManager:
     def __init__(self, backend: Backend, clock: Clock, *, actor: str) -> None:
         self._backend = backend
@@ -106,6 +123,33 @@ class BundleDeliveryManager:
                         "replacement_bundle_id": replacement_bundle_id,
                         "superseded_by_actor": self._actor,
                         "superseded_at": now.isoformat(),
+                    },
+                )
+            )
+        except BackendError as exc:
+            raise BundleDeliveryError(str(exc)) from exc
+
+    def withdraw(self, bundle_id: str, *, reason: str) -> None:
+        """Withdraw a pristine plan without altering its member task history."""
+        _validate_withdraw_bundle_id(bundle_id)
+        bundle = self._backend.get_bundle(bundle_id)
+        if bundle is None:
+            raise BundleDeliveryError(f"Bundle '{bundle_id}' not found.")
+        now = self._clock.now()
+        try:
+            self._backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=self._actor,
+                    action="bundle.withdrawn",
+                    target_kind="bundle",
+                    target_id=bundle_id,
+                    payload_json={
+                        "bundle_id": bundle_id,
+                        "creation_event_id": bundle.creation_event_id,
+                        "withdrawn_by_actor": self._actor,
+                        "reason": reason,
+                        "withdrawn_at": now.isoformat(),
                     },
                 )
             )

@@ -5351,6 +5351,22 @@ def _map_pre_state_ids(pre_state: str, id_mapping: dict[str, str]) -> str:
 
 
 class TestMigrateEvents:
+    @pytest.mark.parametrize("storage", ["local", "git"])
+    @pytest.mark.parametrize("missing_files", [("state.db",), ("events.jsonl",), ("state.db", "events.jsonl")])
+    def test_missing_state_files_refuse_without_bootstrap(self, tmp_path, storage, missing_files):
+        _build_local_project(tmp_path)
+        if storage == "git":
+            assert _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"]).exit_code == 0
+        state_dir = tmp_path / ".anvil"
+        for name in missing_files:
+            (state_dir / name).unlink()
+        before = {path.name: path.read_bytes() for path in state_dir.iterdir() if path.is_file()}
+        for options in ([], ["--yes"]):
+            result = _run_in(tmp_path, ["migrate-events", "--to", "git", *options])
+            assert result.exit_code == 1, result.output
+            assert "schema_probe_failed" in result.output
+            assert {path.name: path.read_bytes() for path in state_dir.iterdir() if path.is_file()} == before
+
     def test_dry_run_is_the_default_and_writes_nothing(self, tmp_path: Path) -> None:
         _build_local_project(tmp_path)
         state_dir = tmp_path / ".anvil"

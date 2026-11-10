@@ -6,6 +6,30 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.21] - 2026-11-10
+
+### Added
+
+- Coordinator-only withdrawal of pristine planned bundles through CLI and MCP,
+  ending unused reservations without changing member tasks or deleting history.
+
+### Changed
+
+- Schema26 integrates the schema23 withdrawal lineage with Kanban closures and
+  scoped concurrent execution. Discovery API24 includes the withdrawal action.
+- Schema migration holds the native writer lock across custody checks, a
+  consistent database backup and upgrade. Active task or bundle custody blocks
+  explicit migration and automatic upgrades of existing projections during
+  ordinary opens, including an empty database with active canonical claims.
+- Existing immutable State logs remain unchanged by schema upgrades. Operators
+  must restart old clients after upgrading their CLI and State.
+
+### Release qualification limits
+
+- The earlier Kanban/concurrency qualification did not consistently meet the
+  15ms ledger-latency target. Hundreds or thousands of executing containers
+  remain unqualified; schema compatibility does not close either gate.
+
 ## [0.6.20] - 2026-11-09
 
 ### Added

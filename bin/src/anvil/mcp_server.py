@@ -5136,6 +5136,34 @@ def supersede_bundle(
         backend.close()
 
 
+@mcp.tool
+def withdraw_bundle(
+    bundle_id: str,
+    reason: str,
+    actor: str,
+    cwd: str | None = None,
+) -> BundleDetailResponse:
+    """Withdraw a pristine planned bundle while retaining its immutable history."""
+    from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
+    from anvil.clock import SystemClock
+
+    backend = _open_backend(
+        _resolve_state_dir(cwd), project_root=_resolve_project_dir(Path(cwd) if cwd else None)
+    )
+    try:
+        try:
+            BundleDeliveryManager(
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
+            ).withdraw(bundle_id, reason=reason)
+            bundle = backend.get_bundle(bundle_id)
+        except (BundleDeliveryError, ValueError) as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        assert bundle is not None
+        return BundleDetailResponse(bundle=_bundle_record(bundle))
+    finally:
+        backend.close()
+
+
 # ---------------------------------------------------------------------------
 # describe_surface (self-describing command surface — T012)
 # ---------------------------------------------------------------------------

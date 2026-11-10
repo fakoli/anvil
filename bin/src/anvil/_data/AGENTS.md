@@ -12,7 +12,7 @@ complementary surfaces:
 
 - **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
   after `uv tool install anvil-state`).
-- **MCP** — `anvil-mcp` (FastMCP stdio; 26 execution tools by default, all 38
+- **MCP** — `anvil-mcp` (FastMCP stdio; 27 execution tools by default, all 39
   with `ANVIL_MCP_PLANNING=1`). Run `anvil mcp-config <your-client>` to print
   client-specific config.
 
@@ -120,6 +120,7 @@ anvil apply T001           # apply the review verdict
 | Checkpoint bundle delivery | `checkpoint_bundle` | `anvil bundle checkpoint <id>` |
 | Reconcile bundle delivery | `reconcile_bundle` | `anvil bundle reconcile <id>` |
 | Supersede bundle | `supersede_bundle` | `anvil bundle supersede <id> --replacement <id>` |
+| Withdraw pristine planned bundle | `withdraw_bundle` | `anvil bundle withdraw <id> --reason REASON` |
 
 For execution bundles, one coordinator owns the bundle and all member-state mutations.
 Delegates return bounded work to that coordinator; they do not independently claim bundle
@@ -131,7 +132,7 @@ See `docs/how-to/coordinating-a-bundle.md` for the complete recovery and review 
 
 ### Execution vs planning surface (MCP)
 
-To keep the per-turn context lean, the MCP server exposes only the **26
+To keep the per-turn context lean, the MCP server exposes only the **27
 execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
 status/conflicts/deps plus coordinator-bundle operations). The **12 one-shot planning tools** (`init_project`,
 `parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
@@ -139,7 +140,7 @@ status/conflicts/deps plus coordinator-bundle operations). The **12 one-shot pla
 `describe_surface`, `create_bundle`) are **hidden by default** and re-appear when the server is
 started with **`ANVIL_MCP_PLANNING=1`** (or `true`/`yes`/`on`). Nothing is
 removed — every capability stays reachable via the CLI command in the same row,
-and the full 38-tool surface returns the moment the env flag is set. Use it for
+and the full 39-tool surface returns the moment the env flag is set. Use it for
 the planning phase; the steady-state execution loop needs none of the 12.
 
 ## Notes

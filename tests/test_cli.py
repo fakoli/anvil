@@ -34,6 +34,67 @@ from anvil.state.schema import SCHEMA_VERSION
 runner = CliRunner()
 
 
+def test_bundle_withdraw_help_exposes_required_reason() -> None:
+    result = runner.invoke(app, ["bundle", "withdraw", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--reason" in result.output
+    assert "pristine planned bundle" in result.output
+
+
+def test_bundle_withdraw_cli_projects_success_and_bounds_bad_identifier(
+    tmp_path: Path,
+) -> None:
+    """The public CLI shares the withdrawal boundary before backend lookup."""
+    from tests.test_bundle_state import _backend, _create_bundle, _seed
+
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".anvil"
+    state_dir.mkdir(parents=True)
+    backend = _backend(state_dir)
+    try:
+        _seed(backend)
+        _create_bundle(backend)
+    finally:
+        backend.close()
+    events_path = state_dir / "events.jsonl"
+
+    success = _invoke_cmd(
+        project_root,
+        [
+            "bundle",
+            "withdraw",
+            "B001",
+            "--reason",
+            "operator correction",
+            "--actor",
+            "codex-main",
+            "--json",
+        ],
+    )
+    assert success.exit_code == 0, success.output
+    assert json.loads(success.stdout)["data"]["bundle"]["status"] == "withdrawn"
+
+    before = events_path.read_bytes()
+    oversized = _invoke_cmd(
+        project_root,
+        [
+            "bundle",
+            "withdraw",
+            "x" * 1_048_576,
+            "--reason",
+            "operator correction",
+            "--actor",
+            "codex-main",
+            "--json",
+        ],
+    )
+    assert oversized.exit_code != 0
+    assert "Bundle identifier is invalid." in oversized.output
+    assert len(oversized.output) < 4096
+    assert events_path.read_bytes() == before
+
+
 def _future_schema_project(tmp_path: Path) -> Path:
     """Initialize local state, then stamp a future schema out of band."""
     original_cwd = os.getcwd()
@@ -1420,7 +1481,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "23"
+        assert API_VERSION == "24"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -10178,12 +10239,17 @@ class TestReplayCommand:
         _do_init(tmp_path, name="Replay Test Project")
         return tmp_path / ".anvil"
 
-    def test_replay_happy_path_into_scratch_db(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("existing_target", [False, True])
+    def test_replay_happy_path_into_scratch_db(self, tmp_path: Path, existing_target: bool) -> None:
         """Successful replay into a temp path exits 0 and creates the target db."""
         state_dir = self._init_project(tmp_path)
         events_path = state_dir / "events.jsonl"
+        original_events = events_path.read_bytes()
 
         scratch_db = tmp_path / "scratch" / "replay.db"
+        if existing_target:
+            scratch_db.parent.mkdir()
+            scratch_db.touch()
 
         result = runner.invoke(
             app,
@@ -10196,6 +10262,7 @@ class TestReplayCommand:
         )
         assert result.exit_code == 0, f"replay failed: {result.output}"
         assert scratch_db.exists(), "scratch db not created after replay"
+        assert events_path.read_bytes() == original_events
         # Output should confirm the events source and destination.
         assert str(events_path) in result.output or "events" in result.output.lower()
         assert str(scratch_db) in result.output or "canonical" in result.output.lower()
@@ -12882,7 +12949,7 @@ class TestUnifiedSchemaMismatchBoundary:
         before = _recursive_file_manifest(state_dir)
         probes: list[helpers.BoundedSchemaProbe] = []
         real_probe = helpers.BoundedSchemaProbe
-        real_copy = migrate_module.shutil.copy2
+        real_copy = migrate_module._backup_database
 
         def tracking_probe() -> helpers.BoundedSchemaProbe:
             probe = real_probe()
@@ -12894,7 +12961,7 @@ class TestUnifiedSchemaMismatchBoundary:
             raise OSError("injected backup copy failure")
 
         monkeypatch.setattr(helpers, "BoundedSchemaProbe", tracking_probe)
-        monkeypatch.setattr(migrate_module.shutil, "copy2", fail_after_copy)
+        monkeypatch.setattr(migrate_module, "_backup_database", fail_after_copy)
         original_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:

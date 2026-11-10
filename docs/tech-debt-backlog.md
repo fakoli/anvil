@@ -28,6 +28,28 @@ Items deferred from PR-level critic + Greptile reviews. Each entry links the ori
 
 ---
 
+## State migration review (PR #259)
+
+### MIG-1 · Concurrent local-to-Git event conversion (HIGH)
+
+**Status**: OPEN. Deferred from [Copilot review 5847760385](https://github.com/fakoli/anvil/pull/259#pullrequestreview-5847760385).
+The existing `migrate-events --to git --yes` conversion closes its backend before
+rewriting the log and atomically replaces the file used as the writer lock token.
+Checking active claims alone does not stop a new writer or fence a retained
+backend. Wrapping `replace()` in the current event-file lock would still leave
+waiters holding the old inode.
+
+Until this is repaired, run event-format conversion only after all writers and
+retained backend handles have stopped; preserve the backup authority and reopen
+clients afterward. Concurrent conversion remains unqualified. The 0.6.21 fleet
+rollout uses only `migrate state`, which preserves event bytes and holds its
+native lock through admission, backup and schema upgrade; it performs no
+event-format conversion.
+
+Close this item with a stable coordination boundary that survives publication,
+full task/bundle custody admission, and crash/recovery tests covering new claims,
+old waiters and retained writers. No such concurrency fix is claimed here.
+
 ## E13 agent-fleet (PRs #57–#65) — deferred review findings
 
 From the blind opus-level review of the full E13 body. The confirmed findings

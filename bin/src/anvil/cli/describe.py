@@ -82,7 +82,8 @@ _COMMAND = "describe"
 # CLI command surface beyond API 17.
 # Bumped to "19" for advisory preflight/attempt reads and timing ingestion.
 # Bumped to "22" for guarded task-action, web writes and typed task closure.
-API_VERSION = "23"
+# Bumped to "24" for guarded bundle withdrawal on the combined schema-26 engine.
+API_VERSION = "24"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -282,14 +283,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "23",
-          "engine_version": "0.6.20",
-          "display_version": "0.6.20",
-          "schema_version": 25,
+          "api_version": "24",
+          "engine_version": "0.6.21",
+          "display_version": "0.6.21",
+          "schema_version": 26,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.20",
+          "tag": "v0.6.21",
           "tag_distance": 0,
           "dirty": false,
           "cli": {
@@ -302,7 +303,7 @@ def build_manifest() -> dict[str, Any]:
             "contract_count": 90,
             "count": 79
           },
-          "mcp": {"tools": ["claim_task", ...], "count": 38},
+          "mcp": {"tools": ["claim_task", ...], "count": 39},
           "operation_catalog": {
             "catalog_version": 1,
             "operations": [{"operation_id": "state.prd.content", ...}, ...]
@@ -442,7 +443,7 @@ def mcp_tool_names() -> list[str]:
     list_tools()``) rather than the server-level ``mcp.list_tools()``: the local
     provider applies transforms but does NOT *filter* disabled components (it
     returns them flagged), whereas the server-level call filters them out. So the
-    local provider yields the complete 38-tool surface even when the L2 planning
+    local provider yields the complete 39-tool surface even when the L2 planning
     gate has hidden the 12 planning tools from the per-turn wire
     (``ANVIL_MCP_PLANNING`` unset). ``describe`` answers "what can this engine
     do", which never shrinks; the gate only changes what a default execution

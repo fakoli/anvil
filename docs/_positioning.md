@@ -55,7 +55,7 @@ every row.
 ## MCP vs plugin
 
 **(Q)** MCP exposes capabilities; plugins encode operating discipline. The
-MCP server ships 38 tools (`claim_task`, `submit_completion_evidence`,
+MCP server ships 39 tools (`claim_task`, `submit_completion_evidence`,
 `generate_work_packet`, …) any agent can call, but a tool does not decide *when*
 to claim, *which* specialist should execute, *what* evidence is required, or
 *how* the critic gate runs. That behaviour lives in skills, subagents, and

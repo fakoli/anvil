@@ -163,6 +163,6 @@ def _replay_into(events_path: str, db_path: str, state_dir: Path) -> None:
             clock=SystemClock(),
             events_storage=read_events_storage(state_dir / "config.yaml"),
         )
-        backend.initialize()
+        # Replay initializes the scratch projection after removing its placeholder.
         backend.replay_from_empty(events_path)
         backend.close()

@@ -27,17 +27,17 @@ def test_discovery_matches_registered_commands_and_both_wire_surfaces(tmp_path, 
     manifest = json.loads(result.output)["data"]
     contracts = _expected_cli_contracts()
     options = _expected_cli_command_options()
-    assert manifest["api_version"] == "23"
+    assert manifest["api_version"] == "24"
     assert manifest["cli"]["contracts"] == contracts
     assert manifest["cli"]["options"] == options
     assert manifest["cli"]["commands"] == sorted(options)
-    assert manifest["cli"]["count"] == len(options) == 93
-    assert manifest["cli"]["contract_count"] == len(contracts) == 106
+    assert manifest["cli"]["count"] == len(options) == 94
+    assert manifest["cli"]["contract_count"] == len(contracts) == 107
     assert {"--attempt", "--bundle", "--observation-at", "--format"} <= set(options["packet"])
     assert {"--json", "--observation-at"} <= set(options["evidence-preflight"])
     assert "--timing-file" in options["progress"]
     assert set(manifest["mcp"]["tools"]) == _ALL_TOOLS
-    assert manifest["mcp"]["count"] == len(_ALL_TOOLS) == 38
+    assert manifest["mcp"]["count"] == len(_ALL_TOOLS) == 39
 
     async def exercise():
         for planning in (False, True):
@@ -48,7 +48,7 @@ def test_discovery_matches_registered_commands_and_both_wire_surfaces(tmp_path, 
                     async with Client(mcp) as client:
                         tools = {tool.name: tool for tool in await client.list_tools()}
                         assert set(tools) == (_ALL_TOOLS if planning else _EXECUTION_TOOLS)
-                        assert len(tools) == (38 if planning else 26)
+                        assert len(tools) == (39 if planning else 27)
                         assert set(tools) & _PLANNING_TOOLS == (_PLANNING_TOOLS if planning else set())
                         assert "observation_at" in tools["get_attempt_view"].inputSchema["properties"]
                         assert "timing" in tools["submit_progress"].inputSchema["properties"]

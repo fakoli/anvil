@@ -301,10 +301,16 @@ class BundleStatus(enum.StrEnum):
     replan_required = "replan_required"
     completed = "completed"
     superseded = "superseded"
+    withdrawn = "withdrawn"
 
 
 TERMINAL_BUNDLE_STATUSES: frozenset[BundleStatus] = frozenset(
-    {BundleStatus.merged, BundleStatus.completed, BundleStatus.superseded}
+    {
+        BundleStatus.merged,
+        BundleStatus.completed,
+        BundleStatus.superseded,
+        BundleStatus.withdrawn,
+    }
 )
 
 

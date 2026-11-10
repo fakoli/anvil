@@ -518,7 +518,10 @@ def _record_verification_proofs(
                 "phase=verification_command deadline=exceeded"
             )
         try:
-            result = engine.run_process(argv, proj.workspace, timeout=remaining)
+            result = engine.run_process(
+                argv, proj.workspace, timeout=remaining,
+                env=engine.benchmark_environment(proj.root),
+            )
         except Exception:
             raise CoordinationInfrastructureError(
                 "benchmark coordination infrastructure failure: "

@@ -91,17 +91,17 @@ Version history
   without that binding is demoted to draft instead of being guessed.
 - v22: root-set claim bindings — root-set claims retain their immutable owner
   reservation/request/digest binding without changing legacy claim rows.
-- v24: audited non-success task closure and guarded task actions. The supported
-  upgrade is v22 → v24; reserved v23 bundle-withdrawal State is incompatible.
+- v23: guarded pristine bundle withdrawal event semantics.
+- v24: audited non-success task closure and guarded task actions.
 - v25: persisted bundle execution scope on the winning coordinator claim.
   The nullable additive column preserves unscoped bundle history.
+- v26: combined withdrawal and Kanban engine semantics; older readers fail closed.
 """
 
 from __future__ import annotations
 
-# 23 is reserved by the separately developed bundle-withdrawal engine. This
-# branch deliberately does not claim its event semantics or migrate its State.
-SCHEMA_VERSION: int = 25
+# Schema 25 readers lack withdrawal semantics and must reject combined State.
+SCHEMA_VERSION: int = 26
 
 
 def get_schema_version() -> int:
@@ -516,7 +516,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 25;
+PRAGMA user_version = 26;
 """
 
 
