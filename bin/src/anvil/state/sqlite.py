@@ -682,11 +682,13 @@ def _active_claim_ids_from_event_log(events_path: str, events_storage: str) -> l
             backend.close()
 
 
-def _require_idle_schema_upgrade(db_path: str, events_path: str, events_storage: str) -> None:
-    """Refuse custody in either projection or authority before live SQLite open."""
+def _schema_upgrade_active_claim_ids(
+    db_path: str, events_path: str, events_storage: str,
+) -> list[str]:
+    """Share projection and authority admission between preview and apply."""
     database = Path(db_path)
     if not database.is_file() or database.stat().st_size == 0:
-        return
+        return []
     if not Path(events_path).is_file():
         raise SchemaProbeFailed(
             "Existing State authority log is unavailable; schema migration refused."
@@ -696,16 +698,21 @@ def _require_idle_schema_upgrade(db_path: str, events_path: str, events_storage:
             tables = {row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )}
-            for table in ("claims", "bundle_claims"):
-                if table in tables and connection.execute(
-                    f"SELECT 1 FROM {table} WHERE status = 'active' LIMIT 1"
-                ).fetchone() is not None:
-                    raise SchemaProbeFailed(
-                        "Active task or bundle custody prevents schema migration."
-                    )
+            active_ids = {
+                row[0]
+                for table in ("claims", "bundle_claims") if table in tables
+                for row in connection.execute(f"SELECT id FROM {table} WHERE status = 'active'")
+            }
+            if active_ids:
+                return sorted(active_ids)
     # A crash can leave a committed claim in the log but absent from SQLite.
     # Inspect authority before DDL, not after migration's normal catch-up.
-    if _active_claim_ids_from_event_log(events_path, events_storage):
+    return _active_claim_ids_from_event_log(events_path, events_storage)
+
+
+def _require_idle_schema_upgrade(db_path: str, events_path: str, events_storage: str) -> None:
+    """Refuse custody in either projection or authority before live SQLite open."""
+    if _schema_upgrade_active_claim_ids(db_path, events_path, events_storage):
         raise SchemaProbeFailed(
             "Active task or bundle custody prevents schema migration."
         )

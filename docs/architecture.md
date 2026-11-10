@@ -73,7 +73,7 @@ graph TD
 
     subgraph Entry["Entry surfaces"]
         CLI["CLI<br/>anvil &lt;cmd&gt;"]
-        MCP["MCP server<br/>FastMCP stdio<br/>38 tools (26 on default surface)"]
+        MCP["MCP server<br/>FastMCP stdio<br/>39 tools (27 on default surface)"]
         Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
     end
 
@@ -142,7 +142,7 @@ Source: [`assets/diagrams/component.mmd`](https://github.com/fakoli/anvil/blob/m
 |---|---|---|
 | Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](https://github.com/fakoli/anvil/blob/main/.claude-plugin/plugin.json) |
 | CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
-| MCP server | Runtime-neutral capability surface — 38 registered stdio tools; the default execution surface serves 26 on the wire, and the 12 planning-tagged tools (including `assess_prd`) require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| MCP server | Runtime-neutral capability surface — 38 registered stdio tools; the default execution surface serves 27 on the wire, and the 12 planning-tagged tools (including `assess_prd`) require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
 | Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json), [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py) |
 | Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](https://github.com/fakoli/anvil/tree/main/skills) |
 | Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](https://github.com/fakoli/anvil/tree/main/agents) |
@@ -485,7 +485,7 @@ in [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/b
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
 [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py).
 
-All 38 tools are registered, but the default execution surface serves 26
+All 39 tools are registered, but the default execution surface serves 27
 on the wire; the 12 planning-tagged tools (`parse_prd`, `assess_prd`, `plan_tasks`,
 `score_tasks`, ...) require `ANVIL_MCP_PLANNING=1` (`mcp_server.py`
 tag-disables them at startup).
@@ -557,7 +557,7 @@ points at a file you can grep.
 | Layer | File(s) |
 |---|---|
 | Entry: CLI assembly | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
-| Entry: MCP server (38 tools) | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| Entry: MCP server (39 tools) | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
 | Entry: hooks manifest | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) |
 | Type system | [`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py) |
 | Transitions (pure) | [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) |

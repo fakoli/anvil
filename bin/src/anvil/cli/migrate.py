@@ -531,9 +531,10 @@ def _backup_database(db_path: Path, backup_path: Path) -> None:
 def _active_claim_ids_without_migrating(state_dir: Path, db_path: Path) -> list[str]:
     """Share normal-open's canonical custody check without opening live State."""
     from anvil.config import read_events_storage
-    from anvil.state.sqlite import _active_claim_ids_from_event_log
+    from anvil.state.sqlite import _schema_upgrade_active_claim_ids
 
-    return _active_claim_ids_from_event_log(
+    return _schema_upgrade_active_claim_ids(
+        str(db_path),
         str(state_dir / "events.jsonl"),
         read_events_storage(state_dir / "config.yaml"),
     )

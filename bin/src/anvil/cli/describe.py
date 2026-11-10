@@ -303,7 +303,7 @@ def build_manifest() -> dict[str, Any]:
             "contract_count": 90,
             "count": 79
           },
-          "mcp": {"tools": ["claim_task", ...], "count": 38},
+          "mcp": {"tools": ["claim_task", ...], "count": 39},
           "operation_catalog": {
             "catalog_version": 1,
             "operations": [{"operation_id": "state.prd.content", ...}, ...]

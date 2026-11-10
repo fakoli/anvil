@@ -406,6 +406,26 @@ def anvil_binary(sync_timeout: float | None = None) -> str:
     return str(candidate)
 
 
+def benchmark_environment(project_root: Path) -> dict[str, str]:
+    """Keep fixture commands independent of the operator's State and root registry."""
+    environment = dict(os.environ)
+    for variable in (
+        "ANVIL_ROOT", "ANVIL_PRD", "ANVIL_ACTOR", "ANVIL_GATE_ACTOR",
+        "ANVIL_CLAIM_ID", "ANVIL_GLOBAL_CONFIG", "ANVIL_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+    ):
+        environment.pop(variable, None)
+    fixture_home = project_root.resolve() / ".benchmark-home"
+    environment.update({
+        "HOME": str(fixture_home),
+        "USERPROFILE": str(fixture_home),
+        "XDG_CONFIG_HOME": str(fixture_home / ".config"),
+        "NO_COLOR": "1",
+        "ANVIL_STATE_LAYOUT": "local",
+    })
+    return environment
+
+
 def run(
     args: list[str],
     cwd: Path,
@@ -430,7 +450,7 @@ def run(
     # Each scenario is an isolated git repo with its own in-repo .anvil/; force the
     # legacy local layout so state stays in `cwd/.anvil` rather than resolving to the
     # shared ~/.anvil/workspaces/<repo>/ home workspace (the production default).
-    env = {**os.environ, "NO_COLOR": "1", "ANVIL_STATE_LAYOUT": "local"}
+    env = benchmark_environment(cwd)
     return run_process(
         cmd,
         cwd,
@@ -891,6 +911,7 @@ def setup_project(
         root / "workspace",
         timeout=_setup_timeout(deadline),
         output_limit_bytes=64 * 1024,
+        env=benchmark_environment(root),
     )
     if git_init.code == 124:
         raise TimeoutError("benchmark setup deadline exceeded")

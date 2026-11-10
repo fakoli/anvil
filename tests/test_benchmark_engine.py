@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sqlite3
 import subprocess
@@ -577,6 +578,45 @@ def test_setup_project_initializes_only_the_workspace_git_repository(
 
     assert (project.workspace / ".git").is_dir()
     assert not (project.root / ".git").exists()
+
+
+def test_fixture_claim_ignores_operator_home_registry_and_state_selectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operator_home = tmp_path / "operator-home"
+    registry = operator_home / ".anvil" / "root-sets"
+    registry.mkdir(parents=True)
+    (registry / "activation.json").write_text(
+        json.dumps({"schema": "anvil.root-set-activation/v1"}), encoding="utf-8",
+    )
+    (registry / "registry.json").write_text(json.dumps({
+        "schema": "anvil.root-set-registry/v1", "repositories": {}, "reservations": {},
+    }), encoding="utf-8")
+    operator_root = tmp_path / "operator-project"
+    operator_root.mkdir()
+    poison_config = operator_home / "config.yaml"
+    poison_config.write_text("not valid: [", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(operator_home))
+    monkeypatch.setenv("USERPROFILE", str(operator_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(operator_home / ".config"))
+    monkeypatch.setenv("ANVIL_ROOT", str(operator_root))
+    monkeypatch.setenv("ANVIL_PRD", "unrelated-prd")
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(poison_config))
+    monkeypatch.setenv("ANVIL_ACTOR", "operator-owner")
+    monkeypatch.setenv("ANVIL_CLAIM_ID", "C00000000")
+    before = {str(path): path.read_bytes() for path in operator_home.rglob("*") if path.is_file()}
+
+    task = engine.TaskSpec("T001", "Benchmark task", files=("workspace/x.txt",))
+    project = engine.setup_project(tmp_path / "fixture", "benchmark", [task])
+    result = engine.run(["claim", "T001", "--json"], project.root, actor="fixture-owner")
+
+    assert result.code == 0, result.out + result.err
+    assert json.loads(result.out)["data"]["claim"]["claimed_by"] == "fixture-owner"
+    assert not (project.root / ".git").exists()
+    assert not list(operator_root.iterdir())
+    assert {str(path): path.read_bytes() for path in operator_home.rglob("*") if path.is_file()} == before
+    assert os.environ["HOME"] == str(operator_home)
+    assert os.environ["ANVIL_ROOT"] == str(operator_root)
 
 
 def test_report_only_cannot_mask_git_init_infrastructure_failure(

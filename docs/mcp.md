@@ -5,8 +5,8 @@
 ## What it does
 
 Agents need to read and write canonical project state without each one shelling out to the
-CLI per operation and without fighting over the same SQLite rows. The MCP server has 38
-registered tools (26 on the wire by default — see
+CLI per operation and without fighting over the same SQLite rows. The MCP server has 39
+registered tools (27 on the wire by default — see
 [Tool surface gating](#tool-surface-gating)) over stdio so that any MCP-compatible
 runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
@@ -1590,7 +1590,7 @@ None.
   },
   "mcp": {
     "tools": ["claim_task", "..."],
-    "count": 38
+    "count": 39
   },
   "operation_catalog": {
     "catalog_version": 1,

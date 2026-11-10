@@ -63,34 +63,51 @@ def test_normal_open_refuses_active_custody_without_live_mutation(tmp_path, only
     assert _files(tmp_path) == before
 
 
-def test_normal_open_refuses_unprojected_authority_claim_before_migration(tmp_path, monkeypatch):
-    """A crash between log append and projection must not hide active custody."""
+@pytest.mark.parametrize("projection_is_active", [False, True])
+def test_migration_refuses_custody_when_log_and_projection_disagree(
+    tmp_path, monkeypatch, projection_is_active,
+):
+    """Either side of a claim/release crash blocks preview and every apply path."""
     from anvil.bundles.manager import BundleManager
     from anvil.roots.registry import RootSetRegistry
 
-    backend = _backend(tmp_path)
+    state = tmp_path / ".anvil"
+    state.mkdir()
+    backend = _backend(state)
     _seed(backend)
     _create_bundle(backend)
-    saved_projection = tmp_path / "before-claim.db"
-    with closing(sqlite3.connect(saved_projection)) as saved:
-        backend._require_conn().backup(saved)
-        saved.execute("PRAGMA journal_mode=DELETE")
-        saved.execute("PRAGMA user_version=25")
     monkeypatch.setattr(
         "anvil.roots.registry.RootSetRegistry",
         lambda: RootSetRegistry(tmp_path / "native-home"),
     )
-    BundleManager(
+    manager = BundleManager(
         backend, FrozenClock(_T0), actor="codex-main", project_root=tmp_path,
-    ).claim("B001")
+    )
+    if projection_is_active:
+        manager.claim("B001")
+    saved_projection = state / "before-crash.db"
+    with closing(sqlite3.connect(saved_projection)) as saved:
+        backend._require_conn().backup(saved)
+        saved.execute("PRAGMA journal_mode=DELETE")
+        saved.execute("PRAGMA user_version=25")
+    if projection_is_active:
+        manager.release("B001", reason="Release logged before projection crash")
+    else:
+        manager.claim("B001")
     backend.close()
-    shutil.copyfile(saved_projection, tmp_path / "state.db")
+    shutil.copyfile(saved_projection, state / "state.db")
     for suffix in ("-wal", "-shm"):
-        (tmp_path / f"state.db{suffix}").unlink(missing_ok=True)
-    before = _files(tmp_path)
+        (state / f"state.db{suffix}").unlink(missing_ok=True)
+    (state / "config.yaml").write_text("events_storage: local\n", encoding="utf-8")
+    before = _files(state)
     with pytest.raises(SchemaProbeFailed, match="Active task or bundle custody"):
-        _backend(tmp_path)
-    assert _files(tmp_path) == before
+        _backend(state)
+    assert _files(state) == before
+    for options in (["--json"], ["--yes", "--json"]):
+        result = _invoke(tmp_path, monkeypatch, ["migrate", "state", *options])
+        assert result.exit_code == 1, result.output
+        assert json.loads(result.stdout)["error"]["code"] == "active_claims"
+        assert _files(state) == before
 
 
 def test_normal_open_refuses_missing_authority_without_creating_log(tmp_path):

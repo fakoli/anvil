@@ -47,7 +47,7 @@ def test_installed_long_running_cli_and_stdio_contract(
     )
     assert qualified.returncode == 0, (qualified.stdout + qualified.stderr)[-2000:]
     result = json.loads(qualified.stdout)
-    assert result == {"default_tools": 26, "planning_tools": 38,
+    assert result == {"default_tools": 27, "planning_tools": 39,
                       "advisory_refusals": 2, "servers_stopped": True}
     assert not (tmp_path / ".anvil").exists()
 
