@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import signal
 import socket
 import stat
@@ -309,7 +310,10 @@ def _validate_snapshot(repository: Repository, response: object) -> dict[str, An
             or snapshot.get("operation_id") != "state.project.snapshot"
             or snapshot.get("digest_algorithm") != "sha256"
             or type(snapshot.get("schema_version")) is not int
+            or type(snapshot.get("operation_version")) is not int
             or snapshot.get("operation_version") != 1
+            or not isinstance(snapshot.get("api_version"), str)
+            or re.fullmatch(r"[1-9][0-9]{0,8}", snapshot["api_version"]) is None
         ):
             raise WebError(
                 "invalid_snapshot", "Reader returned an incomplete or unsupported snapshot"

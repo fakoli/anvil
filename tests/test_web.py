@@ -360,3 +360,27 @@ def test_reader_honors_complete_applied_limits(enrolled, change):
     path.write_text(json.dumps(data))
     with pytest.raises(web.WebError, match="malformed"):
         web.read_snapshot(repository)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("api_version", None),
+        ("api_version", True),
+        ("api_version", 0),
+        ("operation_version", True),
+    ],
+)
+def test_reader_refuses_incomplete_or_noninteger_provenance(enrolled, field, value):
+    config_path, repositories = enrolled
+    repository = repositories[0]
+    path = Path(repository.root) / "snapshot.json"
+    data = json.loads(path.read_text())
+    data["data"][field] = value
+    path.write_text(json.dumps(data))
+    with pytest.raises(web.WebError, match="incomplete"):
+        web.read_snapshot(repository)
+    with pytest.raises(web.WebError, match="incomplete"):
+        web.enroll_repository(
+            config_path, Path(repository.root), reader_argv=repository.reader_argv
+        )
