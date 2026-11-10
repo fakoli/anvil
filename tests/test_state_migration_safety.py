@@ -166,6 +166,38 @@ def test_normal_open_refuses_missing_authority_without_creating_log(tmp_path, em
     assert _files(state) == before
 
 
+@pytest.mark.parametrize("events_storage", ["local", "git"])
+@pytest.mark.parametrize("operation", ["reopen", "initialize", "append", "lock"])
+def test_current_projection_refuses_missing_authority(tmp_path, events_storage, operation):
+    from anvil.state.sqlite import _schema_initialization_lock
+
+    events_path = tmp_path / "events.jsonl"
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"), events_path=str(events_path),
+        clock=FrozenClock(_T0), events_storage=events_storage,
+    )
+    backend.initialize()
+    _seed(backend)
+    if operation == "reopen":
+        backend.close()
+    events_path.unlink()
+    before = _files(tmp_path)
+    try:
+        with pytest.raises(SchemaProbeFailed, match="authority log is unavailable"):
+            if operation == "lock":
+                with _schema_initialization_lock(str(tmp_path / "state.db"), str(events_path)):
+                    pytest.fail("missing authority acquired an initialization lock")
+            elif operation == "append":
+                backend.append(_event(
+                    "project.created", {}, target_kind="project", target_id="after",
+                ))
+            else:
+                backend.initialize()
+        assert _files(tmp_path) == before
+    finally:
+        backend.close()
+
+
 def test_cli_status_and_migration_refuse_active_custody(tmp_path, monkeypatch):
     state = tmp_path / ".anvil"
     state.mkdir()

@@ -539,7 +539,13 @@ def _schema_initialization_lock(
         lock_path = Path(events_path)
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_fh = lock_path.open("r+b" if lock_path.exists() else "a+b")
+            lock_fh = lock_path.open(
+                "r+b" if os.path.exists(db_path) or lock_path.exists() else "a+b"
+            )
+        except FileNotFoundError as exc:
+            raise SchemaProbeFailed(
+                "Existing State authority log is unavailable; initialization refused."
+            ) from exc
         except OSError as exc:
             raise SchemaProbeFailed(
                 "State could not be locked for side-effect-free schema inspection."
@@ -1164,16 +1170,15 @@ class SqliteBackend:
     def initialize(self) -> None:
         """Serialize same-process probes without creating filesystem entries."""
         schema_probe = self._schema_probe_fn or read_db_schema_version
-        # If legacy/corrupt state has a database but no event log, establish
-        # compatibility before creating the stable coordination token.  The
+        # If existing state has a database but no event log, establish
+        # compatibility and require its authority before creating the token. The
         # authoritative probe is repeated under the token below.
         if os.path.exists(self._db_path) and not os.path.exists(self._events_path):
             version = schema_probe(self._db_path)
             self._validate_probed_schema_version(version)
-            if version != SCHEMA_VERSION:
-                _require_idle_schema_upgrade(
-                    self._db_path, self._events_path, self._events_storage,
-                )
+            _require_idle_schema_upgrade(
+                self._db_path, self._events_path, self._events_storage,
+            )
         with _schema_initialization_lock(self._db_path, self._events_path):
             self._initialize_under_lock()
 
@@ -5508,14 +5513,19 @@ class SqliteBackend:
                 finally:
                     self._append_lock_depth -= 1
                 return
-            # Ensure the log file exists before we try to flock it.
+            # Initialization owns log creation; retained writers cannot replace
+            # missing authority with an empty log.
             log_path = self._events_path
-            if not os.path.exists(log_path):
-                open(log_path, "a", encoding="utf-8").close()  # noqa: WPS515
+            try:
+                lock_file = open(log_path, "r+b")
+            except FileNotFoundError as exc:
+                raise SchemaProbeFailed(
+                    "Existing State authority log is unavailable; append refused."
+                ) from exc
             # Binary handle: the Windows lock path os.lseek()s this fd to a
             # sentinel offset, which a text handle would refuse. The handle is a
             # pure lock token — only its fileno() is used, never read/written.
-            with open(log_path, "ab") as _lock_fh:
+            with lock_file as _lock_fh:
                 # Try a non-blocking exclusive lock first; if contended, retry
                 # with jittered exponential backoff until the 5 s budget is
                 # spent. The deadline is measured on the monotonic clock, NOT
