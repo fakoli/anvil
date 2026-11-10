@@ -84,8 +84,22 @@ def test_search_only_ancestors_preserve_leaf_read_permissions(repository):
 def test_directory_anchors_work_without_o_path(repository, monkeypatch):
     ref = reference(repository)
     expected = resolve_profile(repository, ref)
+    # The fallback retains ordinary directory-read permission requirements.
+    readable_ancestors = True
+    for directory in (repository / "tools", repository, *repository.parents):
+        try:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except PermissionError:
+            readable_ancestors = False
+            break
+        else:
+            os.close(descriptor)
     monkeypatch.delattr(os, "O_PATH", raising=False)
-    assert resolve_profile(repository, ref) == expected
+    if readable_ancestors:
+        assert resolve_profile(repository, ref) == expected
+    else:
+        with pytest.raises(ProfileError, match="file_unavailable"):
+            resolve_profile(repository, ref)
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin", "windows"])
