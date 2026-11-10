@@ -236,6 +236,14 @@ process-supervision oddity; open a bug.
 
 ## Git-backed events Phase A (v1.22.0) — v0–v3 → v4 auto-upgrade
 
+Changing event storage with `anvil migrate-events --to git --yes` is a separate
+operation from a schema upgrade. Stop all writers and retained backend handles
+before conversion, retain its backup, then reopen clients afterward. Zero active
+claims alone does not establish that writers have stopped. Concurrent conversion
+is not qualified; see [MIG-1](tech-debt-backlog.md#mig-1-concurrent-local-to-git-event-conversion-high).
+The schema-26 release rollout uses `anvil migrate state` and preserves the
+existing event-storage format and history bytes.
+
 The v4 diff is **purely additive for local mode**: `events` gains a nullable
 `seq` column (`ALTER TABLE events ADD COLUMN seq INTEGER`, duplicate-column
 tolerant so a crashed upgrade can re-run). Existing rows keep `seq` NULL —

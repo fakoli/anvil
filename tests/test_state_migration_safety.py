@@ -8,7 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -176,6 +176,29 @@ def test_current_migration_refuses_missing_authority(tmp_path, monkeypatch):
         assert result.exit_code == 1, result.output
         assert json.loads(result.stdout)["error"]["code"] == "schema_probe_failed"
         assert _files(state) == before
+
+
+@pytest.mark.parametrize("apply_migration", [False, True])
+def test_migration_rechecks_database_after_lock(tmp_path, monkeypatch, apply_migration):
+    import anvil.state.sqlite as sqlite_module
+
+    state = _older_state(tmp_path)
+    real_lock = sqlite_module._schema_initialization_lock
+    after_removal = {}
+
+    @contextmanager
+    def remove_database_at_lock_entry(*args, **kwargs):
+        with real_lock(*args, **kwargs):
+            (state / "state.db").unlink()
+            after_removal.update(_files(state))
+            yield
+
+    monkeypatch.setattr(sqlite_module, "_schema_initialization_lock", remove_database_at_lock_entry)
+    options = ["--yes"] if apply_migration else []
+    result = _invoke(tmp_path, monkeypatch, ["migrate", "state", *options, "--json"])
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "schema_probe_failed"
+    assert _files(state) == after_removal
 
 
 @pytest.mark.parametrize("events_storage", ["local", "git"])

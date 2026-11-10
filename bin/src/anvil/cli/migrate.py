@@ -349,6 +349,7 @@ def _migrate_state_locked(
 
     command = "migrate state"
     db_path = state_dir / "state.db"
+    _require_existing_state_files(state_dir)
     # Re-probe under the lock: a pre-lock observation cannot authorize writes.
     from_version = schema_probe(db_path)
     SqliteBackend.validate_schema_compatibility(from_version)
