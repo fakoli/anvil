@@ -302,6 +302,7 @@ def test_restore_preserves_live_inode_and_retained_native_connection(
 ):
     import sqlite3
 
+    from anvil.cli.doctor import _OK, _check_replay
     from anvil.state import sqlite as sqlite_module
     from tests.test_event_format_migration_safety import _append_native_sync_metadata
     from tests.test_git_events import _run_in
@@ -328,13 +329,23 @@ def test_restore_preserves_live_inode_and_retained_native_connection(
 
     monkeypatch.setattr(store, "pull", pull_outside_custody)
     try:
+        _append_native_sync_metadata(retained, {"after_backup": True})
+        assert len((state / "events.jsonl").read_text().splitlines()) == 25
         restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
         assert restored.exit_code == 0, (restored.output, restored.exception)
         assert (state / "state.db").stat().st_ino == original_inode
+        assert len((state / "events.jsonl").read_text().splitlines()) == 24
         _append_native_sync_metadata(retained, {"after_restore": True})
         with sqlite3.connect(state / "state.db") as fresh:
             assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
-        assert len((state / "events.jsonl").read_text().splitlines()) == 25
+        events = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+        assert len(events) == 25
+        if storage == "local":
+            assert [event["id"] for event in events] == [f"E{index:06d}" for index in range(1, 26)]
+        snapshot = runner.invoke(app, ["project", "snapshot", "--json", "--cwd", str(tmp_path)])
+        assert snapshot.exit_code == 0, snapshot.output
+        replay = _check_replay(retained, state)
+        assert replay.severity == _OK, replay.to_json()
     finally:
         retained.close()
 
@@ -545,7 +556,8 @@ def test_restore_stages_log_on_state_filesystem_before_publication(
         _append_native_sync_metadata(retained, {"after_restore": True})
         with sqlite3.connect(state / "state.db") as fresh:
             assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
-        assert len((state / "events.jsonl").read_text().splitlines()) == 25
+        events = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+        assert [event["id"] for event in events] == [f"E{index:06d}" for index in range(1, 26)]
         assert len(downloaded) == 1 and not downloaded[0].exists()
     finally:
         retained.close()

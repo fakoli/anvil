@@ -275,3 +275,42 @@ def test_initialized_append_starts_no_inspection_child(
         assert inspection_processes == []
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("storage", ["local", "git"])
+def test_retained_tail_scan_keeps_large_complete_event_before_torn_suffix(
+    tmp_path: Path, storage: str,
+) -> None:
+    from tests.test_sqlite import _init_draft, _project_draft
+
+    events = tmp_path / "events.jsonl"
+    events.touch()
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"), events_path=str(events),
+        clock=FrozenClock(_NOW), events_storage=storage,
+    )
+    backend.initialize()
+    try:
+        draft = _project_draft()
+        first = backend.append(draft.model_copy(update={
+            "payload_json": {**draft.payload_json, "description": "x" * 8000},
+        }))
+        assert first is not None
+        complete = events.read_bytes()
+        assert len(complete) > 4096
+        torn = b'{"id":"E000002","action":"state.init'
+        with events.open("ab") as stream:
+            stream.write(torn)
+
+        # The initial window contains one newline but begins inside the large
+        # complete record. It must expand before choosing the fallback tail.
+        if storage == "local":
+            assert backend._scan_tail_id() == 1
+        else:
+            assert backend._scan_tail_envelope() == (first.id, first.lamport)
+        assert events.read_bytes() == complete + torn
+        if storage == "local":
+            following = backend.append(_init_draft())
+            assert following is not None and following.id == "E000002"
+    finally:
+        backend.close()

@@ -78,8 +78,8 @@ def restore(
 ) -> None:
     """Pull events.jsonl from S3 and replay into state.db (destructive)."""
     state_dir = _resolve_state_dir(cwd)
-    _require_safe_restore_paths(state_dir)
     _require_no_event_recovery(state_dir / "state.db")
+    _require_safe_restore_paths(state_dir)
     config = _load_config_required(state_dir)
     events_storage = config.events_storage
     if not yes:
@@ -141,13 +141,13 @@ def _publish_restore(
 
     database = str(state_dir / "state.db")
     events = str(state_dir / "events.jsonl")
-    _require_safe_restore_paths(state_dir)
     _require_no_event_recovery(database)
+    _require_safe_restore_paths(state_dir)
     # Replacing the authority log needs permanent custody even for local State.
     # A legacy waiter that missed creation refuses under its old event lock.
     with _state_operation_lock(database, create=True, contention_error_type=SchemaProbeFailed):
-        _require_safe_restore_paths(state_dir)
         _require_no_event_recovery(database)
+        _require_safe_restore_paths(state_dir)
         _require_event_storage_fence(database, events_storage)
         if _load_config_required(state_dir).events_storage != events_storage:
             raise SchemaProbeFailed(

@@ -1265,7 +1265,7 @@ class SqliteBackend:
         self._schema_probe_fn = schema_probe_fn
         self._project_root = Path(project_root) if project_root is not None else None
         self._conn: sqlite3.Connection | None = None
-        # In-memory monotonic counter; seeded from log max on initialize().
+        # In-memory counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
         # Local mode only — git mode derives ids from content hashes.
         self._next_seq: int = 0
@@ -1872,11 +1872,11 @@ class SqliteBackend:
                 #
                 # _scan_tail_id() is O(last-line) and already tolerates a torn
                 # trailing line, so it is safe to call here under the flock.
-                # The in-memory counter remains a valid fast-path for the
-                # single-process case: if no other process has written since
-                # our last append, scan_tail returns _next_seq and max() is a
-                # no-op.
-                self._next_seq = max(self._next_seq, self._scan_tail_id())
+                # A coordinated restore can move the authoritative tail
+                # backwards while keeping this connection open. Reseed from
+                # that tail too: retaining a higher cached counter would leave
+                # a gap in the restored local history.
+                self._next_seq = self._scan_tail_id()
                 self._next_seq += 1
                 event_id = f"E{self._next_seq:06d}"
                 event = Event(id=event_id, **materialized_draft.model_dump())
@@ -5944,9 +5944,9 @@ class SqliteBackend:
         O(file size). Returns ``[]`` when the file is missing or empty.
 
         Large-line tolerance (SHOULD FIX 1): starts with a 4096-byte window
-        and doubles until the window contains at least one newline separator
-        (ensuring at least one complete prior line to fall back to) or spans
-        the entire file, so events with large ``prd.parsed`` /
+        and doubles until the window contains at least two newline separators
+        (ensuring a complete prior line before a possibly torn final line) or
+        spans the entire file, so events with large ``prd.parsed`` /
         ``task.expanded`` payloads are handled correctly.
         """
         log_path = self._events_path
@@ -5963,11 +5963,11 @@ class SqliteBackend:
                 chunk = fh.read(chunk_size)
                 # Strip trailing whitespace/newlines to ignore blank trailing lines.
                 stripped = chunk.rstrip(b"\n\r ")
-                # Check whether the stripped chunk contains at least one newline
-                # (meaning we have at least one complete prior line to fall back to).
-                if b"\n" in stripped or chunk_size >= file_size:
+                # The first line can be partial when the window starts mid-file.
+                # Two separators bound a complete fallback before the last line.
+                if stripped.count(b"\n") >= 2 or chunk_size >= file_size:
                     break
-                # No newline found and we haven't read the full file yet — double.
+                # Expand until the fallback line or the start of the file fits.
                 chunk_size = min(chunk_size * 2, file_size)
 
         return stripped.split(b"\n")
