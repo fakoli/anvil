@@ -934,6 +934,7 @@ def hook_check_claim(
     # so startup latency is the primary concern.
     try:
         from anvil.clock import SystemClock as _SystemClock
+        from anvil.config import read_events_storage
         from anvil.state.sqlite import SqliteBackend as _SqliteBackend
 
         state_dir = _resolve_state_dir(cwd)
@@ -946,6 +947,7 @@ def hook_check_claim(
             db_path=db_path,
             events_path=events_path,
             clock=_SystemClock(),
+            events_storage=read_events_storage(state_dir / "config.yaml"),
         )
         backend.initialize()
         try:
@@ -1000,6 +1002,7 @@ def hook_record_file_change(
     # Defer all imports — this hook fires on every file write; keep startup fast.
     try:
         from anvil.clock import SystemClock as _SystemClock
+        from anvil.config import read_events_storage
         from anvil.state.models import EventDraft as _EventDraft
         from anvil.state.sqlite import SqliteBackend as _SqliteBackend
 
@@ -1014,6 +1017,7 @@ def hook_record_file_change(
             db_path=db_path,
             events_path=events_path,
             clock=clock,
+            events_storage=read_events_storage(state_dir / "config.yaml"),
         )
         backend.initialize()
         try:
@@ -1197,6 +1201,7 @@ def hook_capture_evidence(
             prd = None
             try:
                 from anvil.clock import SystemClock as _SystemClock
+                from anvil.config import read_events_storage
                 from anvil.state.sqlite import SqliteBackend as _SqliteBackend
 
                 db_path = str(state_dir / "state.db")
@@ -1205,6 +1210,7 @@ def hook_capture_evidence(
                     db_path=db_path,
                     events_path=events_path,
                     clock=_SystemClock(),
+                    events_storage=read_events_storage(state_dir / "config.yaml"),
                 )
                 capture_scope.callback(_backend.close)
                 _backend.initialize()

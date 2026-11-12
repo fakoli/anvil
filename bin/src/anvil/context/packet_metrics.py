@@ -139,6 +139,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
 
     from anvil.clock import SystemClock
+    from anvil.config import read_events_storage
     from anvil.state.sqlite import SqliteBackend
 
     state_dir = Path(args[0]).expanduser()
@@ -146,6 +147,7 @@ def _main(argv: list[str] | None = None) -> int:
         db_path=str(state_dir / "state.db"),
         events_path=str(state_dir / "events.jsonl"),
         clock=SystemClock(),
+        events_storage=read_events_storage(state_dir / "config.yaml"),
     )
     backend.initialize()
     try:
