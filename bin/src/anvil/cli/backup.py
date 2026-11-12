@@ -90,23 +90,25 @@ def restore(
     from anvil.state.durable import S3Error
 
     store = _make_store(config)
-    # Download into a temp file; only replace live events.jsonl on success.
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+    # The log will be renamed into place after projection publication. Allocate
+    # its private stage on the State filesystem before changing either live file.
+    with tempfile.NamedTemporaryFile(
+        delete=False, prefix=".restore-", suffix=".jsonl", dir=state_dir,
+    ) as tmp:
         tmp_events = tmp.name
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp2:
-        scratch_db = tmp2.name
     try:
-        store.pull("events.jsonl", tmp_events)
-        # Remote latency and replay do not hold up live writers. Bind replay to
-        # the selected format, then refuse if conversion won before publication.
-        _replay_into(tmp_events, scratch_db, state_dir, events_storage=events_storage)
-        _publish_restore(state_dir, Path(tmp_events), Path(scratch_db), events_storage)
+        with tempfile.TemporaryDirectory(prefix="anvil-restore-") as temporary:
+            scratch_db = str(Path(temporary) / "state.db")
+            store.pull("events.jsonl", tmp_events)
+            # Remote latency and replay do not hold up live writers. Bind replay to
+            # the selected format, then refuse if conversion won before publication.
+            _replay_into(tmp_events, scratch_db, state_dir, events_storage=events_storage)
+            _publish_restore(state_dir, Path(tmp_events), Path(scratch_db), events_storage)
     except S3Error as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from None
     finally:
         Path(tmp_events).unlink(missing_ok=True)
-        Path(scratch_db).unlink(missing_ok=True)
     typer.echo("Restored: events.jsonl pulled and state.db rebuilt from replay.")
 
 

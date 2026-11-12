@@ -377,6 +377,8 @@ def test_restore_refuses_conversion_during_download_and_preserves_recovery(
         assert converted.exit_code == (0 if phase == "complete" else 1), converted.output
         monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
         observed["before_restore_publication"] = _recursive_file_manifest(state)
+        # The owned download stage is removed on refusal, not live State.
+        observed["before_restore_publication"].pop(Path(destination).name)
         observed["inode"] = (state / "state.db").stat().st_ino
         Path(destination).write_bytes(original_log)
 
@@ -484,3 +486,86 @@ def test_restore_can_recreate_an_absent_projection(tmp_path, monkeypatch):
     assert restored.exit_code == 0, (restored.output, restored.exception)
     with sqlite3.connect(state / "state.db") as connection:
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
+
+
+@pytest.mark.parametrize("different_filesystem", [False, True])
+def test_restore_stages_log_on_state_filesystem_before_publication(
+    tmp_path, monkeypatch, different_filesystem,
+):
+    import sqlite3
+    import stat
+    import tempfile
+
+    from tests.test_event_format_migration_safety import _append_native_sync_metadata
+
+    state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    store.push(str(state / "events.jsonl"), "events.jsonl")
+    temporary_parent = tmp_path
+    if different_filesystem:
+        for candidate in (Path("/dev/shm"), Path(tempfile.gettempdir())):
+            if (candidate.is_dir() and os.access(candidate, os.W_OK)
+                    and candidate.stat().st_dev != state.stat().st_dev):
+                temporary_parent = candidate
+                break
+        else:
+            pytest.skip("No writable second temporary filesystem available")
+    original_inode = (state / "state.db").stat().st_ino
+    original_pull = store.pull
+    downloaded = []
+
+    def observe_download(key, destination):
+        path = Path(destination)
+        downloaded.append(path)
+        assert path.parent == state
+        assert path.stat().st_dev == state.stat().st_dev
+        if os.name == "posix":
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        original_pull(key, destination)
+
+    monkeypatch.setattr(store, "pull", observe_download)
+    retained = SqliteBackend(
+        db_path=str(state / "state.db"), events_path=str(state / "events.jsonl"),
+        clock=FrozenClock(_T0),
+    )
+    retained.initialize()
+    try:
+        _append_native_sync_metadata(retained, {"after_backup": True})
+        assert len((state / "events.jsonl").read_text().splitlines()) == 25
+        with tempfile.TemporaryDirectory(dir=temporary_parent) as temporary:
+            monkeypatch.setattr(tempfile, "tempdir", temporary)
+            if different_filesystem:
+                assert Path(temporary).stat().st_dev != state.stat().st_dev
+            restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+            assert restored.exit_code == 0, (restored.output, restored.exception)
+            assert list(Path(temporary).iterdir()) == []
+        assert (state / "state.db").stat().st_ino == original_inode
+        assert (state / "events.jsonl").read_bytes() == store._blobs["events.jsonl"]
+        assert retained._conn is not None
+        assert retained._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
+        _append_native_sync_metadata(retained, {"after_restore": True})
+        with sqlite3.connect(state / "state.db") as fresh:
+            assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
+        assert len((state / "events.jsonl").read_text().splitlines()) == 25
+        assert len(downloaded) == 1 and not downloaded[0].exists()
+    finally:
+        retained.close()
+
+
+@pytest.mark.parametrize("allocation", ["NamedTemporaryFile", "TemporaryDirectory"])
+def test_restore_staging_allocation_failure_leaves_state_unchanged(
+    tmp_path, monkeypatch, allocation,
+):
+    from tests.test_cli import _recursive_file_manifest
+
+    state, module, store = _restore_fixture(tmp_path, monkeypatch)
+    before = _recursive_file_manifest(state)
+
+    def refuse_allocation(*args, **kwargs):
+        raise OSError("staging unavailable")
+
+    monkeypatch.setattr(module.tempfile, allocation, refuse_allocation)
+    monkeypatch.setattr(store, "pull", lambda *_: pytest.fail("download before staging"))
+    restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+    assert restored.exit_code != 0
+    assert isinstance(restored.exception, OSError)
+    assert _recursive_file_manifest(state) == before
