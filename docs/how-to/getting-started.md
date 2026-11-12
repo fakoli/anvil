@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.6.22 (schema 26)
+# → anvil 0.6.23 (schema 26)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -419,7 +419,7 @@ if ($status.ok) {
 ```
 
 `anvil --version` identifies the CLI engine and supported schema, for example
-`anvil 0.6.22 (schema 26)`. `schema_version` is that engine schema.
+`anvil 0.6.23 (schema 26)`. `schema_version` is that engine schema.
 `db_schema_version` (shown as `pre_open_database_schema`) is the database stamp
 observed before the backend opens. If the command succeeds with a lower
 pre-open value, that same call completed a supported migration; rerun the
@@ -496,7 +496,7 @@ the harness. Routine version recovery never requires deleting state; see
 - **"PRD file not found"** — `init` does not create `prd.md`. Author it at the absolute path `init` printed (under `~/.anvil/workspaces/…`) before running `prd parse`.
 - **`Warning: git branch not created — not a git repository` on claim** — the claim itself still succeeded, but there is no repo to hold the `agent/<task>-<slug>` branch. Run `git init` (plus a first commit) in your project, then `anvil release <claim-id>` and re-claim.
 - **`uv` not found** — install it: `pip install uv` or follow [docs.astral.sh/uv](https://docs.astral.sh/uv/).
-- **Want to start over?** — run `anvil init --force` to wipe and re-scaffold. Don't reach for `rm -rf .anvil/` in your project: in the default layout there is no `.anvil/` there, so it's a no-op — state lives in the HOME workspace.
+- **Want to start over?** — stop existing clients, then run `anvil init --force` to wipe and re-scaffold local-format State. Pending recovery and Git-backed State refuse before deletion; follow the reported native recovery command and preserve coordination files and backups. In the default layout, State lives in the HOME workspace, not a `.anvil/` in your project.
 
 ## Where to next
 

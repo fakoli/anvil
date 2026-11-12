@@ -24,13 +24,17 @@ projection, and rewriting it out from under the agent corrupts its next write.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import time
+import uuid
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -58,8 +62,12 @@ _GITIGNORE_GUIDANCE = """\
     repo state and must be COMMITTED, together with `.anvil/.gitattributes`.
   - KEEP ignoring `.anvil/state.db*` (disposable projection, rebuilt by
     replay) and `.anvil/audit.jsonl` (machine-local audit trail).
-  - Consider ignoring `.anvil/*.bak` and `.anvil/id_mapping.json`
-    if you do not want migration artifacts in the repo."""
+  - KEEP machine-local `.anvil/.state-operation.lock`,
+    `.anvil/.event-format-migration.json`, `.anvil/.event-format-migration-*/`
+    and `.anvil/*.bak` out of Git. Recovery copies include private configuration;
+    retain them locally and never delete the token or marker to bypass recovery.
+  - Consider ignoring `.anvil/id_mapping.json` if you do not want the
+    event identifier mapping in the repo."""
 
 # Backup suffix for the state.db schema migration (T009). Distinct from
 # ``_BACKUP_SUFFIX`` above (the events.jsonl backup) so a schema migration and
@@ -93,6 +101,10 @@ def _require_existing_state_files(state_dir: Path) -> None:
         raise SchemaProbeFailed("Migration requires an existing database and event log.")
 
 
+class _EventConversionRefused(RuntimeError):
+    """A closed, recoverable conversion refusal suitable for operator output."""
+
+
 def migrate_events(
     to: str = typer.Option(  # noqa: B008
         ...,
@@ -102,124 +114,169 @@ def migrate_events(
     yes: bool = typer.Option(  # noqa: B008
         False,
         "--yes",
-        help="Apply the migration. Without this flag the command is a dry run.",
+        help="Apply the migration. Without this flag this is a dry run.",
+    ),
+    resume: bool = typer.Option(  # noqa: B008
+        False,
+        "--resume",
+        help="Resume an interrupted conversion; requires --yes.",
     ),
 ) -> None:
-    """Migrate the event log to git-backed storage (events_storage: git).
+    """Convert idle local event history with durable backups and native recovery.
 
-    Rewrites every line of events.jsonl with a hash-chained id
-    ("E-" + sha256(parent ‖ canonical_json(payload) ‖ actor ‖ ts)[:12]) and a
-    Lamport counter, preserving the original order; emits id_mapping.json
-    (old id → new id); writes .anvil/.gitattributes with
-    `events.jsonl merge=union`; sets events_storage: git in config.yaml; and
-    rebuilds the SQLite projection from the rewritten log.
-
-    Dry-run by default — re-run with --yes to apply. Refuses while any claim
-    is active.
+    Stop older engine versions before applying. Current engines share a permanent
+    token; retained local writers refuse after conversion. Interrupted publication
+    fences normal clients until --resume validates and completes the same work.
+    Apply/resume is POSIX-only; Windows refuses before accessing State because
+    private artifact ACL enforcement is not yet qualified.
     """
-    from anvil.state.hashing import hash_event_id
-    from anvil.state.models import Event
-    from anvil.state.sqlite import _schema_initialization_lock
+    from anvil.config import load_config
+    from anvil.state.sqlite import (
+        _EVENT_FORMAT_MIGRATION_MARKER,
+        SqliteBackend,
+        _schema_initialization_lock,
+        _state_operation_lock,
+    )
 
     if to != "git":
+        typer.echo(f"Error: unsupported --to value {to!r}. Only 'git' is supported.", err=True)
+        raise typer.Exit(1)
+    if resume and not yes:
+        typer.echo("Error: --resume requires --yes.", err=True)
+        raise typer.Exit(1)
+    if os.name == "nt" and yes:
         typer.echo(
-            f"Error: unsupported --to value {to!r}. Only 'git' is supported — "
-            "git-mode logs are not downgraded back to sequence ids "
-            "(local mode cannot represent the hash chain).",
+            "Error: event-format conversion apply/resume is not qualified on Windows: "
+            "private artifact ACLs are not enforced. No State files were changed. "
+            "Dry-run inspection and schema-only `anvil migrate state` remain available.",
             err=True,
         )
-        raise typer.Exit(code=1)
-
+        raise typer.Exit(1)
     state_dir = _resolve_state_dir(None)
     _require_state_dir(state_dir)
-
-    config_path = state_dir / "config.yaml"
-    events_path = state_dir / "events.jsonl"
-
-    # Schema incompatibility is the primary safety boundary for every
-    # backend-opening command. Check it before YAML parsing can warn with an
-    # absolute path, raise a parser traceback, or otherwise pollute output.
-    schema_probe = _preflight_schema_compatibility(state_dir)
-
-    # ------------------------------------------------------------------
-    # Preconditions: valid config, not already migrated, no active claims.
-    # load_config (not the narrow reader) on purpose — migration rewrites
-    # the project's source of truth, so a fully valid config is a fair gate.
-    # ------------------------------------------------------------------
-    from anvil.config import load_config
-
+    probe = _preflight_schema_compatibility(state_dir)
     try:
-        _require_existing_state_files(state_dir)
-        config = load_config(config_path)
-    except (OSError, ValueError) as exc:
-        schema_probe.close()
-        typer.echo(f"Error: cannot load {config_path}: {exc}", err=True)
-        raise typer.Exit(code=1) from None
-    except BaseException:
-        schema_probe.close()
-        raise
-
-    if config.events_storage == "git":
-        schema_probe.close()
-        with _schema_initialization_lock(
-            str(state_dir / "state.db"), str(events_path), create_missing_log=False,
-        ):
-            _require_existing_state_files(state_dir)
-            typer.echo("events_storage is already 'git' — nothing to migrate.")
-        raise typer.Exit(code=0)
-
-    backend = _open_backend(state_dir, schema_probe=schema_probe)
-    try:
-        active = backend.list_active_claims()
+        _require_event_conversion_paths(state_dir)
+        config = load_config(state_dir / "config.yaml")
+        pending = os.path.lexists(state_dir / _EVENT_FORMAT_MIGRATION_MARKER)
+        if resume and not pending:
+            raise _EventConversionRefused("No event-format migration is pending.")
+        if pending and not resume:
+            raise _EventConversionRefused(
+                "Event-format migration is pending; "
+                "use anvil migrate-events --to git --resume --yes."
+            )
+        db_path = str(state_dir / "state.db")
+        events_path = str(state_dir / "events.jsonl")
+        # Dry runs and schema-only upgrades never introduce the permanent token.
+        with _state_operation_lock(
+            db_path,
+            create=yes and not resume and config.events_storage != "git",
+            contention_error_type=SchemaProbeFailed,
+        ) as token:
+            with _schema_initialization_lock(
+                db_path,
+                events_path,
+                create_missing_log=False,
+                allow_event_conversion=resume,
+            ):
+                _require_event_conversion_paths(state_dir)
+                SqliteBackend.validate_schema_compatibility(probe(Path(db_path)))
+                if resume:
+                    marker = _read_event_conversion_marker(state_dir)
+                else:
+                    config = load_config(state_dir / "config.yaml")
+                    if config.events_storage == "git":
+                        typer.echo("events_storage is already 'git' — nothing to migrate.")
+                        return
+                    active = _active_claim_ids_without_migrating(state_dir, Path(db_path))
+                    if active:
+                        raise _EventConversionRefused(
+                            "Event conversion refused: active claim custody (task or bundle): "
+                            + ", ".join(active)
+                        )
+                    rewritten, mapping, dropped = _converted_event_history(Path(events_path))
+                    typer.echo(f"Events to rewrite : {len(mapping)}")
+                    if dropped:
+                        typer.echo("Note: dropped one torn trailing line (crash mid-append).")
+                    typer.echo(_GITIGNORE_GUIDANCE)
+                    if not yes:
+                        typer.echo("Dry run — nothing written. Re-run with --yes to apply.")
+                        return
+                    marker = _stage_event_conversion(state_dir, rewritten, mapping)
+                    _event_conversion_hook("after_marker")
+            # Close the replaceable log handle before rename, including Windows.
+            # Stable ownership spans admission, backup, publication and recovery.
+            if token is None:
+                raise _EventConversionRefused(
+                    "Event conversion requires its permanent coordination token."
+                )
+            _publish_event_conversion(state_dir, marker, token)
+        typer.echo("Migrated events to git-backed storage; retained backups and id_mapping.json.")
+        typer.echo("Commit .anvil/events.jsonl and .anvil/.gitattributes.")
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
     finally:
-        # Close BEFORE touching the log: the backend holds the projection
-        # open, and the apply path below rewrites the file the backend's
-        # append path flocks.
-        backend.close()
-    if active:
-        ids = ", ".join(sorted(c.id for c in active))
-        typer.echo(
-            f"Error: {len(active)} active claim(s) ({ids}). Release or finish "
-            "them first — migration rewrites the log a mid-flight agent is "
-            "about to append to.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+        probe.close()
 
-    # ------------------------------------------------------------------
-    # Read + rewrite (in memory): hash-chain the ids preserving file order.
-    # Lamport is 1..N — the pre-migration log is a single linear history, so
-    # file order IS causal order and replay's (lamport, ts, id) sort
-    # reproduces it exactly.
-    # ------------------------------------------------------------------
-    old_lines: list[str] = []
-    if events_path.exists():
-        old_lines = events_path.read_text(encoding="utf-8").splitlines()
 
-    new_lines: list[str] = []
-    id_mapping: dict[str, str] = {}
+_EVENT_CONVERSION_PREFIX = ".event-format-migration-"
+_EVENT_CONVERSION_FILES = ("events.jsonl", "config.yaml", "id_mapping.json", ".gitattributes")
+_EVENT_CONVERSION_PHASE_HOOK: Callable[[str], None] | None = None
+
+
+def _require_event_conversion_paths(state_dir: Path) -> None:
+    """Admit safe existing paths before introducing any coordination artifact."""
+    from anvil.cli.local_event_repair import _regular, _safe_sidecars
+    from anvil.cli.repair import _safe_state_directory
+    from anvil.state.sqlite import _EVENT_FORMAT_MIGRATION_MARKER, _STATE_OPERATION_TOKEN
+
+    _safe_state_directory(state_dir)
+    _require_existing_state_files(state_dir)
+    required = {"state.db", "events.jsonl", "config.yaml"}
+    optional = {
+        "id_mapping.json",
+        ".gitattributes",
+        _EVENT_FORMAT_MIGRATION_MARKER,
+        _STATE_OPERATION_TOKEN,
+        f"events.jsonl{_BACKUP_SUFFIX}",
+    }
+    for name in required | optional:
+        _regular(state_dir / name, required=name in required)
+    _safe_sidecars(state_dir / "state.db")
+
+
+def _event_conversion_hook(phase: str) -> None:
+    """Fault-injection seam; never configured by normal execution."""
+    if _EVENT_CONVERSION_PHASE_HOOK is not None:
+        _EVENT_CONVERSION_PHASE_HOOK(phase)
+
+
+def _converted_event_history(events_path: Path) -> tuple[bytes, dict[str, str], bool]:
+    from anvil.state.hashing import hash_event_id
+    from anvil.state.models import Event
+
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    rewritten: list[str] = []
+    mapping: dict[str, str] = {}
     parent: str | None = None
-    dropped_torn_line = False
-    for i, raw_line in enumerate(old_lines):
-        stripped = raw_line.strip()
-        if not stripped:
+    dropped = False
+    for index, raw in enumerate(lines):
+        if not raw.strip():
             continue
         try:
-            event = Event.model_validate(json.loads(stripped))
-        except Exception as exc:  # json + envelope validation alike
-            if i == len(old_lines) - 1:
-                # Torn trailing line (crash mid-append) — unreplayable in
-                # both modes; drop it rather than fossilize garbage into the
-                # committed log.
-                dropped_torn_line = True
+            event = Event.model_validate_json(raw)
+        except ValueError:
+            if index == len(lines) - 1:
+                dropped = True
                 break
-            typer.echo(
-                f"Error: events.jsonl line {i + 1} is malformed and not the "
-                f"trailing line — refusing to migrate a corrupt log: {exc}",
-                err=True,
+            raise _EventConversionRefused(f"Event log line {index + 1} is corrupt.") from None
+        if event.id in mapping or event.parent_event_id is not None or event.lamport is not None:
+            raise _EventConversionRefused(
+                "Conversion requires one local event history with unique ids."
             )
-            raise typer.Exit(code=1) from None
-        new_id = hash_event_id(
+        identity = hash_event_id(
             parent_event_id=parent,
             action=event.action,
             target_kind=event.target_kind,
@@ -228,96 +285,300 @@ def migrate_events(
             actor=event.actor,
             ts=event.timestamp.isoformat(),
         )
-        id_mapping[event.id] = new_id
-        migrated = Event(
-            **{
-                **event.model_dump(),
-                "id": new_id,
-                "parent_event_id": parent,
-                "lamport": len(new_lines) + 1,
-            }
+        mapping[event.id] = identity
+        rewritten.append(
+            Event(
+                **{
+                    **event.model_dump(),
+                    "id": identity,
+                    "parent_event_id": parent,
+                    "lamport": len(rewritten) + 1,
+                }
+            ).model_dump_json()
+            + "\n"
         )
-        new_lines.append(migrated.model_dump_json())
-        parent = new_id
+        parent = identity
+    return "".join(rewritten).encode(), mapping, dropped
 
-    # ------------------------------------------------------------------
-    # Report (both modes) / apply (--yes only).
-    # ------------------------------------------------------------------
-    mapping_path = state_dir / _ID_MAPPING_FILENAME
-    gitattributes_path = state_dir / ".gitattributes"
-    backup_path = state_dir / f"events.jsonl{_BACKUP_SUFFIX}"
 
-    typer.echo(f"Events to rewrite : {len(new_lines)}")
-    if dropped_torn_line:
-        typer.echo("Note: dropped one torn trailing line (crash mid-append).")
-    if id_mapping:
-        first_old, first_new = next(iter(id_mapping.items()))
-        typer.echo(f"Id mapping sample : {first_old} -> {first_new}")
-    typer.echo(f"Will write        : {events_path}")
-    typer.echo(f"                    {mapping_path}")
-    typer.echo(f"                    {gitattributes_path} ({_GITATTRIBUTES_LINE})")
-    typer.echo(f"Backup            : {backup_path}")
-    typer.echo("Config change     : events_storage: git")
-    typer.echo(_GITIGNORE_GUIDANCE)
+def _conversion_digest(path: Path) -> str:
+    from anvil.cli.local_event_repair import _regular
 
-    if not yes:
-        typer.echo("\nDry run — nothing written. Re-run with --yes to apply.")
-        raise typer.Exit(code=0)
+    _regular(path)
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
-    if backup_path.exists():
-        typer.echo(
-            f"Error: backup {backup_path} already exists (previous migration "
-            "attempt?). Move it aside before re-running.",
-            err=True,
+
+def _conversion_projection_digest(path: Path) -> str:
+    # Same logical-row oracle as native local-event repair, including schema and
+    # version. Native rows/history are not bounded public read responses. These
+    # JSON settings preserve the existing preimage for previously admitted rows.
+    from anvil.cli.local_event_repair import _table_rows
+    from anvil.state.sqlite import _stable_database_copy
+
+    encoder = json.JSONEncoder(
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+
+    def encode_row(value: Any) -> bytes:
+        return encoder.encode(value).encode("utf-8")
+
+    with _stable_database_copy(path) as snapshot:
+        # A crashed publication can leave a hot rollback journal. Opening only
+        # this private copy writable lets SQLite recover it without touching live
+        # evidence. Publication still requires its recovered rows to match the
+        # recorded before/after digest under stable custody.
+        with closing(sqlite3.connect(snapshot)) as connection:
+            rows = _table_rows(connection, encode_json=encode_row)
+            digest = hashlib.sha256()
+            for chunk in encoder.iterencode(rows):
+                digest.update(chunk.encode("utf-8"))
+            return digest.hexdigest()
+
+
+def _stage_event_conversion(
+    state_dir: Path, rewritten: bytes, mapping: dict[str, str]
+) -> dict[str, Any]:
+    from anvil.cli.backup import _replay_into
+    from anvil.cli.local_event_repair import _identity, _regular, _safe_sidecars, _write_file
+    from anvil.cli.repair import _fsync_directory, _fsync_file, _safe_state_directory
+    from anvil.state.sqlite import _EVENT_FORMAT_MIGRATION_MARKER, _STATE_OPERATION_TOKEN
+
+    _safe_state_directory(state_dir)
+    _safe_sidecars(state_dir / "state.db")
+    backup = state_dir / f"events.jsonl{_BACKUP_SUFFIX}"
+    if os.path.lexists(backup):
+        raise _EventConversionRefused(
+            "Event backup already exists; retain it and reconcile the earlier attempt."
         )
-        raise typer.Exit(code=1)
-
-    # Apply order: backup → log (atomic rename) → mapping → .gitattributes →
-    # config flip → projection rebuild. The config flip comes AFTER the log
-    # rewrite so a crash in between leaves a local-mode config pointing at a
-    # restorable backup, never a git-mode config over a sequence-id log.
-    if events_path.exists():
-        shutil.copy2(events_path, backup_path)
-    tmp_path = events_path.with_suffix(".jsonl.tmp")
-    tmp_path.write_text(
-        "".join(line + "\n" for line in new_lines),
-        encoding="utf-8",
+    recovery = state_dir / f"{_EVENT_CONVERSION_PREFIX}{uuid.uuid4().hex}"
+    recovery.mkdir(mode=0o700)
+    before, after = recovery / "before", recovery / "after"
+    before.mkdir(mode=0o700)
+    after.mkdir(mode=0o700)
+    originals: dict[str, str | None] = {}
+    for name in _EVENT_CONVERSION_FILES:
+        source = state_dir / name
+        _regular(source, required=name in {"events.jsonl", "config.yaml"})
+        originals[name] = _conversion_digest(source) if source.exists() else None
+        if source.exists():
+            _write_file(before / name, source.read_bytes())
+    _write_file(after / "events.jsonl", rewritten)
+    _write_file(after / "config.yaml", (before / "config.yaml").read_bytes())
+    _set_events_storage_git(after / "config.yaml")
+    _write_file(
+        after / "id_mapping.json", (json.dumps(mapping, indent=2, sort_keys=True) + "\n").encode()
     )
-    tmp_path.replace(events_path)
+    if (before / ".gitattributes").exists():
+        _write_file(after / ".gitattributes", (before / ".gitattributes").read_bytes())
+    _ensure_gitattributes_line(after / ".gitattributes")
+    _backup_database(state_dir / "state.db", before / "state.db")
+    # Replay only into private files, before establishing the pending marker.
+    _replay_into(str(after / "events.jsonl"), str(after / "state.db"), after)
+    for directory in (before, after):
+        for artifact in directory.iterdir():
+            artifact.chmod(0o600)
+            _fsync_file(artifact)
+        _fsync_directory(directory)
+    marker = {
+        "schema_version": 1,
+        "recovery_dir": recovery.name,
+        "state_identity": {"dev": state_dir.stat().st_dev, "ino": state_dir.stat().st_ino},
+        "db_identity": _identity(state_dir / "state.db"),
+        "token_identity": _identity(state_dir / _STATE_OPERATION_TOKEN),
+        "before": originals,
+        "after": {name: _conversion_digest(after / name) for name in _EVENT_CONVERSION_FILES},
+        "databases": {
+            side: _conversion_digest(recovery / side / "state.db") for side in ("before", "after")
+        },
+        "projections": {
+            side: _conversion_projection_digest(recovery / side / "state.db")
+            for side in ("before", "after")
+        },
+    }
+    # This copy is outside the private staging directory. Restrict permissions
+    # at creation, independently of umask, and refuse any existing backup.
+    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write((before / "events.jsonl").read_bytes())
+        stream.flush()
+        os.fsync(stream.fileno())
+    _fsync_file(state_dir / _STATE_OPERATION_TOKEN)
+    _fsync_directory(recovery)
+    temporary = recovery / "marker.json"
+    _write_file(temporary, (json.dumps(marker, sort_keys=True) + "\n").encode())
+    temporary.chmod(0o600)
+    _fsync_file(temporary)
+    os.replace(temporary, state_dir / _EVENT_FORMAT_MIGRATION_MARKER)
+    _fsync_directory(state_dir)
+    return marker
 
-    mapping_path.write_text(
-        json.dumps(id_mapping, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+
+def _read_event_conversion_marker(state_dir: Path) -> dict[str, Any]:
+    from anvil.cli.local_event_repair import _bounded_bytes, _directory
+    from anvil.state.sqlite import _EVENT_FORMAT_MIGRATION_MARKER
+
+    value = json.loads(_bounded_bytes(state_dir / _EVENT_FORMAT_MIGRATION_MARKER, limit=65536))
+    fields = {
+        "schema_version",
+        "recovery_dir",
+        "state_identity",
+        "db_identity",
+        "token_identity",
+        "before",
+        "after",
+        "databases",
+        "projections",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+    ):
+        raise _EventConversionRefused("Pending event conversion marker is invalid.")
+    name = value["recovery_dir"]
+    if (
+        not isinstance(name, str)
+        or not name.startswith(_EVENT_CONVERSION_PREFIX)
+        or "/" in name
+        or "\\" in name
+    ):
+        raise _EventConversionRefused("Pending event conversion paths are invalid.")
+    for field, names in (
+        ("before", _EVENT_CONVERSION_FILES),
+        ("after", _EVENT_CONVERSION_FILES),
+        ("databases", ("before", "after")),
+        ("projections", ("before", "after")),
+    ):
+        if not isinstance(value[field], dict) or set(value[field]) != set(names):
+            raise _EventConversionRefused("Pending event conversion manifest is invalid.")
+    for field in ("state_identity", "db_identity", "token_identity"):
+        identity = value[field]
+        if (
+            not isinstance(identity, dict)
+            or set(identity) != {"dev", "ino"}
+            or any(type(item) is not int or item < 0 for item in identity.values())
+        ):
+            raise _EventConversionRefused("Pending conversion identity is invalid.")
+    for field in ("before", "after", "databases", "projections"):
+        for artifact, digest in value[field].items():
+            if (
+                field == "before"
+                and artifact in {"id_mapping.json", ".gitattributes"}
+                and digest is None
+            ):
+                continue
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise _EventConversionRefused("Pending conversion digest is invalid.")
+    _directory(state_dir / name)
+    return value
+
+
+def _publish_event_conversion(state_dir: Path, marker: dict[str, Any], token: Any) -> None:
+    from anvil.cli.local_event_repair import (
+        _directory,
+        _identity,
+        _regular,
+        _safe_sidecars,
+        _write_file,
     )
-
-    _ensure_gitattributes_line(gitattributes_path)
-    _set_events_storage_git(config_path)
-
-    # Rebuild the projection from the rewritten log. The old state.db rows
-    # still carry E{N} ids; opening in git mode detects the id-set divergence
-    # and runs the order-tolerant replay — which also validates the rewritten
-    # log end-to-end before the user commits it.
-    from anvil.clock import SystemClock
-    from anvil.state.sqlite import SqliteBackend
-
-    rebuilt = SqliteBackend(
-        db_path=str(state_dir / "state.db"),
-        events_path=str(events_path),
-        clock=SystemClock(),
-        events_storage="git",
+    from anvil.cli.repair import (
+        _checkpoint_and_fsync_live_projection,
+        _fsync_directory,
+        _fsync_file,
+        _publish_staged_projection,
     )
-    rebuilt.initialize()
-    rebuilt.close()
+    from anvil.state.sqlite import _EVENT_FORMAT_MIGRATION_MARKER, _STATE_OPERATION_TOKEN
 
-    typer.echo(f"\nMigrated {len(new_lines)} events to git-backed storage.")
-    typer.echo(f"Id mapping written to {mapping_path}.")
-    typer.echo("Commit .anvil/events.jsonl and .anvil/.gitattributes.")
+    directory = _directory(state_dir)
+    if marker["state_identity"] != {"dev": directory.st_dev, "ino": directory.st_ino}:
+        raise _EventConversionRefused("Conversion State identity changed.")
+    if marker["db_identity"] != _identity(state_dir / "state.db") or marker[
+        "token_identity"
+    ] != _identity(state_dir / _STATE_OPERATION_TOKEN):
+        raise _EventConversionRefused("Conversion database or token identity changed.")
+    recovery = state_dir / marker["recovery_dir"]
+    _directory(recovery)
+    # Validate every staged artifact and live file before any resumed mutation.
+    for side in ("before", "after"):
+        directory = recovery / side
+        _directory(directory)
+        for name, digest in marker[side].items():
+            if digest is not None and _conversion_digest(directory / name) != digest:
+                raise _EventConversionRefused("Conversion artifact digest changed.")
+        if _conversion_digest(directory / "state.db") != marker["databases"][side]:
+            raise _EventConversionRefused("Conversion database backup digest changed.")
+        if _conversion_projection_digest(directory / "state.db") != marker["projections"][side]:
+            raise _EventConversionRefused("Conversion projection backup changed.")
+    if (
+        _conversion_digest(state_dir / f"events.jsonl{_BACKUP_SUFFIX}")
+        != marker["before"]["events.jsonl"]
+    ):
+        raise _EventConversionRefused("Conversion event backup changed.")
+    for name in _EVENT_CONVERSION_FILES:
+        path = state_dir / name
+        _regular(path, required=marker["before"][name] is not None)
+        observed = _conversion_digest(path) if path.exists() else None
+        if observed not in (marker["before"][name], marker["after"][name]):
+            raise _EventConversionRefused(
+                "Live conversion file changed outside the recorded publication."
+            )
+    _safe_sidecars(state_dir / "state.db")
+    if _conversion_projection_digest(state_dir / "state.db") not in marker["projections"].values():
+        raise _EventConversionRefused(
+            "Live conversion projection changed outside the recorded publication."
+        )
+    for name in _EVENT_CONVERSION_FILES:
+        target = state_dir / name
+        if target.exists() and _conversion_digest(target) == marker["after"][name]:
+            target.chmod(0o600)
+            _fsync_file(target)
+            continue
+        temporary = recovery / f"publish-{uuid.uuid4().hex}"
+        _write_file(temporary, (recovery / "after" / name).read_bytes())
+        # Staging's private parent protects the initial write. Restrict the file
+        # before it becomes visible at the public State pathname (also on resume).
+        temporary.chmod(0o600)
+        _fsync_file(temporary)
+        os.replace(temporary, target)
+        _fsync_directory(state_dir)
+        _event_conversion_hook(f"after_{name}")
+    with closing(sqlite3.connect(state_dir / "state.db")) as connection:
+        _publish_staged_projection(recovery / "after" / "state.db", connection)
+        _checkpoint_and_fsync_live_projection(connection, state_dir / "state.db")
+    # Native replay admits opaque provider metadata, including finite floats.
+    # Provider-read canonical JSON is intentionally narrower, so it cannot be
+    # the publication oracle. Compare the complete replayed projection and the
+    # exact event bytes already bound to this recovery manifest instead.
+    if (
+        _conversion_projection_digest(state_dir / "state.db") != marker["projections"]["after"]
+        or _conversion_digest(state_dir / "events.jsonl") != marker["after"]["events.jsonl"]
+    ):
+        raise _EventConversionRefused("Published conversion does not match its replayed artifacts.")
+    _event_conversion_hook("after_database")
+    token.seek(0)
+    token.write(b"git\n")
+    token.truncate()
+    token.flush()
+    os.fsync(token.fileno())
+    _event_conversion_hook("after_fence")
+    marker_path = state_dir / _EVENT_FORMAT_MIGRATION_MARKER
+    _regular(marker_path)
+    marker_path.unlink()
+    _fsync_directory(state_dir)
 
 
 @migrate_app.command("state", help=_MIGRATE_STATE_HELP)
 def migrate_state(
     yes: bool = typer.Option(  # noqa: B008
-        False, "--yes", help="Apply the migration. Without this flag this is a dry run.",
+        False,
+        "--yes",
+        help="Apply the migration. Without this flag this is a dry run.",
     ),
     json_output: bool = JSON_OPTION,
 ) -> None:
@@ -529,13 +790,18 @@ def _backup_database(db_path: Path, backup_path: Path) -> None:
 
     from anvil.state.sqlite import _stable_database_copy
 
-    with _stable_database_copy(db_path) as scratch_db:
+    with _stable_database_copy(
+        db_path, timeout_seconds=max(0.0, deadline - time.monotonic()),
+    ) as scratch_db:
+        check_deadline(0, 0, 0)
         with closing(sqlite3.connect(scratch_db)) as source:
             with closing(sqlite3.connect(backup_path)) as destination:
                 source.backup(destination, pages=256, progress=check_deadline, sleep=0.01)
                 destination.execute("PRAGMA journal_mode=DELETE")
+                destination.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
                 if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValueError("Schema-migration backup failed its integrity check.")
+    check_deadline(0, 0, 0)
 
 
 def _active_claim_ids_without_migrating(state_dir: Path, db_path: Path) -> list[str]:

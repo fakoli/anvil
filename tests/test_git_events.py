@@ -5350,6 +5350,7 @@ def _map_pre_state_ids(pre_state: str, id_mapping: dict[str, str]) -> str:
     return json.dumps(snap, sort_keys=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX conversion; Windows apply/resume refuses")
 class TestMigrateEvents:
     @pytest.mark.parametrize("storage", ["local", "git"])
     @pytest.mark.parametrize("missing_files", [("state.db",), ("events.jsonl",), ("state.db", "events.jsonl")])

@@ -119,10 +119,20 @@ def _future_schema_project(tmp_path: Path) -> Path:
 
 
 def _recursive_file_manifest(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file())
-    }
+    """Observe exact bytes in a child without dropping retained SQLite locks."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", """
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+print(json.dumps({p.relative_to(root).as_posix(): p.read_bytes().hex()
+                  for p in sorted(root.rglob('*')) if p.is_file()}))
+""", str(root)], capture_output=True, check=True, timeout=10,
+    )
+    return {name: bytes.fromhex(value) for name, value in json.loads(result.stdout).items()}
 
 
 # ---------------------------------------------------------------------------
@@ -12395,6 +12405,35 @@ class TestUnifiedSchemaMismatchBoundary:
         assert not (tmp_path / "state.db").exists()
         assert time.monotonic() - started < 0.5
 
+    @pytest.mark.parametrize("untrusted_import_source", ["cwd", "pythonpath"])
+    def test_schema_probe_ignores_repository_and_pythonpath_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        untrusted_import_source: str,
+    ) -> None:
+        from anvil.state.file_inspection import BoundedSchemaProbe
+
+        database = tmp_path / "state.db"
+        connection = sqlite3.connect(database)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.close()
+        hostile = tmp_path / "untrusted-repository"
+        package = hostile / "anvil"
+        package.mkdir(parents=True)
+        marker = tmp_path / "untrusted-code-executed"
+        malicious = f"from pathlib import Path; Path({str(marker)!r}).write_text('executed')\n"
+        (package / "__init__.py").write_text(malicious)
+        (hostile / "sitecustomize.py").write_text(malicious)
+        if untrusted_import_source == "cwd":
+            monkeypatch.chdir(hostile)
+        else:
+            monkeypatch.setenv("PYTHONPATH", str(hostile))
+        before = database.read_bytes()
+        with BoundedSchemaProbe() as probe:
+            assert probe(database) == SCHEMA_VERSION
+        assert probe.closed
+        assert not marker.exists()
+        assert database.read_bytes() == before
+
     def test_schema_probe_worker_startup_consumes_cumulative_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12630,6 +12669,118 @@ class TestUnifiedSchemaMismatchBoundary:
         assert process.stdin.closed
         assert process.stdout.closed
         assert probe.closed
+
+    def test_schema_probe_unreaped_child_retains_ownership_and_refuses_reuse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import io
+        import subprocess
+
+        from anvil.state.backend import SchemaProbeFailed
+        from anvil.state.file_inspection import BoundedSchemaProbe
+
+        class UnreapedProcess:
+            returncode = None
+            stdin = io.StringIO()
+            stdout = io.StringIO('{"ok":true,"version":-1}\n')
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                raise OSError("injected terminate failure")
+
+            def kill(self):
+                raise OSError("injected kill failure")
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("probe", timeout)
+                return self.returncode
+
+        process = UnreapedProcess()
+        probe = BoundedSchemaProbe()
+        probe._process = process
+        launches = []
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: launches.append(a))
+        with pytest.raises(SchemaProbeFailed, match="invalid data") as failure:
+            probe(tmp_path / "state.db")
+        assert "ownership is retained" in failure.value.__notes__[0]
+        assert probe._process is process
+        assert not probe.closed
+        assert not process.stdin.closed and not process.stdout.closed
+        with pytest.raises(SchemaProbeFailed, match="cleanup is incomplete"):
+            probe(tmp_path / "state.db")
+        assert probe._process is process and not probe.closed
+        assert launches == []
+        # Only a confirmed stop permits stream release and clears ownership.
+        process.returncode = 1
+        probe.close()
+        assert probe.closed and probe._process is None
+        assert process.stdin.closed and process.stdout.closed
+
+    def test_schema_probe_unreaped_reader_never_blocks_in_buffered_pipe_close(self) -> None:
+        import subprocess
+        import threading
+
+        from anvil.state.backend import SchemaProbeFailed
+        from anvil.state.file_inspection import BoundedSchemaProbe
+
+        release_reader = threading.Event()
+        reader_ready = threading.Event()
+        buffer_lock = threading.Lock()
+
+        class BufferedStream:
+            closed = False
+
+            def close(self):
+                with buffer_lock:
+                    self.closed = True
+
+        class UnreapedProcess:
+            returncode = None
+            stdin = BufferedStream()
+            stdout = BufferedStream()
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                raise OSError("injected stop failure")
+
+            def kill(self):
+                raise OSError("injected kill failure")
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("probe", timeout)
+                return self.returncode
+
+        def hold_buffer():
+            with buffer_lock:
+                reader_ready.set()
+                release_reader.wait(10)
+
+        reader = threading.Thread(target=hold_buffer, name="fixture-blocked-reader")
+        process = UnreapedProcess()
+        probe = BoundedSchemaProbe()
+        probe._process = process
+        probe._transport_threads.append(reader)
+        reader.start()
+        assert reader_ready.wait(1)
+        try:
+            with pytest.raises(SchemaProbeFailed, match="cleanup is incomplete"):
+                probe.close()
+            assert not probe.closed and probe._process is process
+            assert reader.is_alive()
+            assert not process.stdin.closed and not process.stdout.closed
+        finally:
+            release_reader.set()
+            reader.join(1)
+            process.returncode = 1
+            probe.close()
+        assert not reader.is_alive() and probe.closed
+        assert process.stdin.closed and process.stdout.closed
 
     def test_schema_probe_reader_failure_is_closed_and_silent(
         self, tmp_path: Path

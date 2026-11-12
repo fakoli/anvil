@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.22 (schema 26)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.23 (schema 26)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -175,9 +175,15 @@ to seed the project row.
   basename of the current directory.
 - `--id TEXT` *(optional)* — project identifier slug (e.g. `my-project`).
   Defaults to a slug derived from `--name`.
-- `--force` *(flag)* — overwrite an existing resolved state directory.
-  Wipes `state.db` (including the `-wal` / `-shm` sidecars), `events.jsonl`,
+- `--force` *(flag)* — overwrite existing local-format State after stopping
+  other clients. Wipes `state.db` (including the `-wal` / `-shm` / `-journal`
+  sidecars), `events.jsonl`,
   and `config.yaml`. Preserves `packets/` and `snapshots/` (user-generated).
+  Refuses pending recovery or Git-backed State before deletion, including with
+  either seeding flag. Local reset creates or reuses `.state-operation.lock`
+  and holds it through bootstrap; preserve this permanent coordination file.
+  Fresh initialization creates no token. This does not make destructive reset
+  transactional or permit old clients to keep using a replaced database.
 - `--with-sample` *(flag)* — seed a runnable toy project (sample `prd.md` +
   parsed/planned/scored task graph) so `anvil next` works immediately.
 - `--from-repo` *(flag)* — brownfield ingest: after scaffolding, run
@@ -189,7 +195,9 @@ to seed the project row.
 
 - `0` — initialisation succeeded.
 - `1` — the resolved state directory already exists and `--force` was not
-  passed; or local layout would scaffold inside the anvil plugin root.
+  passed; local layout would scaffold inside the anvil plugin root; or force
+  initialization encounters unsafe paths, pending recovery, Git-backed State
+  or a contended coordination boundary.
 
 **Example:**
 
@@ -2031,6 +2039,25 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
   `state.db` (destructive; `--yes`/`-y` skips the confirmation prompt).
 - `anvil migrate-events --to git` — Rewrite `events.jsonl` into hash-chained,
   merge-friendly git-backed storage (dry-run by default; `--yes` applies).
+  Apply and resume are supported on POSIX hosts. Windows refuses both before
+  accessing State because private backup/publication ACL enforcement is not yet
+  qualified; dry-run inspection and schema-only `migrate state` remain available.
+  Conversion requires idle task and bundle custody in both projection and event
+  history. Current engines coordinate through a permanent `.state-operation.lock`;
+  retained local backends refuse after conversion and must reopen in Git mode.
+  Stop older engine versions before applying: they do not implement this fence.
+  The command retains the original log backup plus before/after projection and
+  configuration artifacts in a private `.event-format-migration-*` directory.
+  If interrupted, normal reads/writes refuse while `.event-format-migration.json`
+  is present. Run `anvil migrate-events --to git --resume --yes` to validate the
+  recorded identities/digests and complete that conversion. Preserve the marker,
+  permanent token and all backups; do not remove them to bypass recovery. Keep
+  the token, marker, recovery directories and backups out of Git; recovery copies
+  include private configuration. Changed
+  artifacts or unrecorded State changes refuse and require owner reconciliation.
+  A failure before marker creation leaves authority unchanged and retains staging
+  evidence; a pre-existing backup requires reconciliation before another apply.
+  Schema-only upgrades remain a separate operation and never convert event bytes.
 - `anvil migrate state` — Upgrade `.anvil/state.db` to the current engine
   schema version, backing it up first (dry-run by default; `--yes`
   applies; `--json`).

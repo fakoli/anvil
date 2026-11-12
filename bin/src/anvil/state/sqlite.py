@@ -36,6 +36,7 @@ import random
 import re
 import shutil
 import sqlite3
+import stat
 import struct
 import sys
 import tempfile
@@ -43,7 +44,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -63,6 +64,7 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
+from anvil.state.file_inspection import BoundedFileInspection, BoundedSchemaProbe
 from anvil.state.hashing import (
     CanonicalJsonRefusal,
     canonical_json_bytes,
@@ -497,9 +499,142 @@ def _append_lock_release(lock_fh: Any) -> None:
 
 _SCHEMA_INITIALIZATION_LOCK = threading.RLock()
 _SCHEMA_INITIALIZATION_LOCAL = threading.local()
+_STATE_OPERATION_LOCAL = threading.local()
+_STATE_OPERATION_TOKEN = ".state-operation.lock"
+_EVENT_FORMAT_MIGRATION_MARKER = ".event-format-migration.json"
 
 
-def _require_no_event_recovery(db_path: str | os.PathLike[str]) -> None:
+def _state_operation_key(db_path: str | os.PathLike[str]) -> str:
+    # Native projection repair stages a second database in the same State
+    # directory. Both destinations must reuse ownership of the same token.
+    return os.path.normcase(os.path.realpath(Path(db_path).parent / _STATE_OPERATION_TOKEN))
+
+
+@contextmanager
+def _state_operation_lock(
+    db_path: str | os.PathLike[str],
+    *,
+    create: bool = False,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    contention_error_type: type[StateLocked] | type[SchemaProbeFailed] = StateLocked,
+) -> Iterator[Any | None]:
+    """Own the permanent token introduced by event-format conversion.
+
+    Ordinary operations never create it. Before conversion, the event-file lock
+    remains sufficient. A waiter that missed token creation must refuse under
+    its event lock, so it cannot enter between admission and publication.
+    Thread-local reuse supports native replay without serializing other States.
+    """
+    canonical = _state_operation_key(db_path)
+    owned: dict[str, Any] = getattr(_STATE_OPERATION_LOCAL, "owned", {})
+    _STATE_OPERATION_LOCAL.owned = owned
+    if canonical in owned:
+        yield owned[canonical]
+        return
+    token = Path(db_path).parent / _STATE_OPERATION_TOKEN
+    legacy: dict[str, int] = getattr(_STATE_OPERATION_LOCAL, "legacy", {})
+    _STATE_OPERATION_LOCAL.legacy = legacy
+    if not create and not os.path.lexists(token):
+        legacy[canonical] = legacy.get(canonical, 0) + 1
+        try:
+            yield None
+        finally:
+            legacy[canonical] -= 1
+            if not legacy[canonical]:
+                legacy.pop(canonical)
+        return
+    if legacy.get(canonical):
+        raise contention_error_type("State coordination changed; reopen and retry when idle.")
+    # Never invert stable-token -> event-file ordering during nested bootstrap.
+    database_identity = os.path.normcase(os.path.realpath(db_path))
+    if any(
+        path == database_identity for path, _ in getattr(_SCHEMA_INITIALIZATION_LOCAL, "stack", [])
+    ):
+        raise contention_error_type("State coordination changed; reopen and retry when idle.")
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if create:
+        flags |= os.O_CREAT
+    try:
+        descriptor = os.open(token, flags, 0o600)
+        lock_file = os.fdopen(descriptor, "r+b")
+    except OSError as exc:
+        raise SchemaProbeFailed("State coordination token is unavailable.") from exc
+    with lock_file:
+        opened = os.fstat(lock_file.fileno())
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise SchemaProbeFailed("State coordination token is unsafe.")
+        deadline = monotonic_fn() + _FLOCK_TIMEOUT_S
+        delays = _flock_backoff_delays()
+        while True:
+            try:
+                _append_lock_acquire_nb(lock_file)
+                break
+            except OSError as exc:
+                remaining = deadline - monotonic_fn()
+                if remaining <= 0:
+                    raise contention_error_type(
+                        "State coordination lock exceeded its contention deadline."
+                    ) from exc
+                sleep_fn(min(next(delays), remaining))
+        try:
+            _require_current_file_handle(lock_file, token)
+            owned[canonical] = lock_file
+            yield lock_file
+        finally:
+            owned.pop(canonical, None)
+            _append_lock_release(lock_file)
+
+
+def _require_current_file_handle(handle: Any, path: str | os.PathLike[str]) -> None:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+        opened = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise SchemaProbeFailed(
+            "State coordination authority changed; reopen before retrying."
+        ) from exc
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or getattr(current, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        or not os.path.samestat(current, opened)
+    ):
+        raise SchemaProbeFailed("State coordination authority changed; reopen before retrying.")
+
+
+def _require_current_state_lock(
+    db_path: str | os.PathLike[str],
+    *,
+    contention_error_type: type[StateLocked] | type[SchemaProbeFailed] = StateLocked,
+) -> None:
+    canonical = _state_operation_key(db_path)
+    token = Path(db_path).parent / _STATE_OPERATION_TOKEN
+    owned = getattr(_STATE_OPERATION_LOCAL, "owned", {})
+    if os.path.lexists(token) and canonical not in owned:
+        raise contention_error_type("State coordination changed; reopen and retry when idle.")
+
+
+def _require_event_storage_fence(db_path: str, events_storage: str) -> None:
+    canonical = _state_operation_key(db_path)
+    handle = getattr(_STATE_OPERATION_LOCAL, "owned", {}).get(canonical)
+    if handle is None:
+        return
+    handle.seek(0)
+    storage = handle.read(32)
+    if storage not in (b"", b"git\n"):
+        raise SchemaProbeFailed(
+            "State event-format fence is invalid; reconcile migration recovery."
+        )
+    if storage == b"git\n" and events_storage != "git":
+        raise SchemaProbeFailed("State event format changed; reopen the backend before writing.")
+
+
+def _require_no_event_recovery(
+    db_path: str | os.PathLike[str],
+    *,
+    allow_event_conversion: bool = False,
+) -> None:
     """Fail closed until an interrupted local history repair is resumed."""
     marker = Path(db_path).parent / ".local-event-recovery.json"
     # lexists includes broken links: an unsafe marker never means idle state.
@@ -507,12 +642,42 @@ def _require_no_event_recovery(db_path: str | os.PathLike[str]) -> None:
         raise SchemaProbeFailed(
             "Local event recovery is pending; use anvil repair local-event --resume."
         )
+    if not allow_event_conversion and os.path.lexists(
+        Path(db_path).parent / _EVENT_FORMAT_MIGRATION_MARKER
+    ):
+        raise SchemaProbeFailed(
+            "Event-format migration is pending; use anvil migrate-events --to git --resume --yes."
+        )
 
 
 @contextmanager
 def _schema_initialization_lock(
-    db_path: str, events_path: str, *, allow_event_recovery: bool = False,
+    db_path: str,
+    events_path: str,
+    *,
+    allow_event_recovery: bool = False,
     create_missing_log: bool = True,
+    allow_event_conversion: bool = False,
+) -> Iterator[Any | None]:
+    with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed) as coordination:
+        with _schema_initialization_event_lock(
+            db_path,
+            events_path,
+            allow_event_recovery=allow_event_recovery,
+            create_missing_log=create_missing_log,
+            allow_event_conversion=allow_event_conversion,
+        ):
+            yield coordination
+
+
+@contextmanager
+def _schema_initialization_event_lock(
+    db_path: str,
+    events_path: str,
+    *,
+    allow_event_recovery: bool = False,
+    create_missing_log: bool = True,
+    allow_event_conversion: bool = False,
 ) -> Iterator[None]:
     """Serialize Anvil initializers without creating a separate lock entry.
 
@@ -525,12 +690,12 @@ def _schema_initialization_lock(
     after their initial checks; only ordinary bootstrap may create a new log.
     """
     if not allow_event_recovery:
-        _require_no_event_recovery(db_path)
+        _require_no_event_recovery(db_path, allow_event_conversion=allow_event_conversion)
+    elif os.path.lexists(Path(db_path).parent / _EVENT_FORMAT_MIGRATION_MARKER):
+        raise SchemaProbeFailed("Event-format migration is pending; local recovery is unavailable.")
     canonical = os.path.normcase(os.path.realpath(db_path))
     with _SCHEMA_INITIALIZATION_LOCK:
-        stack: list[tuple[str, Any | None]] = getattr(
-            _SCHEMA_INITIALIZATION_LOCAL, "stack", []
-        )
+        stack: list[tuple[str, Any | None]] = getattr(_SCHEMA_INITIALIZATION_LOCAL, "stack", [])
         _SCHEMA_INITIALIZATION_LOCAL.stack = stack
         if any(owned_path == canonical for owned_path, _ in stack):
             stack.append((canonical, None))
@@ -544,7 +709,8 @@ def _schema_initialization_lock(
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_fh = lock_path.open(
-                "r+b" if not create_missing_log or os.path.exists(db_path) or lock_path.exists()
+                "r+b"
+                if not create_missing_log or os.path.exists(db_path) or lock_path.exists()
                 else "a+b"
             )
         except FileNotFoundError as exc:
@@ -572,8 +738,12 @@ def _schema_initialization_lock(
                     time.sleep(min(next(delays), remaining))
             stack.append((canonical, lock_fh))
             try:
+                _require_current_state_lock(db_path, contention_error_type=SchemaProbeFailed)
+                _require_current_file_handle(lock_fh, events_path)
                 if not allow_event_recovery:
-                    _require_no_event_recovery(db_path)
+                    _require_no_event_recovery(
+                        db_path, allow_event_conversion=allow_event_conversion
+                    )
                 yield
             finally:
                 stack.pop()
@@ -624,48 +794,21 @@ def _read_schema_from_rollback_snapshot(db_path: Path) -> int:
 
 
 @contextmanager
-def _stable_database_copy(db_path: str | os.PathLike[str]) -> Iterator[Path]:
-    """Copy a stable DB/WAL/journal set without opening live SQLite files.
+def _stable_database_copy(
+    db_path: str | os.PathLike[str], *, timeout_seconds: float | None = None,
+) -> Iterator[Path]:
+    """Capture a private stable DB/WAL/journal set in an owned child.
 
-    Callers hold the event lock. Rechecks detect concurrent checkpoint cleanup
-    by already-open readers; recovery and backup operations stay in scratch.
+    Callers hold native custody. Raw live descriptors must never be opened and
+    closed in the process that may retain SQLite connections and POSIX locks.
+    The child checks for concurrent checkpoint cleanup; SQLite recovery and
+    backup operations run only against the returned private copy.
     """
-    database = Path(db_path)
-    suffixes = ("", "-wal", "-journal")
-
-    def file_digests(database_path: Path) -> dict[str, bytes]:
-        digests = {}
-        for suffix in suffixes:
-            path = Path(f"{database_path}{suffix}")
-            if path.exists():
-                with path.open("rb") as source:
-                    digests[suffix] = hashlib.file_digest(source, "sha256").digest()
-        return digests
-
-    try:
-        for _ in range(3):
-            with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
-                scratch_db = Path(temporary) / "state.db"
-                for suffix in suffixes:
-                    source = Path(f"{database}{suffix}")
-                    if source.exists():
-                        shutil.copyfile(source, Path(f"{scratch_db}{suffix}"))
-                captured = file_digests(scratch_db)
-                if "" not in captured:
-                    raise SchemaProbeFailed("Migration database is unavailable.")
-                if captured != file_digests(database):
-                    continue
-                yield scratch_db
-                return
-        raise SchemaProbeFailed(
-            "State changed during migration custody inspection; retry when idle."
-        )
-    except SchemaProbeFailed:
-        raise
-    except (OSError, sqlite3.Error) as exc:
-        raise SchemaProbeFailed(
-            "Migration State could not be inspected without live mutation."
-        ) from exc
+    with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
+        scratch_db = Path(temporary) / "state.db"
+        with BoundedFileInspection(timeout_seconds) as inspection:
+            inspection.copy_database(db_path, scratch_db)
+        yield scratch_db
 
 
 def _active_claim_ids_from_event_log(events_path: str, events_storage: str) -> list[str]:
@@ -853,7 +996,7 @@ def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
 
 
 def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
-    """Read page 1 and the current WAL prefix without opening live SQLite state.
+    """Worker-only raw page/WAL read, also usable on closed private test copies.
 
     WAL appends are sequential and frame-checksummed. A concurrent writer may
     extend the file after this read; that does not invalidate the complete,
@@ -872,7 +1015,15 @@ def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
 
 
 def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
-    """Read the on-disk ``PRAGMA user_version`` WITHOUT migrating.
+    """Inspect schema in an owned child without releasing retained SQLite locks."""
+    if not Path(db_path).exists():
+        return 0
+    with BoundedSchemaProbe() as probe:
+        return probe(db_path)
+
+
+def _read_db_schema_version_in_worker(db_path: str | os.PathLike[str]) -> int:
+    """Worker-only on-disk ``PRAGMA user_version`` inspection without migration.
 
     T007/B11 (MUST-FIX 2a): the TRUE pre-migration schema version stamped on a
     database. Unlike ``SqliteBackend.get_schema_version()`` — which reads the
@@ -919,6 +1070,20 @@ def query_only_transaction(
     db_path: str | os.PathLike[str],
     events_path: str | os.PathLike[str],
 ) -> Iterator[tuple[sqlite3.Connection, Any]]:
+    with BoundedSchemaProbe() as schema_probe:
+        with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed):
+            with _query_only_event_transaction(
+                db_path, events_path, schema_probe=schema_probe,
+            ) as transaction:
+                yield transaction
+
+
+@contextmanager
+def _query_only_event_transaction(
+    db_path: str | os.PathLike[str],
+    events_path: str | os.PathLike[str],
+    *, schema_probe: Callable[[str | os.PathLike[str]], int],
+) -> Iterator[tuple[sqlite3.Connection, Any]]:
     """Yield one transaction and the locked, pre-existing event log.
 
     This is the read-only counterpart to :meth:`SqliteBackend.initialize`.
@@ -940,7 +1105,7 @@ def query_only_transaction(
     # Refuse incompatible state before SQLite can create WAL/SHM sidecars or
     # recover a live journal.  Repeat under the event lock below to close the
     # probe-to-open race.
-    probed = read_db_schema_version(database)
+    probed = schema_probe(database)
     if probed != SCHEMA_VERSION:
         raise SchemaMismatch(
             actual=probed,
@@ -985,8 +1150,10 @@ def query_only_transaction(
                     time.sleep(min(next(delays), remaining))
             stack.append((canonical, lock_fh))
             try:
+                _require_current_state_lock(db_path, contention_error_type=SchemaProbeFailed)
+                _require_current_file_handle(lock_fh, events_path)
                 _require_no_event_recovery(db_path)
-                confirmed = read_db_schema_version(database)
+                confirmed = schema_probe(database)
                 if confirmed != SCHEMA_VERSION:
                     raise SchemaMismatch(
                         actual=confirmed,
@@ -1098,7 +1265,7 @@ class SqliteBackend:
         self._schema_probe_fn = schema_probe_fn
         self._project_root = Path(project_root) if project_root is not None else None
         self._conn: sqlite3.Connection | None = None
-        # In-memory monotonic counter; seeded from log max on initialize().
+        # In-memory counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
         # Local mode only — git mode derives ids from content hashes.
         self._next_seq: int = 0
@@ -1182,8 +1349,21 @@ class SqliteBackend:
         self.validate_schema_compatibility(on_disk)
 
     def initialize(self) -> None:
-        """Serialize same-process probes without creating filesystem entries."""
-        schema_probe = self._schema_probe_fn or read_db_schema_version
+        """Reuse one bounded probe across this initialization's admission checks."""
+        with (
+            nullcontext(self._schema_probe_fn)
+            if self._schema_probe_fn is not None else BoundedSchemaProbe()
+        ) as owned_probe:
+            def schema_probe(path: str) -> int:
+                # Missing files have no raw descriptors to isolate. Preserve the
+                # caller-supplied probe contract used by CLI preflight.
+                if self._schema_probe_fn is None and not os.path.exists(path):
+                    return 0
+                return owned_probe(path)
+
+            self._initialize_with_probe(schema_probe)
+
+    def _initialize_with_probe(self, schema_probe: Callable[[str], int]) -> None:
         # If existing state has a database but no event log, establish
         # compatibility and require its authority before creating the token. The
         # authoritative probe is repeated under the token below.
@@ -1194,9 +1374,10 @@ class SqliteBackend:
                 self._db_path, self._events_path, self._events_storage,
             )
         with _schema_initialization_lock(self._db_path, self._events_path):
-            self._initialize_under_lock()
+            _require_event_storage_fence(self._db_path, self._events_storage)
+            self._initialize_under_lock(schema_probe)
 
-    def _initialize_under_lock(self) -> None:
+    def _initialize_under_lock(self, schema_probe: Callable[[str], int]) -> None:
         """Open the SQLite connection, set PRAGMAs, apply DDL if needed.
 
         Idempotent — safe to call multiple times.  Raises SchemaMismatch if
@@ -1240,7 +1421,6 @@ class SqliteBackend:
         # outer OS lock is the linearization boundary shared by every Anvil
         # initializer; direct SQLite schema writes that bypass the state engine
         # are not a supported coordination path.
-        schema_probe = self._schema_probe_fn or read_db_schema_version
         probed_version = schema_probe(self._db_path)
         confirmed_version = schema_probe(self._db_path)
         if probed_version != confirmed_version:
@@ -1501,6 +1681,7 @@ class SqliteBackend:
                         raise EventRejected("root_set_authorization_required") from exc
 
         with self._append_lock():
+            self._require_appendable_event_tail()
             if self._events_storage == "git":
                 self._validate_git_log_before_append()
 
@@ -1692,11 +1873,11 @@ class SqliteBackend:
                 #
                 # _scan_tail_id() is O(last-line) and already tolerates a torn
                 # trailing line, so it is safe to call here under the flock.
-                # The in-memory counter remains a valid fast-path for the
-                # single-process case: if no other process has written since
-                # our last append, scan_tail returns _next_seq and max() is a
-                # no-op.
-                self._next_seq = max(self._next_seq, self._scan_tail_id())
+                # A coordinated restore can move the authoritative tail
+                # backwards while keeping this connection open. Reseed from
+                # that tail too: retaining a higher cached counter would leave
+                # a gap in the restored local history.
+                self._next_seq = self._scan_tail_id()
                 self._next_seq += 1
                 event_id = f"E{self._next_seq:06d}"
                 event = Event(id=event_id, **materialized_draft.model_dump())
@@ -1820,7 +2001,30 @@ class SqliteBackend:
     # Replay
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _replay_operation_lock(self) -> Iterator[None]:
+        """Fence a live destination while preserving native private scratch replay."""
+        with _state_operation_lock(self._db_path):
+            _require_no_event_recovery(self._db_path)
+            _require_event_storage_fence(self._db_path, self._events_storage)
+            if os.path.exists(self._events_path):
+                with _schema_initialization_lock(
+                    self._db_path, self._events_path, create_missing_log=False,
+                ):
+                    yield
+            else:
+                # Backup/repair and explicit CLI replay use an existing scratch
+                # database placeholder with a not-yet-created private scratch log.
+                # Replay owns removing that placeholder before initialization.
+                _require_current_state_lock(self._db_path)
+                yield
+
     def replay_from_empty(self, events_path: str) -> None:
+        """Replay under destination custody, fencing retained local converters."""
+        with self._replay_operation_lock():
+            self._replay_from_empty_under_lock(events_path)
+
+    def _replay_from_empty_under_lock(self, events_path: str) -> None:
         """Reconstruct state.db from events.jsonl. Strict no-skip replay.
 
         Steps (SL1-RR-1)
@@ -3094,6 +3298,11 @@ class SqliteBackend:
             self._replaying = False
 
     def replay_to_event_id(self, events_path: str, stop_after_event_id: str) -> None:
+        """Replay a prefix under the same destination coordination as writers."""
+        with self._replay_operation_lock():
+            self._replay_to_event_id_under_lock(events_path, stop_after_event_id)
+
+    def _replay_to_event_id_under_lock(self, events_path: str, stop_after_event_id: str) -> None:
         """Reconstruct state.db AS OF a bounded prefix of the log (read-only).
 
         Like :meth:`replay_from_empty`, but stops after applying the event whose
@@ -3852,10 +4061,7 @@ class SqliteBackend:
     def get_latest_evidence(self, task_id: str) -> Evidence | None:
         """Return the most recently submitted Evidence for task_id, or None."""
         conn = self._require_conn()
-        try:
-            row = self._latest_evidence_row(conn, task_id)
-        except Exception:  # noqa: BLE001
-            return None
+        row = self._latest_evidence_row(conn, task_id)
         if row is None:
             return None
         return self._row_to_evidence(row)
@@ -5506,6 +5712,15 @@ class SqliteBackend:
 
     @contextmanager
     def _append_lock(self) -> Iterator[None]:
+        with self._proc_lock:
+            with _state_operation_lock(
+                self._db_path, sleep_fn=self._sleep_fn, monotonic_fn=self._monotonic_fn,
+            ):
+                with self._append_event_lock():
+                    yield
+
+    @contextmanager
+    def _append_event_lock(self) -> Iterator[None]:
         """Serialize appends with a threading.Lock + flock on events.jsonl.
 
         The threading.Lock serializes concurrent appends from different threads
@@ -5563,7 +5778,10 @@ class SqliteBackend:
                         # Clamp so the final sleep cannot overshoot the budget.
                         self._sleep_fn(min(next(delays), remaining))
                 try:
+                    _require_current_state_lock(self._db_path)
+                    _require_current_file_handle(_lock_fh, log_path)
                     _require_no_event_recovery(self._db_path)
+                    _require_event_storage_fence(self._db_path, self._events_storage)
                     # An already-open process must not write after another
                     # engine has upgraded this State beyond its semantics.
                     version = self._require_conn().execute("PRAGMA user_version").fetchone()[0]
@@ -5719,6 +5937,37 @@ class SqliteBackend:
                     )
                 )
 
+    def _require_appendable_event_tail(self) -> None:
+        """Refuse unsafe final records before append can make them interior."""
+        refusal = (
+            "Append refused: the event log ends with an incomplete or invalid record. "
+            "Explicit restoration or recovery is required; the original log is unchanged."
+        )
+        with open(self._events_path, "rb") as stream:
+            if stream.seek(0, os.SEEK_END) == 0:
+                return
+            stream.seek(-1, os.SEEK_END)
+            if stream.read(1) != b"\n":
+                raise SchemaProbeFailed(refusal)
+        tail = next(
+            (line.strip() for line in reversed(self._read_tail_window()) if line.strip()), None,
+        )
+        if tail is None:
+            return
+        try:
+            event = Event.model_validate_json(tail)
+            if self._events_storage == "git":
+                if not event.id.startswith("E-") or event.lamport is None:
+                    raise ValueError("invalid Git event envelope")
+            elif (
+                not event.id[1:].isdigit()
+                or event.lamport is not None
+                or event.parent_event_id is not None
+            ):
+                raise ValueError("invalid local event envelope")
+        except ValueError:
+            raise SchemaProbeFailed(refusal) from None
+
     def _read_tail_window(self) -> list[bytes]:
         """Return candidate raw lines from the end of events.jsonl, oldest first.
 
@@ -5727,9 +5976,9 @@ class SqliteBackend:
         O(file size). Returns ``[]`` when the file is missing or empty.
 
         Large-line tolerance (SHOULD FIX 1): starts with a 4096-byte window
-        and doubles until the window contains at least one newline separator
-        (ensuring at least one complete prior line to fall back to) or spans
-        the entire file, so events with large ``prd.parsed`` /
+        and doubles until the window contains at least two newline separators
+        (ensuring a complete prior line before a possibly torn final line) or
+        spans the entire file, so events with large ``prd.parsed`` /
         ``task.expanded`` payloads are handled correctly.
         """
         log_path = self._events_path
@@ -5746,11 +5995,11 @@ class SqliteBackend:
                 chunk = fh.read(chunk_size)
                 # Strip trailing whitespace/newlines to ignore blank trailing lines.
                 stripped = chunk.rstrip(b"\n\r ")
-                # Check whether the stripped chunk contains at least one newline
-                # (meaning we have at least one complete prior line to fall back to).
-                if b"\n" in stripped or chunk_size >= file_size:
+                # The first line can be partial when the window starts mid-file.
+                # Two separators bound a complete fallback before the last line.
+                if stripped.count(b"\n") >= 2 or chunk_size >= file_size:
                     break
-                # No newline found and we haven't read the full file yet — double.
+                # Expand until the fallback line or the start of the file fits.
                 chunk_size = min(chunk_size * 2, file_size)
 
         return stripped.split(b"\n")

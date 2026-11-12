@@ -12016,7 +12016,7 @@ class TestScanTailTornLineOpenPath:
     """
 
     def test_open_with_torn_trailing_line_preserves_counter(self, tmp_path: Path) -> None:
-        """After torn partial line appended directly, reopen gives _next_seq == 2, next id E000003.
+        """Opening preserves the complete prefix; append refuses the torn tail.
 
         This is the open-path (not replay) torn-line test demanded by the critic.
         Steps:
@@ -12025,7 +12025,7 @@ class TestScanTailTornLineOpenPath:
           3. Close the backend.
           4. Open a fresh backend on the same files.
           5. Assert _next_seq == 2 (NOT 0 — the torn line must not collapse the counter).
-          6. Append a third event and assert it gets id E000003 (NOT E000001).
+          6. Refuse a third append without changing the incomplete evidence.
         """
         events_path = str(tmp_path / "events.jsonl")
         db_path = str(tmp_path / "state.db")
@@ -12054,13 +12054,13 @@ class TestScanTailTornLineOpenPath:
                 f"got {b2._next_seq}"
             )
 
-            # Step 6: next append must get E000003 (NOT E000001 — no id reuse).
-            e3 = b2.append(_init_draft())
-            assert e3 is not None
-            assert e3.id == "E000003", (
-                f"Expected E000003 for next append after torn trailing line, "
-                f"got {e3.id}"
-            )
+            from anvil.state.backend import SchemaProbeFailed
+
+            before = Path(events_path).read_bytes()
+            with pytest.raises(SchemaProbeFailed, match="Explicit restoration or recovery"):
+                b2.append(_init_draft())
+            assert Path(events_path).read_bytes() == before
+            assert b2._next_seq == 2
         finally:
             b2.close()
 
@@ -12088,9 +12088,13 @@ class TestScanTailTornLineOpenPath:
             assert b2._next_seq == 1, (  # noqa: SLF001
                 f"Expected _next_seq == 1, got {b2._next_seq}"
             )
-            e2 = b2.append(_init_draft())
-            assert e2 is not None
-            assert e2.id == "E000002"
+            from anvil.state.backend import SchemaProbeFailed
+
+            before = Path(events_path).read_bytes()
+            with pytest.raises(SchemaProbeFailed, match="Explicit restoration or recovery"):
+                b2.append(_init_draft())
+            assert Path(events_path).read_bytes() == before
+            assert b2._next_seq == 1
         finally:
             b2.close()
 

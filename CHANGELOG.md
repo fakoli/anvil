@@ -6,6 +6,43 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.23] - 2026-11-12
+
+### Added
+
+- Recoverable POSIX local-to-Git event conversion with an identity-bound native
+  `migrate-events --to git --resume --yes` recovery command.
+- Repeatable execution-scale campaigns with matched host cells, explicit targets,
+  source bindings and retained failed attempts.
+
+### Fixed
+
+- Event conversion holds stable custody across log replacement, checks task and
+  bundle claims, and fences waiting or retained clients with stale storage modes.
+- Conversion preserves private artifact permissions and rejects unsafe paths
+  before creating its coordination token. Native scratch replay and projection
+  repair retain the same State coordination boundary.
+- Force initialization refuses pending recovery and Git-backed State before
+  deletion. Local resets share conversion custody through bootstrap and discard
+  old SQLite journals with the replaced database.
+- Raw SQLite inspection, stable snapshots, live fsync and legacy workspace copies
+  run in bounded owned child processes so closing their file descriptors cannot
+  drop another connection's POSIX locks. Warm backups include committed WAL data
+  and capture the matching event log before releasing custody for upload.
+- Evidence queries propagate database failures instead of reporting absent proof.
+- Local and Git appends refuse unterminated, malformed or ID-less final log
+  records before changing State. Read/replay tolerance for a torn final record
+  remains; append requires explicit restoration or recovery and preserves the
+  original bytes without truncation.
+
+### Qualification limits
+
+- Windows event-format apply and recovery refuse before artifact creation until
+  private backup DACL handling is qualified. Dry runs and schema-only migration
+  remain available. Older engine processes must be stopped before conversion.
+- Campaign support does not establish a universal 15ms latency guarantee or
+  qualify hundreds or thousands of physically executing containers.
+
 ## [0.6.22] - 2026-11-10
 
 ### Fixed
