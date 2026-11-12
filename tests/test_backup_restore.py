@@ -281,12 +281,19 @@ def test_warm_backup_uploads_closed_wal_snapshot_and_matching_log_after_custody(
     assert all(not path.exists() for path in uploaded_paths)
 
 
-def _restore_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _restore_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, conversion_eligible: bool = False,
+):
     import importlib
 
-    from tests.test_git_events import _build_local_project
+    from tests.test_git_events import _build_conversion_eligible_project, _build_local_project
 
-    _build_local_project(tmp_path)
+    # Ordinary restore cases retain accepted-history coverage. Only conversion
+    # setups select the separately authored eligible history.
+    if conversion_eligible:
+        _build_conversion_eligible_project(tmp_path)
+    else:
+        _build_local_project(tmp_path)
     state = tmp_path / ".anvil"
     with (state / "config.yaml").open("a") as stream:
         stream.write("durable_store: s3\ns3_bucket: test-bucket\n")
@@ -416,7 +423,8 @@ def test_restore_preserves_live_inode_and_retained_native_connection(
 
     if storage == "git" and os.name == "nt":
         pytest.skip("Windows conversion is intentionally refused")
-    state, module, store = _restore_fixture(tmp_path, monkeypatch)
+    state, module, store = _restore_fixture(tmp_path, monkeypatch, conversion_eligible=True)
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     if storage == "git":
         converted = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
         assert converted.exit_code == 0, converted.output
@@ -437,18 +445,20 @@ def test_restore_preserves_live_inode_and_retained_native_connection(
     monkeypatch.setattr(store, "pull", pull_outside_custody)
     try:
         _append_native_sync_metadata(retained, {"after_backup": True})
-        assert len((state / "events.jsonl").read_text().splitlines()) == 25
+        assert len((state / "events.jsonl").read_text().splitlines()) == original_event_count + 1
         restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
         assert restored.exit_code == 0, (restored.output, restored.exception)
         assert (state / "state.db").stat().st_ino == original_inode
-        assert len((state / "events.jsonl").read_text().splitlines()) == 24
+        assert len((state / "events.jsonl").read_text().splitlines()) == original_event_count
         _append_native_sync_metadata(retained, {"after_restore": True})
         with sqlite3.connect(state / "state.db") as fresh:
-            assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
+            assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count + 1
         events = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
-        assert len(events) == 25
+        assert len(events) == original_event_count + 1
         if storage == "local":
-            assert [event["id"] for event in events] == [f"E{index:06d}" for index in range(1, 26)]
+            assert [event["id"] for event in events] == [
+                f"E{index:06d}" for index in range(1, original_event_count + 2)
+            ]
         snapshot = runner.invoke(app, ["project", "snapshot", "--json", "--cwd", str(tmp_path)])
         assert snapshot.exit_code == 0, snapshot.output
         replay = _check_replay(retained, state)
@@ -480,7 +490,7 @@ def test_restore_refuses_conversion_during_download_and_preserves_recovery(
     from tests.test_cli import _recursive_file_manifest
     from tests.test_git_events import _run_in
 
-    state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    state, _, store = _restore_fixture(tmp_path, monkeypatch, conversion_eligible=True)
     original_log = (state / "events.jsonl").read_bytes()
     observed = {}
 
@@ -598,12 +608,13 @@ def test_restore_can_recreate_an_absent_projection(tmp_path, monkeypatch):
     import sqlite3
 
     state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     store.push(str(state / "events.jsonl"), "events.jsonl")
     (state / "state.db").unlink()
     restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
     assert restored.exit_code == 0, (restored.output, restored.exception)
     with sqlite3.connect(state / "state.db") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count
 
 
 @pytest.mark.parametrize("different_filesystem", [False, True])
@@ -617,6 +628,7 @@ def test_restore_stages_log_on_state_filesystem_before_publication(
     from tests.test_event_format_migration_safety import _append_native_sync_metadata
 
     state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     store.push(str(state / "events.jsonl"), "events.jsonl")
     temporary_parent = tmp_path
     if different_filesystem:
@@ -648,7 +660,7 @@ def test_restore_stages_log_on_state_filesystem_before_publication(
     retained.initialize()
     try:
         _append_native_sync_metadata(retained, {"after_backup": True})
-        assert len((state / "events.jsonl").read_text().splitlines()) == 25
+        assert len((state / "events.jsonl").read_text().splitlines()) == original_event_count + 1
         with tempfile.TemporaryDirectory(dir=temporary_parent) as temporary:
             monkeypatch.setattr(tempfile, "tempdir", temporary)
             if different_filesystem:
@@ -659,12 +671,14 @@ def test_restore_stages_log_on_state_filesystem_before_publication(
         assert (state / "state.db").stat().st_ino == original_inode
         assert (state / "events.jsonl").read_bytes() == store._blobs["events.jsonl"]
         assert retained._conn is not None
-        assert retained._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
+        assert retained._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count
         _append_native_sync_metadata(retained, {"after_restore": True})
         with sqlite3.connect(state / "state.db") as fresh:
-            assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
+            assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count + 1
         events = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
-        assert [event["id"] for event in events] == [f"E{index:06d}" for index in range(1, 26)]
+        assert [event["id"] for event in events] == [
+            f"E{index:06d}" for index in range(1, original_event_count + 2)
+        ]
         assert len(downloaded) == 1 and not downloaded[0].exists()
     finally:
         retained.close()

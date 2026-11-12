@@ -5299,10 +5299,9 @@ class TestGitConvergenceOnInitialize:
 def _build_local_project(project_dir: Path) -> str:
     """A local-mode project whose log is the committed replay fixture.
 
-    Returns the pre-migration serialize_state JSON. The fixture exercises the
-    full event vocabulary (claims, evidence, task.applied review, sync
-    mapping), so the round-trip check covers event-id-derived state (the
-    RV-E{n} review ids) — exactly what the id mapping exists for.
+    The committed 24-event fixture contains accepted work. Keep it intact:
+    conversion must refuse it because exported acceptance proofs can bind its
+    original event IDs. Returns the original serialize_state JSON.
     """
     state_dir = project_dir / ".anvil"
     state_dir.mkdir(parents=True)
@@ -5325,6 +5324,41 @@ def _build_local_project(project_dir: Path) -> str:
         b.close()
 
 
+def _build_conversion_eligible_project(project_dir: Path) -> str:
+    """Author a draft PRD, ready task and sync mapping without bound authority.
+
+    This is a distinct native history, not the accepted fixture with events
+    removed. Positive conversion tests must not imply accepted work is eligible.
+    """
+    state_dir = project_dir / ".anvil"
+    state_dir.mkdir(parents=True)
+    (state_dir / "config.yaml").write_text(
+        "project_name: 'Migrate Me'\nproject_id: 'proj-1'\n", encoding="utf-8",
+    )
+    backend = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(state_dir / "events.jsonl"),
+        clock=FrozenClock(_T0), events_storage="local",
+    )
+    backend.initialize()
+    try:
+        _seed_ready_task(backend)
+        backend.append(_draft(
+            "prd.parsed", _prd_parsed_payload(expected_absent=True),
+            target_kind="prd", target_id="default",
+        ))
+        backend.append(_draft("sync_mapping.upserted", {
+            "task_id": "T001", "external_system": "conversion-fixture",
+            "external_id": "fixture-1", "external_url": None,
+            "last_synced_at": _T0.isoformat(), "sync_state": "in_sync",
+            "conflict_resolution_strategy": "prompt", "provider_metadata": {},
+            "prd_id": "default", "entity_kind": "task",
+        }, target_kind="task", target_id="T001"))
+        return _snap(backend)
+    finally:
+        backend.close()
+
+
 def _run_in(project_dir: Path, args: list[str]) -> Any:
     """Invoke the CLI with cwd switched to *project_dir* (commands use Path.cwd)."""
     original = os.getcwd()
@@ -5338,10 +5372,8 @@ def _run_in(project_dir: Path, args: list[str]) -> Any:
 def _map_pre_state_ids(pre_state: str, id_mapping: dict[str, str]) -> str:
     """Rewrite event-id-derived bits of a snapshot through the id mapping.
 
-    The only event-id-derived canonical state is review ids (``RV-E{n}``,
-    assigned from the task.applied / prd.approved event id at write time).
-    Entity ids (T/F/C/EV) are caller-assigned payload data and unaffected by
-    Phase A.
+    This helper covers legacy snapshot review IDs only. It is not an authority
+    conversion oracle: bound PRD/bundle history and accepted work are refused.
     """
     snap = json.loads(pre_state)
     for review in snap["reviews"]:
@@ -5355,7 +5387,7 @@ class TestMigrateEvents:
     @pytest.mark.parametrize("storage", ["local", "git"])
     @pytest.mark.parametrize("missing_files", [("state.db",), ("events.jsonl",), ("state.db", "events.jsonl")])
     def test_missing_state_files_refuse_without_bootstrap(self, tmp_path, storage, missing_files):
-        _build_local_project(tmp_path)
+        _build_conversion_eligible_project(tmp_path)
         if storage == "git":
             assert _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"]).exit_code == 0
         state_dir = tmp_path / ".anvil"
@@ -5369,7 +5401,7 @@ class TestMigrateEvents:
             assert {path.name: path.read_bytes() for path in state_dir.iterdir() if path.is_file()} == before
 
     def test_dry_run_is_the_default_and_writes_nothing(self, tmp_path: Path) -> None:
-        _build_local_project(tmp_path)
+        _build_conversion_eligible_project(tmp_path)
         state_dir = tmp_path / ".anvil"
         log_before = (state_dir / "events.jsonl").read_bytes()
         config_before = (state_dir / "config.yaml").read_text(encoding="utf-8")
@@ -5385,24 +5417,24 @@ class TestMigrateEvents:
         assert not (state_dir / "id_mapping.json").exists()
 
     def test_yes_applies_full_migration(self, tmp_path: Path) -> None:
-        pre_state = _build_local_project(tmp_path)
+        pre_state = _build_conversion_eligible_project(tmp_path)
         state_dir = tmp_path / ".anvil"
-        old_ids = [line["id"] for line in _log_lines(state_dir)]
+        original_events = _log_lines(state_dir)
+        old_ids = [line["id"] for line in original_events]
 
         result = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
         assert result.exit_code == 0, result.output
 
         # Log rewritten: hash ids, linear chain, lamport 1..N, order preserved.
         lines = _log_lines(state_dir)
-        assert len(lines) == len(old_ids) == 24
+        assert len(lines) == len(old_ids)
         assert all(_HASH_ID_RE.fullmatch(line["id"]) for line in lines)
         assert lines[0]["parent_event_id"] is None
         for prev, cur in zip(lines, lines[1:], strict=False):
             assert cur["parent_event_id"] == prev["id"]
-        assert [line["lamport"] for line in lines] == list(range(1, 25))
+        assert [line["lamport"] for line in lines] == list(range(1, len(original_events) + 1))
         assert [line["action"] for line in lines] == [
-            json.loads(raw)["action"]
-            for raw in _FIXTURE_EVENTS.read_text(encoding="utf-8").splitlines()
+            event["action"] for event in original_events
         ]
 
         # id_mapping: bijective old → new, covering every original id.
@@ -5436,7 +5468,7 @@ class TestMigrateEvents:
         assert post_state == _map_pre_state_ids(pre_state, id_mapping)
 
     def test_second_run_is_an_idempotent_no_op(self, tmp_path: Path) -> None:
-        _build_local_project(tmp_path)
+        _build_conversion_eligible_project(tmp_path)
         first = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
         assert first.exit_code == 0, first.output
         log_after_first = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
@@ -5484,7 +5516,7 @@ class TestMigrateEvents:
         assert "events_storage" not in config
 
     def test_to_local_is_rejected(self, tmp_path: Path) -> None:
-        _build_local_project(tmp_path)
+        _build_conversion_eligible_project(tmp_path)
         result = _run_in(tmp_path, ["migrate-events", "--to", "local", "--yes"])
         assert result.exit_code == 1
         assert "Only 'git' is supported" in result.output
@@ -5498,7 +5530,7 @@ class TestMigrateEvents:
         does not dedupe, so the wrong mode double-writes each duplicate.
         """
         # A migrated (git-mode) project lives at tmp_path.
-        _build_local_project(tmp_path)
+        _build_conversion_eligible_project(tmp_path)
         assert _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"]).exit_code == 0
         state_dir = tmp_path / ".anvil"
 
@@ -5549,7 +5581,7 @@ class TestMigrateEvents:
     def test_config_rewrite_preserves_crlf(self, tmp_path: Path) -> None:
         """Greptile P2: a CRLF config.yaml stays CRLF after the migration edit."""
         state_dir = tmp_path / ".anvil"
-        _build_local_project(tmp_path)
+        _build_conversion_eligible_project(tmp_path)
         config_path = state_dir / "config.yaml"
         # Rewrite the existing config with CRLF endings.
         lf_text = config_path.read_text(encoding="utf-8")

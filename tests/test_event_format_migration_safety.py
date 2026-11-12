@@ -18,7 +18,7 @@ from anvil.clock import FrozenClock
 from anvil.state.backend import SchemaProbeFailed
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import SqliteBackend, query_only_transaction
-from tests.test_git_events import _T0, _build_local_project, _draft, _run_in
+from tests.test_git_events import _T0, _build_conversion_eligible_project, _draft, _run_in
 
 
 class _WindowsOSView:
@@ -104,8 +104,9 @@ os._exit(0)
 
 
 def test_retained_local_backend_refuses_and_fresh_git_backend_can_append(tmp_path):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     retained = _backend(state)
     database_identity = (state / "state.db").stat().st_ino
     try:
@@ -143,7 +144,7 @@ def test_retained_local_backend_refuses_and_fresh_git_backend_can_append(tmp_pat
         connection,
         _,
     ):
-        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count + 1
 
 
 @pytest.mark.parametrize(
@@ -161,8 +162,9 @@ def test_retained_local_backend_refuses_and_fresh_git_backend_can_append(tmp_pat
 def test_interrupted_publication_fences_clients_then_resumes(tmp_path, monkeypatch, phase):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     original = (state / "events.jsonl").read_bytes()
     retained = _backend(state)
 
@@ -193,7 +195,7 @@ def test_interrupted_publication_fences_clients_then_resumes(tmp_path, monkeypat
     assert not marker_path.exists()
     backend = _backend(state, "git")
     backend.close()
-    assert len((state / "events.jsonl").read_text().splitlines()) == 24
+    assert len((state / "events.jsonl").read_text().splitlines()) == original_event_count
     assert (state / ".state-operation.lock").read_bytes() == b"git\n"
 
 
@@ -212,7 +214,7 @@ def test_interrupted_publication_fences_clients_then_resumes(tmp_path, monkeypat
 def test_resume_refuses_changed_authority_and_retains_evidence(tmp_path, monkeypatch, changed):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
 
     def interrupt(phase):
@@ -304,7 +306,7 @@ def test_bundle_custody_on_either_side_of_crash_refuses(
 
 
 def test_dry_run_and_future_schema_create_no_coordination_artifact(tmp_path):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     before = _files(state)
     result = _run_in(tmp_path, ["migrate-events", "--to", "git"])
@@ -327,7 +329,7 @@ def test_waiter_that_opened_original_log_cannot_enter_after_conversion(tmp_path)
     """A real process opens the old inode before the stable token exists."""
     import fcntl
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     code = r"""
 import sys
@@ -376,7 +378,7 @@ except Exception as exc:
 
 @pytest.mark.parametrize("phase", ["after_events.jsonl", "after_database"])
 def test_process_death_keeps_native_resume_available(tmp_path, phase):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     code = r"""
 import os, sys
 import anvil.cli.migrate as migration
@@ -473,7 +475,7 @@ finally:
 def test_malformed_recovery_marker_refuses_before_writing(tmp_path, monkeypatch, malformed):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
 
     def interrupt(phase):
@@ -517,7 +519,7 @@ def test_bundle_only_custody_refuses_even_without_active_child_rows(tmp_path):
 
 @pytest.mark.parametrize("unsafe", ["state_directory", "config", "events", "database", "sidecar"])
 def test_unsafe_conversion_paths_refuse_before_coordination_creation(tmp_path, unsafe):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     external = tmp_path / "retained"
     if unsafe == "state_directory":
@@ -552,7 +554,7 @@ def test_conversion_and_resume_do_not_widen_private_file_modes(tmp_path, monkeyp
 
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     for name in ("events.jsonl", "config.yaml"):
         (state / name).chmod(0o600)
@@ -594,7 +596,7 @@ def test_windows_conversion_refuses_before_state_access_or_artifact_creation(
 ):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     before = _files(state)
 
@@ -614,7 +616,7 @@ def test_windows_conversion_refuses_before_state_access_or_artifact_creation(
 def test_windows_guard_preserves_dry_run_and_schema_only_commands(tmp_path, monkeypatch):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     before = _files(state)
 
@@ -628,7 +630,7 @@ def test_windows_guard_preserves_dry_run_and_schema_only_commands(tmp_path, monk
 
 
 def test_projection_repair_after_conversion_reuses_same_state_token(tmp_path):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     converted = _convert(tmp_path)
     assert converted.exit_code == 0, converted.output
@@ -645,8 +647,9 @@ def test_projection_repair_after_conversion_reuses_same_state_token(tmp_path):
 
 
 def test_scratch_placeholder_replay_is_supported_after_conversion(tmp_path):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     assert _convert(tmp_path).exit_code == 0
     destination = tmp_path / "existing-scratch.db"
     destination.write_bytes(b"replaceable scratch placeholder")
@@ -656,13 +659,13 @@ def test_scratch_placeholder_replay_is_supported_after_conversion(tmp_path):
     )
     assert result.exit_code == 0, result.output
     with closing(sqlite3.connect(destination)) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count
 
 
 def test_nested_legacy_writer_refuses_token_appearance_without_lock_inversion(tmp_path):
     from anvil.state.backend import StateLocked
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     backend = _backend(state)
     try:
@@ -681,8 +684,9 @@ def test_nested_legacy_writer_refuses_token_appearance_without_lock_inversion(tm
 def test_native_float_metadata_survives_conversion_and_resume(tmp_path, monkeypatch, interrupted):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     backend = _backend(state)
     try:
         _append_native_sync_metadata(backend, {"confidence": 0.75})
@@ -707,14 +711,14 @@ def test_native_float_metadata_survives_conversion_and_resume(tmp_path, monkeypa
             ("review-fixture",),
         ).fetchone()[0]
         assert json.loads(metadata) == {"confidence": 0.75}
-        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count + 1
 
 
 @pytest.mark.parametrize("changed", ["projection", "events"])
 def test_publication_refuses_drift_from_replayed_artifacts(tmp_path, monkeypatch, changed):
     import anvil.cli.repair as repair
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     publish = repair._publish_staged_projection
 
@@ -747,7 +751,7 @@ def test_stable_token_contention_uses_callers_error_contract(tmp_path, monkeypat
     import anvil.state.sqlite as sqlite_module
     from anvil.state.backend import StateLocked
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     assert _convert(tmp_path).exit_code == 0
     backend = _backend(state, "git")
@@ -788,8 +792,9 @@ def test_native_large_rows_and_history_convert_without_public_response_limits(
     from anvil.cli.local_event_repair import _table_rows
     from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
+    original_event_count = len((state / "events.jsonl").read_text().splitlines())
     backend = _backend(state)
     try:
         for index in range(event_count):
@@ -806,7 +811,7 @@ def test_native_large_rows_and_history_convert_without_public_response_limits(
     assert not (state / ".event-format-migration.json").exists()
     _backend(state, "git").close()
     with query_only_transaction(state / "state.db", state / "events.jsonl") as (connection, _):
-        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24 + event_count
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == original_event_count + event_count
         metadata = json.loads(connection.execute(
             "SELECT provider_metadata_json FROM sync_mappings WHERE external_system=?",
             ("review-fixture",),
@@ -857,7 +862,7 @@ def test_private_projection_digest_has_no_public_aggregate_node_limit(tmp_path, 
 def test_hot_journal_recovers_only_private_admission_copy_then_resumes(tmp_path, monkeypatch, phase):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
 
     def interrupt(observed):
@@ -899,7 +904,7 @@ def test_token_appearing_during_legacy_admission_uses_callers_error_contract(
     import anvil.state.sqlite as sqlite_module
     from anvil.state.backend import StateLocked
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     backend = _backend(state)
     acquire = sqlite_module._append_lock_acquire_nb
@@ -944,7 +949,7 @@ def test_token_appearing_during_legacy_admission_uses_callers_error_contract(
 def test_force_init_preserves_converted_and_pending_state(tmp_path, monkeypatch, phase, option):
     import anvil.cli.migrate as migration
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     if phase is not None:
         def interrupt(observed):
@@ -975,7 +980,7 @@ def test_force_init_preserves_converted_and_pending_state(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("option", [[], ["--with-sample"], ["--from-repo"]])
 def test_force_init_local_reset_keeps_token_and_discards_old_journal(tmp_path, option):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     _leave_hot_rollback_journal(state)
     result = _run_in(tmp_path, ["init", "--force", "--name", "Replacement", *option])
@@ -1036,7 +1041,7 @@ def test_force_init_legacy_git_refuses_ambiguous_configuration(
 
 @pytest.mark.parametrize("authority", ["absent", "empty", "whitespace"])
 def test_force_init_ambiguous_database_without_authority_refuses(tmp_path, authority):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     events = state / "events.jsonl"
     if authority == "absent":
@@ -1051,7 +1056,7 @@ def test_force_init_ambiguous_database_without_authority_refuses(tmp_path, autho
 
 
 def test_force_init_local_nonempty_history_requires_configuration(tmp_path):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     (state / "config.yaml").unlink()
     before = _files(state)
@@ -1080,7 +1085,7 @@ def test_force_init_rechecks_authority_after_legacy_writer_drain(tmp_path, monke
 
     import anvil.state.sqlite as engine
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     original = engine._schema_initialization_lock
     admitted_files = None
@@ -1110,7 +1115,7 @@ def test_force_init_rechecks_authority_after_legacy_writer_drain(tmp_path, monke
 
 
 def test_force_init_pending_local_recovery_refuses_before_token_creation(tmp_path):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     (state / ".local-event-recovery.json").write_text("{}")
     before = _files(state)
@@ -1122,7 +1127,7 @@ def test_force_init_pending_local_recovery_refuses_before_token_creation(tmp_pat
 
 @pytest.mark.parametrize("unsafe", ["state", "config.yaml", "state.db-journal", "state.db"])
 def test_force_init_unsafe_paths_refuse_before_token_creation(tmp_path, unsafe):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     if unsafe == "state":
         real_state = tmp_path / "real-state"
@@ -1155,7 +1160,7 @@ def _read_child_line(process):
 def test_force_init_and_conversion_share_admission_boundary(tmp_path, monkeypatch, winner):
     import anvil.state.sqlite as engine
 
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     code = r'''
 import os, sys
@@ -1219,7 +1224,7 @@ app(['init', '--force', '--name', 'Replacement'])
 
 
 def test_force_init_drains_writer_that_entered_before_token_creation(tmp_path):
-    _build_local_project(tmp_path)
+    _build_conversion_eligible_project(tmp_path)
     state = tmp_path / ".anvil"
     holder_code = r'''
 import sys

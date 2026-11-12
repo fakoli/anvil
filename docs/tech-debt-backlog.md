@@ -42,6 +42,16 @@ conversion holds the stable token across full task/bundle custody admission,
 backups, atomic log publication and in-place SQLite projection publication.
 Retained local backends refuse once the storage fence records Git format.
 
+Conversion is restricted to histories without event-bound PRD lifecycle/lineage,
+bundle creation/disposition grants or accepted work (including legacy unbound
+acceptance). The ID map does not preserve those authority references or exported
+signed event ranges. Admission refuses before a new token, repeats under custody,
+and checks the original before-history during resume. Unsupported old pending
+conversions stay fenced with all recovery artifacts intact pending an explicitly
+reviewed migration/recovery. No reapproval or proof rewriting is performed.
+Staged publication digests prove file/projection integrity, not equivalence of
+derived authority across an event-ID change.
+
 Destructive local `init --force` joins this boundary before deletion: it validates
 paths, creates or reuses the permanent token, drains any earlier event writer and
 holds custody through reset and bootstrap. It refuses pending local/event-format
