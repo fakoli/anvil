@@ -254,7 +254,12 @@ def test_migration_rechecks_database_after_lock(tmp_path, monkeypatch, apply_mig
     assert _files(state) == after_removal
 
 
-@pytest.mark.parametrize("migration_kind", ["state", "events"])
+@pytest.mark.parametrize("migration_kind", [
+    "state",
+    pytest.param("events", marks=pytest.mark.skipif(
+        os.name == "nt", reason="Windows event-format apply/resume refuses before State access",
+    )),
+])
 @pytest.mark.parametrize("apply_migration", [False, True])
 def test_explicit_migration_cannot_recreate_lost_authority(
     tmp_path, monkeypatch, migration_kind, apply_migration,

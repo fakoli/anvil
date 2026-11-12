@@ -32,7 +32,7 @@ Items deferred from PR-level critic + Greptile reviews. Each entry links the ori
 
 ### MIG-1 · Concurrent local-to-Git event conversion (HIGH)
 
-**Status**: Implemented for current-engine local conversion, pending delivery qualification.
+**Status**: Implemented for current-engine POSIX local conversion, pending delivery qualification.
 Originally deferred from [Copilot review 5847760385](https://github.com/fakoli/anvil/pull/259#pullrequestreview-5847760385).
 
 Conversion introduces a permanent sibling coordination token. Native initialization,
@@ -49,6 +49,10 @@ completing publication. Original backups and failed staging evidence remain.
 The focused migration tests exercise retained writers, an old-inode waiter,
 a new claim during conversion, task/bundle custody disagreement, publication
 faults, process death and recovery tampering.
+
+Windows apply/resume refuses before State access: POSIX mode bits do not enforce
+private Windows backup ACLs, and no Windows artifact ACL implementation is claimed.
+Dry-run inspection and schema-only migration remain available there.
 
 Older engine processes do not implement this protocol and must stop before
 conversion; mixed-version concurrent conversion is unqualified. No live State

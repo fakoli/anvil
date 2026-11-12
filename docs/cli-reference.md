@@ -2031,6 +2031,9 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
   `state.db` (destructive; `--yes`/`-y` skips the confirmation prompt).
 - `anvil migrate-events --to git` — Rewrite `events.jsonl` into hash-chained,
   merge-friendly git-backed storage (dry-run by default; `--yes` applies).
+  Apply and resume are supported on POSIX hosts. Windows refuses both before
+  accessing State because private backup/publication ACL enforcement is not yet
+  qualified; dry-run inspection and schema-only `migrate state` remain available.
   Conversion requires idle task and bundle custody in both projection and event
   history. Current engines coordinate through a permanent `.state-operation.lock`;
   retained local backends refuse after conversion and must reopen in Git mode.

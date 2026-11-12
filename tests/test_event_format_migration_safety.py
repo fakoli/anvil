@@ -20,6 +20,21 @@ from anvil.state.sqlite import SqliteBackend, query_only_transaction
 from tests.test_git_events import _T0, _build_local_project, _draft, _run_in
 
 
+class _WindowsOSView:
+    """Scope the platform branch to this module, without changing pathlib's OS."""
+
+    name = "nt"
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+@pytest.fixture(autouse=True)
+def _require_qualified_conversion_platform(request):
+    if os.name == "nt" and not request.node.name.startswith("test_windows_"):
+        pytest.skip("POSIX conversion protocol; Windows refusal has separate coverage")
+
+
 def _backend(state: Path, storage: str = "local") -> SqliteBackend:
     backend = SqliteBackend(
         db_path=str(state / "state.db"),
@@ -545,3 +560,44 @@ def test_conversion_and_resume_do_not_widen_private_file_modes(
             for artifact in recovery.rglob("*"):
                 if artifact.is_file():
                     assert stat.S_IMODE(artifact.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_windows_conversion_refuses_before_state_access_or_artifact_creation(
+    tmp_path, monkeypatch, resume
+):
+    import anvil.cli.migrate as migration
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    before = _files(state)
+
+    monkeypatch.setattr(migration, "os", _WindowsOSView())
+
+    def forbidden_state_access(*args, **kwargs):
+        pytest.fail("Windows conversion must refuse before resolving State")
+
+    monkeypatch.setattr(migration, "_resolve_state_dir", forbidden_state_access)
+    result = _convert(tmp_path, resume=resume)
+    assert result.exit_code == 1, result.output
+    assert "not qualified on Windows" in result.output
+    assert "ACL" in result.output
+    assert _files(state) == before
+
+
+def test_windows_guard_preserves_dry_run_and_schema_only_commands(
+    tmp_path, monkeypatch
+):
+    import anvil.cli.migrate as migration
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    before = _files(state)
+
+    monkeypatch.setattr(migration, "os", _WindowsOSView())
+    preview = _run_in(tmp_path, ["migrate-events", "--to", "git"])
+    assert preview.exit_code == 0 and "Dry run" in preview.output
+    assert _files(state) == before
+    schema = _run_in(tmp_path, ["migrate", "state", "--yes", "--json"])
+    assert schema.exit_code == 0, schema.output
+    assert _files(state) == before

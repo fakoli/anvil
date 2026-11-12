@@ -123,6 +123,8 @@ def migrate_events(
     Stop older engine versions before applying. Current engines share a permanent
     token; retained local writers refuse after conversion. Interrupted publication
     fences normal clients until --resume validates and completes the same work.
+    Apply/resume is POSIX-only; Windows refuses before accessing State because
+    private artifact ACL enforcement is not yet qualified.
     """
     from anvil.config import load_config
     from anvil.state.sqlite import (
@@ -137,6 +139,14 @@ def migrate_events(
         raise typer.Exit(1)
     if resume and not yes:
         typer.echo("Error: --resume requires --yes.", err=True)
+        raise typer.Exit(1)
+    if os.name == "nt" and yes:
+        typer.echo(
+            "Error: event-format conversion apply/resume is not qualified on Windows: "
+            "private artifact ACLs are not enforced. No State files were changed. "
+            "Dry-run inspection and schema-only `anvil migrate state` remain available.",
+            err=True,
+        )
         raise typer.Exit(1)
     state_dir = _resolve_state_dir(None)
     _require_state_dir(state_dir)
