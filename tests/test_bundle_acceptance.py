@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
 from anvil.bundles.execution import bundle_execution_scope_digest
-from anvil.bundles.review import BundleReviewManager
+from anvil.bundles.manager import BundleManager
+from anvil.bundles.review import BundleReviewError, BundleReviewManager
 from anvil.clock import FrozenClock
 from anvil.state.backend import EventRejected
 from anvil.state.models import Event, RejectionReasonCode, ReviewDecision
@@ -15,41 +17,101 @@ from anvil.state.snapshot import serialize_state
 from tests.test_bundle_execution import _NOW, _backend, _event, _manager, _seed
 
 
-def _submit(backend, claimed, task_id):
-    backend.append(_event("evidence.submitted", "task", task_id, {
+def _submit(backend, claimed, task_id, *, clock=None):
+    event = _event("evidence.submitted", "task", task_id, {
         "task_id": task_id, "claim_id": claimed.claim.member_claim_ids[task_id],
         "submitted_by": "coordinator", "evidence_id": f"EV-REVIEW-{task_id}",
         "commands_run": [f"verify-{task_id}"], "files_changed": ["src/shared.py"],
-    }))
+    })
+    backend.append(event if clock is None else event.model_copy(update={"timestamp": clock.now()}))
 
 
-def _implement_bundle(backend, root, *, scoped=True):
+def _implement_bundle(backend, root, *, scoped=True, clock=None):
     _seed(backend)
-    manager = _manager(backend, root)
+    manager = (_manager(backend, root) if clock is None else
+               BundleManager(backend, clock, actor="coordinator", project_root=root))
     digest = bundle_execution_scope_digest(backend, "B001") if scoped else None
     claimed = manager.claim("B001", expected_scope_digest=digest)
     for task_id in ("release:T001", "release:T002"):
-        _submit(backend, claimed, task_id)
+        _submit(backend, claimed, task_id, clock=clock)
     assert manager.mark_implemented("B001").can_mark_implemented
 
 
-def _acceptance(backend, *, version=1):
+def _acceptance(backend, *, version=1, clock=None):
     payload = {
         "schema_version": 1, "task_id": "release:T001", "reviewer": "human",
         "decision": "accepted", "review_attempt_id": backend.get_latest_evidence("release:T001").id,
     }
     if version != "omitted":
         payload["bundle_review_guard_version"] = version
-    return _event("task.applied", "task", "release:T001", payload, actor="human")
+    event = _event("task.applied", "task", "release:T001", payload, actor="human")
+    return event if clock is None else event.model_copy(update={"timestamp": clock.now()})
 
 
-def _quorum(backend, *, finalize=True):
+def _quorum(backend, *, finalize=True, clock=None):
+    clock = clock or FrozenClock(_NOW)
     for reviewer, angle in (("review-a", "correctness"), ("review-b", "security"), ("review-c", "integration")):
-        BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+        BundleReviewManager(backend, clock, actor=reviewer).record(
             "B001", review_round=1, angle=angle, decision=ReviewDecision.approve,
         )
     if finalize:
-        BundleReviewManager(backend, FrozenClock(_NOW), actor="coordinator").finalize("B001")
+        BundleReviewManager(backend, clock, actor="coordinator").finalize("B001")
+
+
+@pytest.mark.parametrize("finalize_before_expiry", [False, True])
+def test_coordinator_expiry_preserves_finalized_acceptance_boundary(tmp_path, finalize_before_expiry):
+    """Synthetic fixture acceptance uses the advanced clock, not an old event timestamp."""
+    backend = _backend(tmp_path)
+    clock = FrozenClock(datetime(2040, 1, 1, tzinfo=UTC))
+    events = tmp_path / "events.jsonl"
+    try:
+        _implement_bundle(backend, tmp_path, clock=clock)
+        _quorum(backend, finalize=finalize_before_expiry, clock=clock)
+        coordinator = BundleReviewManager(backend, clock, actor="coordinator")
+        assert coordinator.gate("B001").passed
+        claim = backend.get_bundle_claim("B001")
+        assert claim.lease_expires_at > clock.now()
+        saved_attempt = backend.get_latest_evidence("release:T001").id
+        before = serialize_state(backend)
+        assert all(task["status"] == "needs_review" for task in before["tasks"])
+        assert not any(json.loads(line)["action"] == "task.applied"
+                       for line in events.read_text().splitlines())
+        clock.advance(seconds=(claim.lease_expires_at - clock.now()).total_seconds() + 1)
+        assert clock.now() > claim.lease_expires_at
+        if finalize_before_expiry:
+            assert backend.bundle_member_acceptance_blocker("release:T001") is None
+            acceptance = _acceptance(backend, clock=clock)
+            assert acceptance.timestamp == clock.now()
+            assert acceptance.payload_json["review_attempt_id"] == saved_attempt
+            backend.append(acceptance)
+            assert backend.get_task("release:T001").status.value == "done"
+            assert backend.get_task("release:T002").status.value == "needs_review"
+            applied = [json.loads(line) for line in events.read_text().splitlines()
+                       if json.loads(line)["action"] == "task.applied"]
+            assert len(applied) == 1
+            assert datetime.fromisoformat(applied[0]["timestamp"]) == clock.now()
+            assert applied[0]["payload_json"]["decision"] == "accepted"
+            for collection in ("claims", "evidence"):
+                assert serialize_state(backend)[collection] == before[collection]
+        else:
+            before_bytes = events.read_bytes()
+            with pytest.raises(BundleReviewError, match="active coordinator claim"):
+                BundleReviewManager(backend, clock, actor="review-d").record(
+                    "B001", review_round=1, angle="boundary", decision=ReviewDecision.approve,
+                )
+            assert events.read_bytes() == before_bytes
+            assert serialize_state(backend) == before
+            with pytest.raises(BundleReviewError, match="active coordinator claim"):
+                coordinator.finalize("B001")
+            assert events.read_bytes() == before_bytes
+            assert serialize_state(backend) == before
+            assert backend.get_bundle("B001").status.value == "implemented_unreviewed"
+            assert backend.bundle_member_acceptance_blocker("release:T001") is not None
+        snapshot = serialize_state(backend)
+        backend.replay_from_empty(str(events))
+        assert serialize_state(backend) == snapshot
+    finally:
+        backend.close()
 
 
 def test_live_acceptance_requires_version_and_finalized_quorum(tmp_path):
