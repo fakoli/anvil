@@ -14,14 +14,15 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import types
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from anvil.cli._helpers import _open_backend, _require_state_dir, _resolve_state_dir
 from anvil.config import ExecutionAdapter, execution_file_bytes, load_execution_adapter
+from anvil.state.hashing import canonical_json_bytes
 from anvil.state.models import Claim, Task
 
 
@@ -44,7 +45,9 @@ def digest(raw: bytes) -> str:
 
 
 def json_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return canonical_json_bytes(
+        value, max_bytes=2 * 1024 * 1024, max_nodes=100000, max_string_bytes=2 * 1024 * 1024
+    )
 
 
 def private_directory(path: Path) -> Path:
@@ -117,6 +120,14 @@ class RunOptions:
             raise ExecutionError(
                 "unsupported_options", "Provider and model must be supplied together"
             )
+        if self.provider is not None and (
+            type(self.provider) is not str or len(self.provider) > 128
+        ):
+            raise ExecutionError(
+                "unsupported_options", "Provider exceeds the portable contract bound"
+            )
+        if self.model is not None and (type(self.model) is not str or len(self.model) > 255):
+            raise ExecutionError("unsupported_options", "Model exceeds the portable contract bound")
         for value in (self.provider, self.model):
             if value is not None and (
                 not isinstance(value, str)
@@ -124,6 +135,8 @@ class RunOptions:
                 or "://" in value
             ):
                 raise ExecutionError("unsupported_options", "Invalid provider or model identifier")
+        if self.thinking is not None and type(self.thinking) is not str:
+            raise ExecutionError("unsupported_options", "Thinking must be a supported string")
         if self.thinking not in {None, "off", "minimal", "low", "medium", "high", "xhigh", "max"}:
             raise ExecutionError(
                 "unsupported_options", "Unsupported thinking; omit to use the default"
@@ -131,6 +144,425 @@ class RunOptions:
 
     def data(self) -> dict[str, str]:
         return {key: value for key, value in dataclasses.asdict(self).items() if value is not None}
+
+
+def strict_object(value: Any, fields: set[str]) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != fields:
+        raise ExecutionError("invalid_contract", "Missing or unknown execution contract fields")
+    return value
+
+
+def bounded_text(value: Any, maximum: int, pattern: str | None = None) -> str:
+    if (
+        type(value) is not str
+        or not 1 <= len(value.encode("utf-8")) <= maximum
+        or "\0" in value
+        or (pattern is not None and re.fullmatch(pattern, value) is None)
+    ):
+        raise ExecutionError("invalid_contract", "Invalid bounded execution contract string")
+    return value
+
+
+def bounded_integer(value: Any, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ExecutionError("invalid_contract", "Invalid bounded execution contract integer")
+    return value
+
+
+def fingerprint(value: Any) -> str:
+    return bounded_text(value, 64, r"[0-9a-f]{64}")
+
+
+def bounded_items(value: Any, minimum: int, maximum: int) -> list[Any]:
+    if type(value) is not list or not minimum <= len(value) <= maximum:
+        raise ExecutionError("invalid_contract", "Invalid bounded execution contract list")
+    return value
+
+
+@dataclasses.dataclass(frozen=True)
+class ExecutionRequest:
+    """Concrete portable request v1; local custody stays in context.json."""
+
+    schema: str
+    dispatch_id: str
+    request_sha256: str
+    operation: str
+    adapter: dict[str, Any]
+    binding: dict[str, Any]
+    source: dict[str, Any]
+    packet_sha256: str
+    assignment_sha256: str
+    writable_paths: list[dict[str, Any]]
+    verification: list[dict[str, Any]]
+    budgets: dict[str, Any]
+    requested_options: dict[str, str]
+    continuation: None
+
+    @classmethod
+    def from_data(cls, value: Any) -> ExecutionRequest:
+        strict_object(value, {field.name for field in dataclasses.fields(cls)})
+        try:
+            result = cls(**value)
+            result.validate()
+        except (TypeError, KeyError, AttributeError, UnicodeError) as error:
+            raise ExecutionError(
+                "invalid_contract", "Invalid execution request field types"
+            ) from error
+        return result
+
+    def validate(self) -> None:
+        if (
+            self.schema != "anvil.execution-request.v1"
+            or self.operation != "run"
+            or self.continuation is not None
+        ):
+            raise ExecutionError("unsupported_contract", "Only initial Run request v1 is supported")
+        identifier(self.dispatch_id)
+        for value in (self.request_sha256, self.packet_sha256, self.assignment_sha256):
+            fingerprint(value)
+        adapter = strict_object(
+            self.adapter,
+            {"adapter_id", "contract_version", "registration_sha256", "profile_sha256"},
+        )
+        bounded_text(adapter["adapter_id"], 128)
+        bounded_integer(adapter["contract_version"], 1, 2**63 - 1)
+        fingerprint(adapter["registration_sha256"])
+        fingerprint(adapter["profile_sha256"])
+        binding = strict_object(
+            self.binding,
+            {
+                "project_id",
+                "task_id",
+                "actor",
+                "claim_id",
+                "generation",
+                "prd_id",
+                "prd_revision",
+                "task_revision",
+                "repository_id",
+                "claim_start_sha",
+            },
+        )
+        for key in ("project_id", "task_id", "claim_id", "prd_id"):
+            bounded_text(binding[key], 255)
+        bounded_text(binding["actor"], 4096)
+        for key in ("generation", "prd_revision"):
+            bounded_integer(binding[key], 1, 2**63 - 1)
+        for key in ("task_revision", "repository_id"):
+            fingerprint(binding[key])
+        bounded_text(binding["claim_start_sha"], 64, r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+        source = strict_object(
+            self.source, {"commit", "claim_worktree", "cwd_relative", "cwd_identity"}
+        )
+        bounded_text(source["commit"], 64, r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+        if (
+            not Path(bounded_text(source["claim_worktree"], 4096)).is_absolute()
+            or source["cwd_relative"] != "."
+        ):
+            raise ExecutionError("invalid_contract", "Invalid isolated source directory binding")
+        fingerprint(source["cwd_identity"])
+        paths = []
+        for item in bounded_items(self.writable_paths, 0, 128):
+            strict_object(item, {"path", "before_sha256", "host_mode"})
+            paths.append(relative_file(bounded_text(item["path"], 4096)))
+            if item["before_sha256"] is not None:
+                fingerprint(item["before_sha256"])
+            bounded_integer(item["host_mode"], 0, 0o777)
+        if len({path.casefold() for path in paths}) != len(paths):
+            raise ExecutionError("invalid_contract", "Duplicate execution paths")
+        commands = []
+        for item in bounded_items(self.verification, 1, 16):
+            strict_object(item, {"command", "timeout_seconds"})
+            commands.append(bounded_text(item["command"], 16384))
+            bounded_integer(item["timeout_seconds"], 1, 600)
+        if len(set(commands)) != len(commands):
+            raise ExecutionError("invalid_contract", "Duplicate execution commands")
+        budgets = strict_object(
+            self.budgets,
+            {
+                "wall_seconds",
+                "adapter_wall_seconds",
+                "max_tool_calls",
+                "max_turns",
+                "command_output_bytes",
+            },
+        )
+        for key, maximum in (
+            ("wall_seconds", 3600),
+            ("adapter_wall_seconds", 1800),
+            ("max_tool_calls", 500),
+            ("max_turns", 200),
+        ):
+            bounded_integer(budgets[key], 1, maximum)
+        if (
+            budgets["command_output_bytes"] != 131072
+            or type(budgets["command_output_bytes"]) is not int
+        ):
+            raise ExecutionError("invalid_contract", "Invalid native output budget")
+        if budgets["wall_seconds"] < budgets["adapter_wall_seconds"] + 30:
+            raise ExecutionError("invalid_contract", "Missing owned cleanup budget")
+        if type(self.requested_options) is not dict:
+            raise ExecutionError("invalid_contract", "Invalid requested options")
+        if any(type(value) is not str for value in self.requested_options.values()):
+            raise ExecutionError(
+                "invalid_contract", "Requested option fields cannot be null or non-string"
+            )
+        try:
+            RunOptions(**self.requested_options)
+        except TypeError as error:
+            raise ExecutionError("invalid_contract", "Unknown requested options") from error
+        payload = dataclasses.asdict(self)
+        payload.pop("request_sha256")
+        if digest(json_bytes(payload)) != self.request_sha256:
+            raise ExecutionError("request_changed", "Portable request digest differs")
+
+
+@dataclasses.dataclass(frozen=True)
+class AdapterResult:
+    """Portable verified adapter return, separate from operational Run status."""
+
+    schema: str
+    dispatch_id: str
+    request_sha256: str
+    assignment_sha256: str
+    adapter_run_id: str
+    outcome: str
+    acceptance: str
+    effective_options: dict[str, str]
+    capability_receipt_sha256: str
+    source_commit: str
+    changes: list[dict[str, Any]]
+    artifacts: list[dict[str, Any]]
+    sandbox_checks: list[dict[str, Any]]
+    raw_receipt_sha256: str
+    custody: dict[str, Any]
+    saved_conversation: None
+    error_code: str | None
+
+    @classmethod
+    def from_data(cls, value: Any, request: ExecutionRequest) -> AdapterResult:
+        strict_object(value, {field.name for field in dataclasses.fields(cls)})
+        try:
+            result = cls(**value)
+            result.validate(request)
+        except (TypeError, KeyError, AttributeError, UnicodeError) as error:
+            raise ExecutionError(
+                "invalid_contract", "Invalid adapter result field types"
+            ) from error
+        return result
+
+    def validate(self, request: ExecutionRequest) -> None:
+        if (
+            self.schema != "anvil.adapter-result.v1"
+            or self.acceptance != "not_granted"
+            or self.saved_conversation is not None
+        ):
+            raise ExecutionError(
+                "invalid_contract", "Invalid result version or acceptance boundary"
+            )
+        if self.outcome not in {"returned", "failed", "reconciliation_required"}:
+            raise ExecutionError("invalid_contract", "Invalid adapter outcome")
+        for actual, expected in (
+            (self.dispatch_id, request.dispatch_id),
+            (self.request_sha256, request.request_sha256),
+            (self.assignment_sha256, request.assignment_sha256),
+            (self.source_commit, request.source["commit"]),
+        ):
+            if actual != expected:
+                raise ExecutionError(
+                    "result_mismatch", "Adapter result belongs to another request or source"
+                )
+        bounded_text(self.adapter_run_id, 128)
+        for value in (self.capability_receipt_sha256, self.raw_receipt_sha256):
+            fingerprint(value)
+        strict_object(self.effective_options, {"provider", "model", "thinking"})
+        for key, maximum in (("provider", 128), ("model", 255), ("thinking", 16)):
+            bounded_text(self.effective_options[key], maximum)
+        RunOptions(**self.effective_options)
+        if any(
+            self.effective_options[key] != value for key, value in request.requested_options.items()
+        ):
+            raise ExecutionError(
+                "result_mismatch", "Effective options differ from the requested selection"
+            )
+        preimages = {item["path"]: item for item in request.writable_paths}
+        names = []
+        for change in bounded_items(self.changes, 0, 128):
+            strict_object(change, {"path", "before_sha256", "after_sha256", "artifact_path"})
+            path = relative_file(bounded_text(change["path"], 4096))
+            names.append(path)
+            if path not in preimages or change["before_sha256"] != preimages[path]["before_sha256"]:
+                raise ExecutionError(
+                    "result_mismatch", "Result path or preimage differs from the request"
+                )
+            if change["after_sha256"] is None:
+                if change["artifact_path"] is not None:
+                    raise ExecutionError(
+                        "invalid_contract", "Deleted paths cannot carry returned bytes"
+                    )
+            else:
+                fingerprint(change["after_sha256"])
+                relative_file(bounded_text(change["artifact_path"], 4096))
+        if len(set(names)) != len(names):
+            raise ExecutionError("invalid_contract", "Duplicate returned paths")
+        artifacts = {}
+        total = 0
+        for artifact in bounded_items(self.artifacts, 0, 512):
+            strict_object(artifact, {"path", "sha256", "size_bytes"})
+            path = relative_file(bounded_text(artifact["path"], 4096))
+            fingerprint(artifact["sha256"])
+            total += bounded_integer(artifact["size_bytes"], 0, 64 * 1024 * 1024)
+            if path in artifacts:
+                raise ExecutionError("invalid_contract", "Duplicate returned artifacts")
+            artifacts[path] = artifact
+        if total > 64 * 1024 * 1024:
+            raise ExecutionError(
+                "invalid_contract", "Returned artifacts exceed the aggregate bound"
+            )
+        for change in self.changes:
+            if change["artifact_path"] is not None and (
+                change["artifact_path"] not in artifacts
+                or artifacts[change["artifact_path"]]["sha256"] != change["after_sha256"]
+            ):
+                raise ExecutionError(
+                    "result_mismatch",
+                    "Returned change is absent from the complete artifact manifest",
+                )
+        for check in bounded_items(self.sandbox_checks, 0, 32):
+            strict_object(check, {"name", "argv", "exit_code", "output_sha256", "authority"})
+            bounded_text(check["name"], 64)
+            for argument in bounded_items(check["argv"], 1, 128):
+                bounded_text(argument, 16000)
+            if type(check["exit_code"]) is not int or check["authority"] != "sandbox_only":
+                raise ExecutionError(
+                    "invalid_contract", "Sandbox checks cannot confer native proof authority"
+                )
+            fingerprint(check["output_sha256"])
+        custody = strict_object(
+            self.custody,
+            {
+                "local_coordinator",
+                "remote_owner_reference",
+                "sandbox_id",
+                "main_instance_id",
+                "stop_status",
+                "protected_unchanged",
+                "receipt_sha256",
+            },
+        )
+        for key, maximum in (
+            ("local_coordinator", 512),
+            ("remote_owner_reference", 512),
+            ("sandbox_id", 128),
+            ("main_instance_id", 256),
+        ):
+            bounded_text(custody[key], maximum)
+        if (
+            custody["stop_status"] not in {"stopped", "unknown"}
+            or type(custody["protected_unchanged"]) is not bool
+        ):
+            raise ExecutionError("invalid_contract", "Invalid owner custody result")
+        fingerprint(custody["receipt_sha256"])
+        if custody["receipt_sha256"] != self.raw_receipt_sha256:
+            raise ExecutionError(
+                "result_mismatch", "Custody receipt differs from the adapter receipt"
+            )
+        if self.outcome == "returned" and (
+            custody["stop_status"] != "stopped"
+            or custody["protected_unchanged"] is not True
+            or self.error_code is not None
+        ):
+            raise ExecutionError(
+                "result_mismatch", "Successful return requires stopped protected custody"
+            )
+        if self.error_code is not None:
+            bounded_text(self.error_code, 128)
+
+
+def assignment_for(context: dict[str, Any], packet: bytes) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "task_id": context["task_id"],
+        "kind": "implementation",
+        "instructions": (
+            "Implement this native Anvil packet. "
+            "Return scoped edits; never grant acceptance.\n" + packet.decode()
+        ),
+        "writable_paths": context["writable_paths"],
+        "checks": [],
+        "repository": context["cwd"],
+        "revision": context["source_sha"],
+        "wall_seconds": context["wall_seconds"],
+        "run_options": context["options"],
+    }
+
+
+def request_for(
+    context: dict[str, Any], packet: bytes, assignment: dict[str, Any]
+) -> ExecutionRequest:
+    from anvil.claims.command_proof_artifact import claim_command_cwd_identity
+    from anvil.execution_runner import checked_path
+
+    claim = Claim.model_validate(context["claim"])
+    immutable = claim.attestation_context
+    registration = ExecutionAdapter(**context["adapter"])
+    root = Path(context["cwd"])
+    paths = []
+    for name in context["writable_paths"]:
+        path = checked_path(root, name)
+        paths.append(
+            {
+                "path": name,
+                "before_sha256": digest(path.read_bytes()) if path.exists() else None,
+                "host_mode": stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644,
+            }
+        )
+    value = {
+        "schema": "anvil.execution-request.v1",
+        "dispatch_id": context["run_id"],
+        "operation": "run",
+        "adapter": {
+            "adapter_id": registration.registration["adapter_id"],
+            "contract_version": registration.registration["contract_version"],
+            "registration_sha256": digest(json_bytes(registration.registration)),
+            "profile_sha256": registration.hashes["profile"],
+        },
+        "binding": {
+            "project_id": context["project_id"],
+            "task_id": claim.task_id,
+            "actor": claim.claimed_by,
+            "claim_id": claim.id,
+            "generation": claim.generation,
+            "prd_id": immutable.prd_id,
+            "prd_revision": immutable.prd_revision,
+            "task_revision": immutable.task_revision,
+            "repository_id": immutable.repository_id,
+            "claim_start_sha": immutable.claim_start_sha,
+        },
+        "source": {
+            "commit": context["source_sha"],
+            "claim_worktree": str(root),
+            "cwd_relative": ".",
+            "cwd_identity": claim_command_cwd_identity(root, immutable.repository_id, "."),
+        },
+        "packet_sha256": digest(packet),
+        "assignment_sha256": digest(json_bytes(assignment)),
+        "writable_paths": paths,
+        "verification": [
+            {"command": command, "timeout_seconds": 120} for command in context["commands"]
+        ],
+        "budgets": {
+            "wall_seconds": context["wall_seconds"] + 180,
+            "adapter_wall_seconds": context["wall_seconds"],
+            "max_tool_calls": 40,
+            "max_turns": 32,
+            "command_output_bytes": 131072,
+        },
+        "requested_options": context["options"],
+        "continuation": None,
+    }
+    value["request_sha256"] = digest(json_bytes(value))
+    return ExecutionRequest.from_data(value)
 
 
 def adapter_module(registration: ExecutionAdapter) -> Any:
@@ -158,41 +590,53 @@ def adapter_module(registration: ExecutionAdapter) -> Any:
     return module
 
 
-def validate_adapter_contract(registration: ExecutionAdapter) -> None:
+def validate_adapter_contract(registration: ExecutionAdapter, cwd: Path) -> None:
     """Local validation in isolated Python, without project import fallback."""
-    result = subprocess.run(
+    from anvil.execution_runner import capture
+
+    directory = private_directory(journal_root(cwd) / "operations" / uuid.uuid4().hex)
+    result = capture(
         [sys.executable, "-I", "-m", "anvil.execution_runner", "--validate-adapter"],
-        capture_output=True,
-        timeout=30,
-        check=False,
+        cwd,
+        directory,
+        "contract",
+        time.monotonic() + 30,
+        1024 * 1024,
+        separate_stdout=True,
+        require_success=False,
     )
-    if result.returncode or result.stdout != json_bytes(dataclasses.asdict(registration)):
+    if result["exit_code"] or (directory / "contract.stdout").read_bytes() != json_bytes(
+        dataclasses.asdict(registration)
+    ):
         raise ExecutionError(
             "adapter_unavailable", "Registered adapter lacks the required v2 contract"
         )
 
 
 def native_cli(cwd: Path, *arguments: str, maximum: int = 2 * 1024 * 1024) -> bytes:
+    from anvil.execution_runner import capture
+
     environment = os.environ.copy()
     environment.pop("ANVIL_ROOT", None)
     environment.pop("ANVIL_PRD", None)
-    result = subprocess.run(
+    directory = private_directory(journal_root(cwd) / "operations" / uuid.uuid4().hex)
+    result = capture(
         [sys.executable, "-I", "-m", "anvil.cli", *arguments, "--cwd", str(cwd)],
-        cwd=cwd,
-        env=environment,
-        capture_output=True,
-        timeout=120,
-        check=False,
+        cwd,
+        directory,
+        "native",
+        time.monotonic() + 120,
+        maximum,
+        environment,
+        separate_stdout=True,
+        require_success=False,
     )
-    if len(result.stdout) + len(result.stderr) > maximum:
-        raise ExecutionError("native_output_overflow", "Native command output exceeded its bound")
-    if result.returncode:
+    if result["exit_code"]:
         raise ExecutionError(
             "native_refused",
-            result.stderr.decode(errors="replace")[-4000:]
-            or result.stdout.decode(errors="replace")[-4000:],
+            (directory / "native.log").read_bytes().decode(errors="replace")[-4000:],
         )
-    return result.stdout
+    return (directory / "native.stdout").read_bytes()
 
 
 def git(cwd: Path, *arguments: str) -> bytes:
@@ -200,12 +644,23 @@ def git(cwd: Path, *arguments: str) -> bytes:
 
 
 def clean_source(cwd: Path, expected: str | None = None) -> str:
+    require_visible_index(cwd)
     head = git(cwd, "rev-parse", "HEAD").decode().strip()
     if expected is not None and head != expected:
         raise ExecutionError("source_changed", "Source revision changed")
     if git(cwd, "status", "--porcelain", "--untracked-files=all").strip():
         raise ExecutionError("dirty_source", "Run requires a clean isolated source checkout")
     return head
+
+
+def require_visible_index(cwd: Path) -> None:
+    """Git status is authoritative only when tracked paths cannot hide changes."""
+    entries = git(cwd, "ls-files", "-v", "-z").split(b"\0")
+    if any(entry and (entry[:1].islower() or entry[:1] == b"S") for entry in entries):
+        raise ExecutionError(
+            "hidden_index_flags",
+            "Run refuses hidden index flags: assume-unchanged or skip-worktree",
+        )
 
 
 def execution_scope(backend: Any, task_id: str) -> dict[str, Any]:
@@ -318,6 +773,8 @@ def live_claim(backend: Any, request: dict[str, Any], *, remaining: int = 30) ->
 
 
 def journal_root(cwd: Path) -> Path:
+    from anvil.cli._helpers import _require_state_dir, _resolve_state_dir
+
     state = _resolve_state_dir(cwd)
     _require_state_dir(state)
     return private_directory(state / "execution")
@@ -326,6 +783,8 @@ def journal_root(cwd: Path) -> Path:
 def preview_run(
     cwd: Path, task_id: str, actor: str, options: RunOptions, wall_seconds: int = 600
 ) -> dict[str, Any]:
+    from anvil.cli._helpers import _open_backend
+
     if os.name != "posix":
         raise ExecutionError(
             "unsupported_platform", "Owned Run currently requires POSIX; no claim was created"
@@ -333,7 +792,7 @@ def preview_run(
     if type(wall_seconds) is not int or not 1 <= wall_seconds <= 1800:
         raise ExecutionError("invalid_budget", "Run budget must be 1..1800 seconds")
     registration = load_execution_adapter()
-    validate_adapter_contract(registration)  # no model/runtime call
+    validate_adapter_contract(registration, cwd)  # no model/runtime call
     root = journal_root(cwd)
     backend = _open_backend(root.parent, project_root=cwd)
     try:
@@ -391,6 +850,8 @@ def preview_run(
 
 
 def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[str, Any]:
+    from anvil.cli._helpers import _open_backend
+
     if os.name != "posix":
         raise ExecutionError("unsupported_platform", "Owned Run currently requires POSIX")
     root = journal_root(cwd)
@@ -426,12 +887,16 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
     finally:
         backend.close()
     run_id = uuid.uuid4().hex
-    run_directory = private_directory(root / "runs" / run_id)
     slot = root / "slots" / (digest(task_id.encode()) + ".json")
-    reserve_slot(root, slot, {"run_id": run_id, "task_id": task_id, "preview_id": preview_id})
+    reserve_slot(
+        root,
+        slot,
+        {"run_id": run_id, "task_id": task_id, "preview_id": preview_id},
+        consume_preview=True,
+    )
+    run_directory = private_directory(root / "runs" / run_id)
     # From here every failure retains the slot. No caller retries a possible launch.
     write_receipt(run_directory / "admission.json", preview)
-    write_receipt(root / "consumed" / (preview_id + ".json"), {"run_id": run_id})
     if preview["claim"] is None:
         output = native_cli(
             cwd,
@@ -469,10 +934,20 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
         clean_source(cwd, preview["source_sha"])
     finally:
         backend.close()
-    write_receipt(run_directory / "request.json", request)
+    assignment = assignment_for(request, packet)
+    portable = request_for(request, packet, assignment)
+    write_receipt(run_directory / "context.json", request)
+    write_receipt(run_directory / "adapter-task.json", assignment)
+    write_receipt(run_directory / "request.json", dataclasses.asdict(portable))
     write_receipt(
         run_directory / "dispatch.json",
-        {"run_id": run_id, "at": timestamp(), "request_sha256": digest(json_bytes(request))},
+        {
+            "run_id": run_id,
+            "at": timestamp(),
+            "request_sha256": portable.request_sha256,
+            "request_file_sha256": digest(json_bytes(dataclasses.asdict(portable))),
+            "context_sha256": digest(json_bytes(request)),
+        },
     )
     with (run_directory / "coordinator.log").open("xb") as log:
         os.chmod(run_directory / "coordinator.log", 0o600)
@@ -490,9 +965,12 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
     return {"run_id": run_id, "state": "dispatched", "cwd": str(cwd), "claim_id": claim["id"]}
 
 
-def reserve_slot(root: Path, slot: Path, value: dict[str, str]) -> None:
+def reserve_slot(
+    root: Path, slot: Path, value: dict[str, str], *, consume_preview: bool = False
+) -> None:
     """Short per-task admission only; no Git, model or native mutation under this lock."""
     lock = slot.with_suffix(".lock")
+    consumed = root / "consumed" / (identifier(value["preview_id"]) + ".json")
     try:
         write_receipt(lock, value)
     except FileExistsError as error:
@@ -500,6 +978,11 @@ def reserve_slot(root: Path, slot: Path, value: dict[str, str]) -> None:
             "admission_busy", "Task admission is active or needs reconciliation"
         ) from error
     try:
+        if consume_preview and consumed.exists():
+            existing = read_receipt(consumed)
+            raise ExecutionError(
+                "preview_consumed", "Preview already dispatched as " + existing["run_id"]
+            )
         if slot.exists():
             existing = read_receipt(slot)
             previous = root / "runs" / identifier(existing["run_id"])
@@ -520,16 +1003,21 @@ def reserve_slot(root: Path, slot: Path, value: dict[str, str]) -> None:
                 except ProcessLookupError:
                     stopped = True
             if (
-                finished.get("state") not in {"needs_review", "capabilities_ready"}
+                finished.get("state")
+                not in {"needs_review", "capabilities_ready", "failed_stopped"}
                 or finished.get("local_children_stopped") is not True
                 or not stopped
             ):
                 raise ExecutionError(
                     "run_active", "Existing execution requires inspection: " + existing["run_id"]
                 )
+            if consume_preview:
+                write_receipt(consumed, {"run_id": value["run_id"]})
             write_receipt(root / "retired" / (existing["run_id"] + ".json"), existing)
             slot.unlink()
             sync_directory(slot.parent)
+        elif consume_preview:
+            write_receipt(consumed, {"run_id": value["run_id"]})
         write_receipt(slot, value)
     finally:
         lock.unlink()
@@ -631,7 +1119,7 @@ def refresh_execution_capabilities(cwd: Path) -> dict[str, Any]:
             "unsupported_platform", "Capability refresh requires owned POSIX execution"
         )
     registration = load_execution_adapter()
-    validate_adapter_contract(registration)
+    validate_adapter_contract(registration, cwd)
     root = journal_root(cwd)
     # A local unresolved Run must be reconciled, never adopted for metadata.
     for slot in (root / "slots").glob("*.json"):
@@ -651,7 +1139,10 @@ def refresh_execution_capabilities(cwd: Path) -> dict[str, Any]:
                 os.killpg(launched["pid"], 0)
             except ProcessLookupError:
                 stopped = True
-        if result.get("state") not in {"needs_review", "capabilities_ready"} or not stopped:
+        if (
+            result.get("state") not in {"needs_review", "capabilities_ready", "failed_stopped"}
+            or not stopped
+        ):
             raise ExecutionError(
                 "adapter_busy", "An existing execution needs to stop or be reconciled"
             )

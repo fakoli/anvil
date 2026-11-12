@@ -24,8 +24,11 @@ from anvil.claims.command_proof_artifact import (
 from anvil.cli._helpers import _open_backend
 from anvil.config import ExecutionAdapter, load_execution_adapter
 from anvil.execution import (
+    AdapterResult,
     ExecutionError,
+    ExecutionRequest,
     adapter_module,
+    assignment_for,
     clean_source,
     digest,
     git,
@@ -35,6 +38,8 @@ from anvil.execution import (
     now,
     read_receipt,
     relative_file,
+    request_for,
+    require_visible_index,
     save_execution_capabilities,
     sync_directory,
     timestamp,
@@ -60,6 +65,9 @@ def capture(
     deadline: float,
     maximum: int,
     environment: dict[str, str] | None = None,
+    *,
+    separate_stdout: bool = False,
+    require_success: bool = True,
 ) -> dict[str, Any]:
     """Bounded bytes and owned group custody; no shell or PID fallback."""
     if os.name != "posix":
@@ -72,11 +80,12 @@ def capture(
         cwd=cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE if separate_stdout else subprocess.STDOUT,
         env=environment,
         start_new_session=True,
     )
     output = bytearray()
+    stdout = bytearray()
     failure = None
     selector = selectors.DefaultSelector()
     try:
@@ -85,6 +94,8 @@ def capture(
             {"argv": argv, "cwd": str(cwd), "pid": child.pid, "started_at": started},
         )
         selector.register(child.stdout, selectors.EVENT_READ)
+        if separate_stdout:
+            selector.register(child.stderr, selectors.EVENT_READ)
         while selector.get_map():
             if time.monotonic() >= deadline:
                 failure = "command_timeout"
@@ -95,6 +106,8 @@ def capture(
                     selector.unregister(key.fileobj)
                     continue
                 output.extend(chunk)
+                if separate_stdout and key.fileobj is child.stdout:
+                    stdout.extend(chunk)
                 if len(output) > maximum:
                     failure = "output_overflow"
                     break
@@ -121,12 +134,20 @@ def capture(
                 failure = failure or "descendants_remain"
         child.wait(timeout=5)
         child.stdout.close()
+        if child.stderr is not None:
+            child.stderr.close()
         stopped = process_group_absent(child.pid)
         with (directory / (name + ".log")).open("xb") as stream:
             os.chmod(directory / (name + ".log"), 0o600)
             stream.write(output)
             stream.flush()
             os.fsync(stream.fileno())
+        if separate_stdout:
+            with (directory / (name + ".stdout")).open("xb") as stream:
+                os.chmod(directory / (name + ".stdout"), 0o600)
+                stream.write(stdout)
+                stream.flush()
+                os.fsync(stream.fileno())
         result = {
             "argv": argv,
             "cwd": str(cwd),
@@ -140,7 +161,7 @@ def capture(
             "group_absent": stopped,
         }
         write_receipt(directory / (name + ".result.json"), result)
-    if failure or not stopped or child.returncode:
+    if failure or not stopped or (require_success and child.returncode):
         raise ExecutionError(
             failure or "command_failed", "Owned command failed; inspect retained output and custody"
         )
@@ -308,6 +329,7 @@ def integrate(
 def check_integrated_source(
     cwd: Path, source_sha: str, changes: list[dict[str, Any]], modes: dict[str, int]
 ) -> None:
+    require_visible_index(cwd)
     if git(cwd, "rev-parse", "HEAD").decode().strip() != source_sha:
         raise ExecutionError("source_changed", "Checkout revision changed during execution")
     actual = git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
@@ -331,6 +353,104 @@ def check_integrated_source(
             raise ExecutionError(
                 "source_changed", "Integrated file mode changed during verification"
             )
+
+
+def portable_adapter_result(
+    adapter: Any,
+    output: Path,
+    registration: ExecutionAdapter,
+    request: ExecutionRequest,
+    changes: list[dict[str, Any]],
+) -> AdapterResult:
+    """Join one verified concrete adapter return to the portable host request."""
+    receipt = read_receipt(output / "receipt.json")
+    configuration = receipt["worker"]["configuration"]
+    profile = adapter.profile_settings(Path(registration.profile))
+    before, running, after = (
+        receipt[name] for name in ("sandbox_before", "sandbox_running", "sandbox_after")
+    )
+    if (
+        any(value.get("id") != profile["sandbox_id"] for value in (before, running, after))
+        or after.get("phase") != "Stopped"
+        or after.get("main_process_instance_id") != running.get("main_process_instance_id")
+        or receipt.get("cleanup_complete") is not True
+        or receipt.get("protected_unchanged") is not True
+    ):
+        raise ExecutionError(
+            "result_mismatch", "Returned owner identities do not prove exact stopped custody"
+        )
+    actual = adapter.snapshot(output / "results")
+    raw_digest = digest((output / "receipt.json").read_bytes())
+    value = {
+        "schema": "anvil.adapter-result.v1",
+        "dispatch_id": request.dispatch_id,
+        "request_sha256": request.request_sha256,
+        "assignment_sha256": request.assignment_sha256,
+        "adapter_run_id": receipt["run_id"],
+        "outcome": "returned",
+        "acceptance": "not_granted",
+        "effective_options": configuration["effective"],
+        "capability_receipt_sha256": digest(actual["rpc-configuration.json"]),
+        "source_commit": receipt["source"]["commit"],
+        "changes": [
+            {
+                **change,
+                "artifact_path": "results/changed-files/" + change["path"]
+                if change["after_sha256"] is not None
+                else None,
+            }
+            for change in changes
+        ],
+        "artifacts": [
+            {"path": "results/" + name, "sha256": digest(raw), "size_bytes": len(raw)}
+            for name, raw in sorted(actual.items())
+        ],
+        "sandbox_checks": [
+            {
+                "name": check["name"],
+                "argv": check["argv"],
+                "exit_code": check["exit_code"],
+                "output_sha256": check["log_sha256"],
+                "authority": "sandbox_only",
+            }
+            for check in receipt["worker"]["checks"]
+        ],
+        "raw_receipt_sha256": raw_digest,
+        "custody": {
+            "local_coordinator": f"pid:{os.getpid()}/pgid:{os.getpgrp()}",
+            "remote_owner_reference": "openshell:" + profile["sandbox_name"],
+            "sandbox_id": after["id"],
+            "main_instance_id": after["main_process_instance_id"],
+            "stop_status": "stopped",
+            "protected_unchanged": True,
+            "receipt_sha256": raw_digest,
+        },
+        "saved_conversation": None,
+        "error_code": None,
+    }
+    if configuration.get("session_file") is not None:
+        raise ExecutionError(
+            "result_mismatch", "Initial Run cannot return an unapproved saved conversation"
+        )
+    return AdapterResult.from_data(value, request)
+
+
+def verify_portable_return(
+    result: AdapterResult,
+    request: ExecutionRequest,
+    adapter: Any,
+    output: Path,
+    registration: ExecutionAdapter,
+    changes: list[dict[str, Any]],
+) -> None:
+    if load_execution_adapter() != registration:
+        raise ExecutionError("adapter_changed", "Registration changed after the verified return")
+    result.validate(request)
+    expected = portable_adapter_result(adapter, output, registration, request, changes)
+    if dataclasses.asdict(result) != dataclasses.asdict(expected):
+        raise ExecutionError(
+            "result_mismatch", "Portable result differs from actual artifacts or custody"
+        )
 
 
 def execute_capability_refresh(directory: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -428,14 +548,30 @@ def execute_capability_refresh(directory: Path, request: dict[str, Any]) -> dict
 
 
 def execute_run(directory: Path) -> dict[str, Any]:
-    request = read_receipt(directory / "request.json")
+    value = read_receipt(directory / "request.json")
     dispatch = read_receipt(directory / "dispatch.json")
-    if dispatch != {
-        "run_id": request["run_id"],
-        "at": dispatch.get("at"),
-        "request_sha256": digest(json_bytes(request)),
-    }:
-        raise ExecutionError("request_changed", "Dispatch request binding differs")
+    metadata = value.get("operation") == "capabilities"
+    if metadata:
+        request = value
+        if dispatch != {
+            "run_id": request["run_id"],
+            "at": dispatch.get("at"),
+            "request_sha256": digest(json_bytes(request)),
+        }:
+            raise ExecutionError("request_changed", "Metadata dispatch request differs")
+        portable = None
+    else:
+        portable = ExecutionRequest.from_data(value)
+        request = read_receipt(directory / "context.json")
+        expected = {
+            "run_id": portable.dispatch_id,
+            "at": dispatch.get("at"),
+            "request_sha256": portable.request_sha256,
+            "request_file_sha256": digest(json_bytes(value)),
+            "context_sha256": digest(json_bytes(request)),
+        }
+        if dispatch != expected:
+            raise ExecutionError("request_changed", "Portable request or local custody changed")
     write_receipt(
         directory / "started.json",
         {"pid": os.getpid(), "run_id": request["run_id"], "at": timestamp()},
@@ -451,6 +587,8 @@ def execute_run(directory: Path) -> dict[str, Any]:
         "acceptance": "not_granted",
         "local_children_stopped": False,
     }
+    remote_verified = False
+    integration_complete = False
     try:
         registration = ExecutionAdapter(**request["adapter"])
         adapter = adapter_module(registration)
@@ -459,24 +597,17 @@ def execute_run(directory: Path) -> dict[str, Any]:
         packet = (directory / "packet.txt").read_bytes()
         if digest(packet) != request["packet_sha256"]:
             raise ExecutionError("packet_changed", "Native packet changed before execution")
-        instructions = (
-            "Implement this native Anvil packet. Return scoped edits; never grant acceptance.\n"
-            + packet.decode()
-        )
-        derived = {
-            "version": 2,
-            "task_id": request["task_id"],
-            "kind": "implementation",
-            "instructions": instructions,
-            "writable_paths": request["writable_paths"],
-            "checks": [],
-            "repository": str(cwd),
-            "revision": request["source_sha"],
-            "wall_seconds": request["wall_seconds"],
-            "run_options": request["options"],
-        }
+        derived = read_receipt(directory / "adapter-task.json")
+        if derived != assignment_for(request, packet):
+            raise ExecutionError(
+                "request_changed", "Derived assignment differs from native context"
+            )
+        expected_request = request_for(request, packet, derived)
+        if dataclasses.asdict(portable) != dataclasses.asdict(expected_request):
+            raise ExecutionError(
+                "request_changed", "Current native source, preimages or assignment differ"
+            )
         adapter.validate_task(derived)
-        write_receipt(directory / "adapter-task.json", derived)
         output = directory / "adapter"
         deadline = time.monotonic() + request["wall_seconds"] + 120
         if load_execution_adapter() != registration:
@@ -504,6 +635,10 @@ def execute_run(directory: Path) -> dict[str, Any]:
         if load_execution_adapter() != registration:
             raise ExecutionError("adapter_changed", "Registration changed during execution")
         changes, source_files = verified_changes(adapter, output, derived, registration)
+        returned = portable_adapter_result(adapter, output, registration, portable, changes)
+        write_receipt(directory / "adapter-result.json", dataclasses.asdict(returned))
+        verify_portable_return(returned, portable, adapter, output, registration, changes)
+        remote_verified = True
         receipt = read_receipt(output / "receipt.json")
         outcome["adapter_run_id"] = receipt["run_id"]
         if isinstance(receipt["worker"].get("configuration"), dict):
@@ -517,12 +652,26 @@ def execute_run(directory: Path) -> dict[str, Any]:
             raise ExecutionError("no_changes", "Implementation returned no scoped source changes")
         live_claim(backend, request)
         clean_source(cwd, request["source_sha"])
+        for preimage in portable.writable_paths:
+            path = checked_path(cwd, preimage["path"])
+            actual_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+            if actual_mode != preimage["host_mode"]:
+                raise ExecutionError("source_changed", "Host file mode changed before integration")
         integrate(cwd, output, changes, source_files, directory)
+        integration_complete = True
         modes = read_receipt(directory / "integration.json")["modes"]
         proofs = []
         proof_paths = []
         for index, command in enumerate(request["commands"]):
             claim = live_claim(backend, request)
+            verify_portable_return(
+                AdapterResult.from_data(read_receipt(directory / "adapter-result.json"), portable),
+                portable,
+                adapter,
+                output,
+                registration,
+                changes,
+            )
             check_integrated_source(cwd, request["source_sha"], changes, modes)
             environment = os.environ.copy()
             environment.update(
@@ -536,8 +685,8 @@ def execute_run(directory: Path) -> dict[str, Any]:
                 cwd,
                 directory,
                 f"check-{index}",
-                deadline,
-                131072,
+                min(deadline, time.monotonic() + portable.verification[index]["timeout_seconds"]),
+                portable.budgets["command_output_bytes"],
                 environment,
             )
             raw = (directory / f"check-{index}.log").read_bytes()
@@ -581,6 +730,14 @@ def execute_run(directory: Path) -> dict[str, Any]:
                 os.fsync(stream.fileno())
             proof_paths.append(path)
         claim = live_claim(backend, request)
+        verify_portable_return(
+            AdapterResult.from_data(read_receipt(directory / "adapter-result.json"), portable),
+            portable,
+            adapter,
+            output,
+            registration,
+            changes,
+        )
         check_integrated_source(cwd, request["source_sha"], changes, modes)
         verify_claim_command_proof_batch(
             proofs,
@@ -611,8 +768,21 @@ def execute_run(directory: Path) -> dict[str, Any]:
         outcome.update(
             error_code=getattr(error, "code", "execution_failed"), error=str(error)[:4000]
         )
-        # A failed adapter or interrupted local process may still own remote work.
-        outcome["state"] = "reconciliation_required"
+        # Only known stopped checks may admit a fresh reviewed request. Partial
+        # integration, uncertain submit and unknown remote custody remain held.
+        capture_results = list(directory.glob("*.result.json"))
+        all_stopped = bool(capture_results) and all(
+            read_receipt(path).get("group_absent") is True for path in capture_results
+        )
+        if (
+            remote_verified
+            and integration_complete
+            and all_stopped
+            and not (directory / "submission.json").exists()
+        ):
+            outcome.update(state="failed_stopped", local_children_stopped=True)
+        else:
+            outcome["state"] = "reconciliation_required"
     finally:
         backend.close()
         outcome["ended_at"] = timestamp()

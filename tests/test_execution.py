@@ -16,7 +16,7 @@ import yaml
 
 from anvil.cli._helpers import _resolve_state_dir, prd_source_path
 from anvil.clock import SystemClock
-from anvil.config import ExecutionAdapter
+from anvil.config import register_execution_adapter
 from anvil.execution import (
     ExecutionError,
     RunOptions,
@@ -43,7 +43,8 @@ def validate_task(task):
     assert task['kind'] == 'implementation'
     return task
 
-def profile_settings(path): return {"model":"synthetic/model", **json.loads(pathlib.Path(path).read_text())}
+def profile_settings(path): return {"model":"synthetic/model", "sandbox_name":"synthetic-owned", "sandbox_id":"synthetic-sandbox", "thinking":"low", **json.loads(pathlib.Path(path).read_text())}
+def snapshot(root): return {str(p.relative_to(root)):p.read_bytes() for p in root.rglob("*") if p.is_file()}
 def frozen_source(task):
     root, revision = task['repository'], task['revision']
     raw = subprocess.check_output(['git', '-C', root, 'archive', revision])
@@ -80,13 +81,16 @@ def main():
         (output/'receipt.json').write_text(json.dumps(receipt)); return
     (results/'changed-files').mkdir()
     name=task['writable_paths'][0]; target=results/'changed-files'/name; target.parent.mkdir(parents=True,exist_ok=True)
-    target.write_bytes(b'implemented\n')
+    target.write_bytes(profile.get('returned_content', 'implemented\n').encode())
     changes=[{'path':name,'before_sha256':sha(files[name]) if name in files else None,'after_sha256':sha(target.read_bytes())}]
     if profile.get('wrong_preimage'): changes[0]['before_sha256']='0'*64
     (results/'changes.json').write_text(json.dumps(changes))
-    worker={'run_id':run_id,'task_id':task['task_id'],'artifacts':{str(p.relative_to(results)):sha(p.read_bytes()) for p in results.rglob('*') if p.is_file()}}
+    configuration={'available_models':[{'provider':'synthetic','id':'model'}],'effective':{'provider':'synthetic','model':'model','thinking':'low'},'supported_thinking_levels':['off','low'],'session_file':None}
+    (results/'rpc-configuration.json').write_text(json.dumps(configuration))
+    worker={'run_id':run_id,'task_id':task['task_id'],'checks':[],'configuration':configuration,'artifacts':{str(p.relative_to(results)):sha(p.read_bytes()) for p in results.rglob('*') if p.is_file()}}
     (results/'worker-receipt.json').write_text(json.dumps(worker))
     receipt={'version':2,'task_id':task['task_id'],'run_id':run_id,'source':source,'input_sha256':sha((output/'inputs.tar').read_bytes()),'worker':worker,'delivery_valid':True,'cleanup_complete':True,'protected_unchanged':True,'artifacts_verified':True,'acceptance':'not_granted','outcome':'returned'}
+    receipt.update(sandbox_before={'id':profile['sandbox_id'],'main_process_instance_id':'before','phase':'Stopped'},sandbox_running={'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Ready'},sandbox_after={'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Stopped'})
     (output/'receipt.json').write_text(json.dumps(receipt))
 if __name__ == '__main__': main()
 """
@@ -127,7 +131,12 @@ def execution_project(git_repo, tmp_path, monkeypatch):
         "verification": {
             "commands": [command],
             "required_proofs": [
-                {"kind": "command", "command": command, "passing_exit_codes": [0], "label": "real"}
+                {
+                    "kind": "command",
+                    "command": command,
+                    "passing_exit_codes": [0],
+                    "label": "real",
+                }
             ],
         },
     }
@@ -144,17 +153,10 @@ def execution_project(git_repo, tmp_path, monkeypatch):
     for path in (script, extension, profile):
         path.chmod(0o600)
     system_python = shutil.which("python3", path=os.defpath) or sys.executable
-    paths = {
-        "interpreter": Path(system_python).resolve(),
-        "script": script,
-        "extension": extension,
-        "profile": profile,
-    }
-    registration = ExecutionAdapter(
-        1,
-        **{key: str(path) for key, path in paths.items()},
-        hashes={key: digest(path.read_bytes()) for key, path in paths.items()},
-    )
+    package = plugin / "package.json"
+    package.write_text('{"name":"codex-pi-coordination","version":"0.2.0"}')
+    package.chmod(0o600)
+    registration = register_execution_adapter(script, Path(system_python), profile)
     global_config = tmp_path / "global" / "config.yaml"
     global_config.parent.mkdir(mode=0o700)
     global_config.write_text(
@@ -202,6 +204,7 @@ def test_preview_does_not_claim_and_expiry_is_closed(execution_project, monkeypa
     "options",
     [
         dict(model="one"),
+        dict(provider="synthetic", model="m" * 256),
         dict(thinking="auto"),
         dict(thinking="dynamic"),
         dict(provider="https://bad", model="one"),
@@ -219,7 +222,11 @@ def test_scope_cas_and_dependency_refuse_before_claim(execution_project):
     backend.append(
         _event(
             "task.created",
-            {**task.model_dump(mode="json"), "prd_id": task.prd_id, "description": "changed"},
+            {
+                **task.model_dump(mode="json"),
+                "prd_id": task.prd_id,
+                "description": "changed",
+            },
             target_kind="task",
             target_id=task.id,
         )
@@ -285,12 +292,22 @@ def test_unknown_dispatch_keeps_slot_and_does_not_retry(execution_project, monke
 
     monkeypatch.setattr(execution, "native_cli", interrupted)
     with pytest.raises(OSError, match="lost claim"):
-        confirm_run(execution_project[1], "release:T001", "synthetic-owner", preview["preview_id"])
+        confirm_run(
+            execution_project[1],
+            "release:T001",
+            "synthetic-owner",
+            preview["preview_id"],
+        )
     slots = list((journal_root(execution_project[1]) / "slots").glob("*.json"))
     assert len(slots) == 1
     run_id = read_receipt(slots[0])["run_id"]
     with pytest.raises(ExecutionError, match=run_id):
-        confirm_run(execution_project[1], "release:T001", "synthetic-owner", preview["preview_id"])
+        confirm_run(
+            execution_project[1],
+            "release:T001",
+            "synthetic-owner",
+            preview["preview_id"],
+        )
 
 
 def test_scope_is_checked_again_at_native_publication(execution_project, monkeypatch):
@@ -346,7 +363,13 @@ def test_expired_claim_and_profile_refuse_before_dispatch(execution_project):
     backend, repo, _, _ = execution_project
     claimed = json.loads(
         native_cli(
-            repo, "claim", "release:T001", "--actor", "synthetic-owner", "--worktree", "--json"
+            repo,
+            "claim",
+            "release:T001",
+            "--actor",
+            "synthetic-owner",
+            "--worktree",
+            "--json",
         )
     )["data"]["claim"]
     request = {
@@ -417,7 +440,11 @@ def test_capability_view_is_sanitized_scoped_and_expires(execution_project, monk
     fresh = execution.read_execution_capabilities(repo)
     assert fresh["status"] == "fresh"
     assert fresh["models"] == [{"provider": "synthetic", "id": "one"}]
-    assert fresh["thinking"] == {"provider": "synthetic", "model": "one", "levels": ["off", "low"]}
+    assert fresh["thinking"] == {
+        "provider": "synthetic",
+        "model": "one",
+        "levels": ["off", "low"],
+    }
     assert "private" not in json.dumps(fresh)
     observed = execution.now()
     monkeypatch.setattr(execution, "now", lambda: observed + timedelta(seconds=301))
@@ -445,7 +472,7 @@ def test_capability_profile_change_and_busy_owner_are_closed(execution_project):
     )
     Path(registration.profile).write_text('{"model":"changed"}')
     changed = dataclasses.asdict(registration)
-    changed["hashes"]["profile"] = digest(Path(registration.profile).read_bytes())
+    changed["registration"]["profile_sha256"] = digest(Path(registration.profile).read_bytes())
     global_config_path().write_text(yaml.safe_dump({"execution_adapter": changed}))
     assert execution.read_execution_capabilities(repo)["status"] == "unknown"
     root = journal_root(repo)
@@ -455,4 +482,60 @@ def test_capability_profile_change_and_busy_owner_are_closed(execution_project):
     )
     with pytest.raises(ExecutionError, match="existing execution"):
         execution.refresh_execution_capabilities(repo)
+    assert not (root / "runs").exists()
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_hidden_index_flags_refuse_admission_and_integrated_source(execution_project, flag):
+    from anvil.execution import git
+    from anvil.execution_runner import check_integrated_source
+
+    backend, repo, state, _ = execution_project
+    source = git(repo, "rev-parse", "HEAD").decode().strip()
+    git(repo, "update-index", flag, "README.md")
+    (repo / "README.md").write_bytes(b"hidden verification drift\n")
+    assert git(repo, "status", "--porcelain") == b""
+    events = (state / "events.jsonl").read_bytes()
+    with pytest.raises(ExecutionError, match="index"):
+        _preview(execution_project)
+    with pytest.raises(ExecutionError, match="index"):
+        check_integrated_source(repo, source, [], {})
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == events
+
+
+def test_consumed_preview_racing_fresh_admission_preserves_new_slot(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from anvil.execution import private_directory, reserve_slot, write_receipt
+
+    root = private_directory(tmp_path / "journal")
+    old_preview, fresh_preview = "a" * 32, "b" * 32
+    previous_run, next_run = "c" * 32, "d" * 32
+    write_receipt(root / "consumed" / (old_preview + ".json"), {"run_id": previous_run})
+    slot = root / "slots" / "task.json"
+    original = {"run_id": next_run, "preview_id": fresh_preview, "task_id": "example:T001"}
+    barrier = Barrier(3)
+
+    def contender(preview):
+        barrier.wait(timeout=5)
+        try:
+            reserve_slot(root, slot, {**original, "preview_id": preview}, consume_preview=True)
+            return "admitted"
+        except ExecutionError as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        outcomes = list(executor.map(contender, [old_preview, old_preview, fresh_preview]))
+    # A contender may see the short native admission lock; only the fresh
+    # request can ever reserve. Retry only an explicitly unadmitted lock loser.
+    if outcomes[2] == "admission_busy":
+        reserve_slot(root, slot, original, consume_preview=True)
+    else:
+        assert outcomes[2] == "admitted"
+    assert set(outcomes[:2]) <= {"admission_busy", "preview_consumed"}
+    assert read_receipt(slot) == original
+    assert read_receipt(root / "consumed" / (old_preview + ".json")) == {"run_id": previous_run}
+    assert not (root / "retired").exists()
     assert not (root / "runs").exists()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+import yaml
 from typer.testing import CliRunner
 
 from anvil.cli import app
@@ -54,7 +56,17 @@ def test_run_preview_json_and_confirmation_options(execution_project):
     assert json.loads(refused.output)["error"]["code"] == "bad_request"
 
 
-def test_run_configure_preserves_owner_config_and_refuses_replacement(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "original",
+    [
+        b"# owner comment\nllm_model: preserved\n",
+        b"{llm_model: preserved}\n",
+        b"---\nllm_model: preserved\n...\n",
+    ],
+)
+def test_run_configure_preserves_owner_config_and_refuses_replacement(
+    tmp_path, monkeypatch, original
+):
     from anvil.config import load_execution_adapter
 
     runner = CliRunner()
@@ -65,11 +77,13 @@ def test_run_configure_preserves_owner_config_and_refuses_replacement(tmp_path, 
     extension = script.parent.parent / "extensions" / "coordination.js"
     extension.parent.mkdir()
     extension.write_text("// extension\n")
+    package = script.parent.parent / "package.json"
+    package.write_text('{"name":"codex-pi-coordination","version":"0.2.0"}')
+    package.chmod(0o600)
     profile = tmp_path / "profile.json"
     profile.write_text("{}")
     global_path = tmp_path / "config" / "config.yaml"
     global_path.parent.mkdir(mode=0o700)
-    original = b"# owner comment\nllm_model: preserved\n"
     global_path.write_bytes(original)
     for path in (script, extension, profile, global_path):
         path.chmod(0o600)
@@ -89,7 +103,9 @@ def test_run_configure_preserves_owner_config_and_refuses_replacement(tmp_path, 
     assert global_path.read_bytes() == original
     written = runner.invoke(app, [*arguments, "--write"])
     assert written.exit_code == 0, written.output
-    assert global_path.read_bytes().startswith(original)
+    assert yaml.safe_load(global_path.read_bytes())["llm_model"] == "preserved"
+    if original.startswith(b"#"):
+        assert global_path.read_bytes().startswith(original)
     assert load_execution_adapter().script == str(script)
     saved = global_path.read_bytes()
     noop = runner.invoke(app, [*arguments, "--write"])
@@ -99,6 +115,52 @@ def test_run_configure_preserves_owner_config_and_refuses_replacement(tmp_path, 
     refused = runner.invoke(app, [*arguments, "--write"])
     assert refused.exit_code == 1
     assert global_path.read_bytes() == saved
-    assert [path.read_bytes() for path in global_path.parent.glob("*.before-execution-*")] == [
-        original
-    ]
+    assert [
+        path.read_bytes() for path in global_path.parent.glob("*.before-execution-*")
+    ] == [original]
+
+
+@pytest.mark.parametrize(
+    "options, model, thinking",
+    [
+        ([], "configured default", "configured default"),
+        (
+            ["--provider", "synthetic", "--model", "model", "--thinking", "low"],
+            "synthetic/model (explicit)",
+            "low (explicit)",
+        ),
+    ],
+)
+def test_text_preview_exposes_reviewable_scope(
+    execution_project, options, model, thinking
+):
+    from anvil.execution import git
+
+    backend, repo, _, _ = execution_project
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "release:T001",
+            "--preview",
+            "--cwd",
+            str(repo),
+            "--actor",
+            "synthetic-owner",
+            *options,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    for expected in (
+        "release:T001",
+        "synthetic-owner",
+        git(repo, "rev-parse", "HEAD").decode().strip(),
+        "README.md",
+        backend.get_task("release:T001").verification.commands[0],
+        "600 seconds",
+        "180 seconds",
+        model,
+        thinking,
+    ):
+        assert expected in result.output
+    assert not backend.list_active_claims()

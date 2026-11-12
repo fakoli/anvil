@@ -12,12 +12,11 @@ import yaml
 
 from anvil.cli._helpers import _resolve_project_dir, resolve_actor
 from anvil.cli._json import JSON_OPTION, emit_success, fail_with
-from anvil.config import ExecutionAdapter, execution_file_bytes, global_config_path
+from anvil.config import execution_file_bytes, global_config_path, register_execution_adapter
 from anvil.execution import (
     ExecutionError,
     RunOptions,
     confirm_run,
-    digest,
     inspect_run,
     preview_run,
     private_directory,
@@ -36,16 +35,7 @@ def run_configure(
 ) -> None:
     """Register trusted coordination v2 once; dry-run unless --write."""
     try:
-        paths = {
-            "script": script.absolute(),
-            "interpreter": interpreter.resolve(strict=True),
-            "profile": profile.absolute(),
-            "extension": script.absolute().parent.parent / "extensions" / "coordination.js",
-        }
-        hashes = {key: digest(execution_file_bytes(path)) for key, path in paths.items()}
-        registration = ExecutionAdapter(
-            1, **{key: str(path) for key, path in paths.items()}, hashes=hashes
-        )
+        registration = register_execution_adapter(script, interpreter, profile)
         path = global_config_path()
         original = execution_file_bytes(path, 1024 * 1024) if path.exists() else b""
         existing = yaml.safe_load(original) or {}
@@ -58,6 +48,16 @@ def run_configure(
                 "A different execution adapter is registered; review it before replacing it"
             )
         changed = previous is None
+        candidate = {**existing, "execution_adapter": data}
+        appended = original + (b"\n" if original and not original.endswith(b"\n") else b"")
+        appended += yaml.safe_dump({"execution_adapter": data}, sort_keys=True).encode()
+        try:
+            preserve_bytes = yaml.safe_load(appended) == candidate
+        except yaml.YAMLError:
+            preserve_bytes = False
+        raw = appended if preserve_bytes else yaml.safe_dump(candidate, sort_keys=False).encode()
+        if yaml.safe_load(raw) != candidate:
+            raise ValueError("Execution registration cannot preserve the owner configuration")
         if write and changed:
             private_directory(path.parent)
             lock = path.with_name(path.name + ".execution-registration.lock")
@@ -76,9 +76,6 @@ def run_configure(
                         stream.write(original)
                         stream.flush()
                         os.fsync(stream.fileno())
-                # Appending preserves unrelated values, comments and formatting.
-                raw = original + (b"\n" if original and not original.endswith(b"\n") else b"")
-                raw += yaml.safe_dump({"execution_adapter": data}, sort_keys=True).encode()
                 temporary = path.with_name(path.name + ".execution-" + uuid.uuid4().hex)
                 with temporary.open("xb") as stream:
                     os.chmod(temporary, 0o600)
@@ -148,6 +145,35 @@ def run(
             emit_success("run", result)
         elif preview:
             typer.echo(f"Preview {result['preview_id']} expires {result['expires_at']}.")
+            typer.echo(f"Task: {result['task_id']}  Actor: {result['actor']}")
+            typer.echo(f"Source: {result['source_sha']}")
+            typer.echo(
+                f"Budget: {result['wall_seconds']} seconds for the adapter, "
+                "plus 180 seconds for checks/cleanup."
+            )
+            options = result["options"]
+            typer.echo(
+                "Model: "
+                + (
+                    f"{options['provider']}/{options['model']} (explicit)"
+                    if "model" in options
+                    else "configured default"
+                )
+            )
+            typer.echo(
+                "Thinking: "
+                + (
+                    f"{options['thinking']} (explicit)"
+                    if "thinking" in options
+                    else "configured default"
+                )
+            )
+            typer.echo("Writable files:")
+            for path in result["writable_paths"]:
+                typer.echo(f"  {path}")
+            typer.echo("Literal verification commands:")
+            for command in result["commands"]:
+                typer.echo(f"  {command}")
             typer.echo(f"Confirm: anvil run {task_id} --confirm {result['preview_id']}")
         else:
             typer.echo(

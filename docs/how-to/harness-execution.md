@@ -18,7 +18,10 @@ The registration lives only in the owner's global Anvil YAML configuration.
 Project configuration cannot replace executable or profile paths. Registration
 pins the interpreter, script, extension and profile bytes; it does not qualify
 the model or runtime. Changed registered bytes require an intentional reviewed
-registration update; the command refuses to overwrite another registration.
+registration update.
+This initial command refuses replacement and does not yet provide an upgrade
+command; a supported expected-registration update is follow-up work. Do not
+edit private registration files as a normal upgrade procedure.
 
 In the intended repository:
 
@@ -29,7 +32,8 @@ anvil run-status RUN_ID
 ```
 
 The preview expires after 300 seconds and displays the exact task, owner,
-source, scope, commands, profile identity and budget in `--json` output. Confirm
+source, scope, literal commands, default or explicit options and budget in normal
+text output. `--json` also includes the registered profile identity. Confirm
 uses those saved options and rechecks current material scope. Ready tasks get a
 native isolated claim. To use an existing claim, run from its isolated checkout
 as its exact actor. Dependencies must be `done`. Bundle members, root sets,
@@ -52,6 +56,12 @@ Initial Run requires POSIX process-group custody and refuses other platforms
 before creating a claim. Commands use `/bin/sh -c` in the isolated checkout.
 Keep the frozen command set small enough for the remaining native lease and
 run budget. Existing verification profiles are refused, not silently ignored.
+
+A known stopped failed verification ends at `failed_stopped`: preserve its
+edits and logs, correct the assignment or source through the normal native
+workflow, then create a fresh preview. Its old preview remains consumed.
+Unknown stop, uncertain submission and partial integration remain held for
+owner reconciliation; they are never automatically retired or replayed.
 
 The worker runs independently of the CLI and does not hold an execution-wide
 State lock. Each task has an exclusive State-local operational slot. Duplicate
@@ -87,6 +97,15 @@ A verified catalog is fresh for 300 seconds and pins the adapter/profile bytes.
 Only model IDs, the effective selection and supported thinking levels for that
 exact observed model are exposed. Stale or changed-profile entries do not provide
 active choices. Other models' thinking levels remain unknown until matching
-verified evidence exists; the current metadata command selects the configured
+verified evidence exists; the current metadata command selects the actual idle
 model only. Model-specific metadata selection and saved-session Continue remain
 follow-up work, not implied capability of this initial slice.
+
+Each Run retains a strict `anvil.execution-request.v1` and
+`anvil.adapter-result.v1` envelope around the concrete adapter's task and receipts.
+These bind the native claim, source, exact preimages and actual host permission
+bits, assignment, selected options, artifact hashes and stopped owner custody.
+Contract digests use Anvil's canonical UTF-8 JSON. Local interpreter pinning and
+operational status remain separate; neither an adapter result nor sandbox checks
+grant native acceptance. Hidden Git index flags and special file-mode bits
+refuse rather than hiding source changes or normalizing permissions.

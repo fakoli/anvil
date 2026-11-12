@@ -1227,23 +1227,27 @@ def test_execution_registration_ignores_project_config(tmp_path, monkeypatch):
 
 
 def test_execution_registration_hash_drift_refuses(tmp_path, monkeypatch):
-    import hashlib
+    import dataclasses
 
     import yaml
 
-    from anvil.config import load_execution_adapter
+    from anvil.config import load_execution_adapter, register_execution_adapter
 
-    paths = {name: tmp_path / name for name in ("script", "extension", "profile", "interpreter")}
-    for path in paths.values():
-        path.write_bytes(b"{}")
+    script = tmp_path / "scripts" / "coordinate.py"
+    extension = tmp_path / "extensions" / "coordination.js"
+    profile = tmp_path / "profile.json"
+    package = tmp_path / "package.json"
+    for path in (script, extension, profile, package):
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("{}")
         path.chmod(0o600)
-    registration = {"version": 1, **{key: str(path) for key, path in paths.items()},
-                    "hashes": {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in paths.items()}}
+    package.write_text('{"name":"codex-pi-coordination","version":"0.2.0"}')
+    registration = register_execution_adapter(script, script, profile)
     config = tmp_path / "global.yaml"
-    config.write_text(yaml.safe_dump({"execution_adapter": registration}))
+    config.write_text(yaml.safe_dump({"execution_adapter": dataclasses.asdict(registration)}))
     config.chmod(0o600)
     monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(config))
-    assert load_execution_adapter().version == 1
-    paths["script"].write_bytes(b"changed")
+    assert load_execution_adapter().registration["contract_version"] == 2
+    script.write_bytes(b"changed")
     with pytest.raises(ValueError, match="input changed"):
         load_execution_adapter()
