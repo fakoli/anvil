@@ -6,25 +6,29 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
-### Fixed
-
-- Event-format conversion refuses event-bound PRD/bundle authority and all
-  accepted-task histories, including legacy acceptance whose signed receipts
-  may exist off-host. Resume applies the same admission to retained original
-  history and leaves unsupported pending recovery intact; no authority is
-  rewritten or reapproved.
-
 ## [0.6.23] - 2026-11-12
 
 ### Added
 
-- Recoverable POSIX local-to-Git event conversion with an identity-bound native
-  `migrate-events --to git --resume --yes` recovery command.
+- CLI/HTTP regression tests cover independent proof execution during final
+  approval waits, saved-attempt confirmation, preview expiry, and coordinator
+  lease expiry before and after review finalization.
+- Recoverable POSIX local-to-Git conversion for eligible histories, with an
+  identity-bound native `migrate-events --to git --resume --yes` recovery command.
 - Repeatable execution-scale campaigns with matched host cells, explicit targets,
   source bindings and retained failed attempts.
 
 ### Fixed
 
+- Hooks and packet metrics resolve the project-selected event storage mode,
+  preserving Git-backed history even when global defaults select local storage.
+- Empty-scope bundle admission uses the existing task/status index; nonempty
+  file or conflict-group scopes retain the complete conflict scan.
+- Event-format conversion refuses event-bound PRD/bundle authority and all
+  accepted-task histories, including legacy acceptance whose signed receipts
+  may exist off-host. Resume applies the same admission to retained original
+  history and leaves unsupported pending recovery intact; no authority is
+  rewritten or reapproved.
 - Event conversion holds stable custody across log replacement, checks task and
   bundle claims, and fences waiting or retained clients with stale storage modes.
 - Conversion preserves private artifact permissions and rejects unsafe paths
@@ -48,8 +52,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 - Windows event-format apply and recovery refuse before artifact creation until
   private backup DACL handling is qualified. Dry runs and schema-only migration
   remain available. Older engine processes must be stopped before conversion.
-- Campaign support does not establish a universal 15ms latency guarantee or
-  qualify hundreds or thousands of physically executing containers.
+- Matched measurements of empty scopes on a shared host did not consistently
+  meet the 15 ms p95 target: seven of nine candidate cells failed. These
+  measurements predate the final release source and do not qualify its latency.
+- The measured workload used 1,000 leased tasks, eight command processes, one
+  ledger writer, and zero containers. Hundreds or thousands of executing
+  containers remain unqualified.
+- Approval regression tests use disposable synthetic actors; they do not
+  establish authenticated human approval or bulk final acceptance. Coordinator
+  expiry before review finalization still blocks that cohort.
 
 ## [0.6.22] - 2026-11-10
 
