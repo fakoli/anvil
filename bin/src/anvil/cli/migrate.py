@@ -311,14 +311,29 @@ def _conversion_digest(path: Path) -> str:
 
 def _conversion_projection_digest(path: Path) -> str:
     # Same logical-row oracle as native local-event repair, including schema and
-    # version. WAL layout changes do not change the recorded recovery identity.
-    from anvil.cli.local_event_repair import _readonly_connection, _table_rows
-    from anvil.state.hashing import canonical_json_bytes
+    # version. Native rows/history are not bounded public read responses. These
+    # JSON settings preserve the existing preimage for previously admitted rows.
+    from anvil.cli.local_event_repair import _table_rows
     from anvil.state.sqlite import _stable_database_copy
 
+    encoder = json.JSONEncoder(
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+
+    def encode_row(value: Any) -> bytes:
+        return encoder.encode(value).encode("utf-8")
+
     with _stable_database_copy(path) as snapshot:
-        with closing(_readonly_connection(snapshot)) as connection:
-            return hashlib.sha256(canonical_json_bytes(_table_rows(connection))).hexdigest()
+        # A crashed publication can leave a hot rollback journal. Opening only
+        # this private copy writable lets SQLite recover it without touching live
+        # evidence. Publication still requires its recovered rows to match the
+        # recorded before/after digest under stable custody.
+        with closing(sqlite3.connect(snapshot)) as connection:
+            rows = _table_rows(connection, encode_json=encode_row)
+            digest = hashlib.sha256()
+            for chunk in encoder.iterencode(rows):
+                digest.update(chunk.encode("utf-8"))
+            return digest.hexdigest()
 
 
 def _stage_event_conversion(
