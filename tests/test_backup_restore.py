@@ -296,6 +296,113 @@ def _restore_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return state, module, store
 
 
+@pytest.mark.parametrize("global_mode_stage", ["before_download", "during_download"])
+def test_restore_uses_native_project_storage_despite_global_mode(
+    tmp_path, monkeypatch, global_mode_stage,
+):
+    from datetime import timedelta
+
+    from anvil.cli._helpers import _open_backend
+    from anvil.cli.doctor import _OK, _check_replay
+    from tests.test_git_events import _draft
+
+    state, module, store = _restore_fixture(tmp_path, monkeypatch)
+    global_config = tmp_path / "global-config.yaml"
+    global_defaults = "s3_prefix: global-fixture/\n"
+    global_config.write_text(global_defaults + (
+        "events_storage: git\n" if global_mode_stage == "before_download" else ""
+    ))
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_config))
+    backend = _open_backend(state)
+    try:
+        assert backend._events_storage == "local"
+        for position, days in (("first", 30), ("second", 20)):
+            backend.append(_draft("sync_mapping.upserted", {
+                "task_id": "T001", "external_system": "restore-selector",
+                "external_id": "fixture-1", "external_url": None,
+                "last_synced_at": _T0.isoformat(), "sync_state": "in_sync",
+                "conflict_resolution_strategy": "prompt",
+                "provider_metadata": {"position": position},
+                "prd_id": "default", "entity_kind": "task",
+            }, target_kind="task", target_id="T001", ts=_T0 + timedelta(days=days)))
+        mapping = backend.get_sync_mapping("T001", external_system="restore-selector")
+        assert mapping is not None and mapping.provider_metadata == {"position": "second"}
+    finally:
+        backend.close()
+    store.push(str(state / "events.jsonl"), "events.jsonl")
+    original_pull = store.pull
+
+    def pull_with_global_change(key, destination):
+        original_pull(key, destination)
+        if global_mode_stage == "during_download":
+            global_config.write_text(global_defaults + "events_storage: git\n")
+
+    def store_with_merged_durable_settings(config):
+        assert config.s3_prefix == "global-fixture/"
+        return store
+
+    monkeypatch.setattr(store, "pull", pull_with_global_change)
+    monkeypatch.setattr(module, "_make_store", store_with_merged_durable_settings)
+    result = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+    assert result.exit_code == 0, (result.output, result.exception)
+    restored = _open_backend(state)
+    try:
+        assert restored._events_storage == "local"
+        mapping = restored.get_sync_mapping("T001", external_system="restore-selector")
+        assert mapping is not None and mapping.provider_metadata == {"position": "second"}
+        replay = _check_replay(restored, state)
+        assert replay.severity == _OK, replay.to_json()
+    finally:
+        restored.close()
+    assert (state / "events.jsonl").read_bytes() == store._blobs["events.jsonl"]
+
+
+@pytest.mark.parametrize("phase", ["download", "legacy_writer_drain"])
+@pytest.mark.parametrize("configuration", ["malformed", "git"])
+def test_restore_rechecks_project_configuration_before_publication(
+    tmp_path, monkeypatch, phase, configuration,
+):
+    from contextlib import contextmanager
+
+    from tests.test_cli import _recursive_file_manifest
+
+    state, module, store = _restore_fixture(tmp_path, monkeypatch)
+    store.push(str(state / "events.jsonl"), "events.jsonl")
+    before = _recursive_file_manifest(state)
+    original_inode = (state / "state.db").stat().st_ino
+    changed_config = (
+        b"events_storage: [\n" if configuration == "malformed"
+        else before["config.yaml"] + b"events_storage: git\n"
+    )
+    original_pull = store.pull
+    original_drain = module._schema_initialization_lock
+
+    def pull_with_configuration_change(key, destination):
+        original_pull(key, destination)
+        if phase == "download":
+            (state / "config.yaml").write_bytes(changed_config)
+
+    @contextmanager
+    def drain_with_configuration_change(*args, **kwargs):
+        with original_drain(*args, **kwargs):
+            if phase == "legacy_writer_drain":
+                (state / "config.yaml").write_bytes(changed_config)
+            yield
+
+    monkeypatch.setattr(store, "pull", pull_with_configuration_change)
+    monkeypatch.setattr(module, "_schema_initialization_lock", drain_with_configuration_change)
+    result = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert "Traceback" not in result.output
+    after = _recursive_file_manifest(state)
+    assert after["config.yaml"] == changed_config
+    assert {name: after[name] for name in before if name != "config.yaml"} == {
+        name: raw for name, raw in before.items() if name != "config.yaml"
+    }
+    assert (state / "state.db").stat().st_ino == original_inode
+    assert not list(state.glob(".restore-*"))
+
+
 @pytest.mark.parametrize("storage", ["local", "git"])
 def test_restore_preserves_live_inode_and_retained_native_connection(
     tmp_path, monkeypatch, storage,

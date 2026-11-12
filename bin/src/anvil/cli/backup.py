@@ -77,11 +77,13 @@ def restore(
     cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
 ) -> None:
     """Pull events.jsonl from S3 and replay into state.db (destructive)."""
+    from anvil.config import read_events_storage
+
     state_dir = _resolve_state_dir(cwd)
     _require_no_event_recovery(state_dir / "state.db")
     _require_safe_restore_paths(state_dir)
     config = _load_config_required(state_dir)
-    events_storage = config.events_storage
+    events_storage = read_events_storage(state_dir / "config.yaml")
     if not yes:
         typer.confirm(
             "This will overwrite state.db by replaying the remote events.jsonl. Continue?",
@@ -136,6 +138,7 @@ def _publish_restore(
         _fsync_directory,
         _publish_staged_projection,
     )
+    from anvil.config import read_events_storage
     from anvil.state.backend import SchemaProbeFailed
     from anvil.state.sqlite import _require_event_storage_fence, _state_operation_lock
 
@@ -149,15 +152,18 @@ def _publish_restore(
         _require_no_event_recovery(database)
         _require_safe_restore_paths(state_dir)
         _require_event_storage_fence(database, events_storage)
-        if _load_config_required(state_dir).events_storage != events_storage:
-            raise SchemaProbeFailed(
-                "State event format changed during restore; retry from the current State."
-            )
         if os.path.lexists(events):
             # Drain pre-token writers, then close the replaceable log handle
             # before publication (including on Windows). Keep the token owned.
             with _schema_initialization_lock(database, events, create_missing_log=False):
                 _require_safe_restore_paths(state_dir)
+        # Durable settings retain strict merged validation. Storage mode must
+        # match normal backend factories, which read only the project config.
+        _load_config_required(state_dir)
+        if read_events_storage(state_dir / "config.yaml") != events_storage:
+            raise SchemaProbeFailed(
+                "State event format changed during restore; retry from the current State."
+            )
         # Keep retained SQLite connections on the live inode. This preserves
         # restore's existing crash semantics; the two files are not one atomic
         # transaction and no new recovery protocol is introduced here.
