@@ -36,6 +36,13 @@ MAX_CANONICAL_JSON_NODE_HARD_LIMIT = MAX_CANONICAL_JSON_RESPONSE_BYTES
 MIN_CANONICAL_JSON_INTEGER = -(2**63)
 MAX_CANONICAL_JSON_INTEGER = (2**63) - 1
 
+# Only fixed configuration is shared; JSONEncoder keeps traversal state local
+# to each encode call. Reuse it for scalar byte accounting, never input values.
+_encode_canonical_json_scalar = json.JSONEncoder(
+    ensure_ascii=False,
+    allow_nan=False,
+).encode
+
 
 class CanonicalJsonRefusalCode(enum.StrEnum):
     """Stable reasons a value cannot enter a canonical JSON preimage."""
@@ -434,11 +441,7 @@ def _consume_scalar_bytes(
         try:
             raw_size = bytes.__len__(str.encode(plain_value, "utf-8"))
             encoded_size = len(
-                json.dumps(
-                    plain_value,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ).encode("utf-8")
+                _encode_canonical_json_scalar(plain_value).encode("utf-8")
             )
         except UnicodeEncodeError as exc:
             raise CanonicalJsonRefusal(
@@ -452,7 +455,7 @@ def _consume_scalar_bytes(
             )
     else:
         encoded_size = len(
-            json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            _encode_canonical_json_scalar(value).encode("utf-8")
         )
     _consume_bytes(
         encoded_size,
