@@ -9,6 +9,10 @@ Runnable as a pytest test and as a standalone script
 from __future__ import annotations
 
 import datetime
+import json
+from pathlib import Path
+
+import pytest
 
 from anvil.context.packet_metrics import measure_backlog, measure_task
 from anvil.state.models import Score, Task
@@ -68,3 +72,26 @@ def test_standalone_main_usage_without_args() -> None:
     from anvil.context.packet_metrics import _main
 
     assert _main([]) == 2  # prints usage, non-zero exit
+
+
+@pytest.mark.parametrize("storage", ["local", "default", "git"])
+def test_standalone_metrics_uses_project_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], storage: str,
+) -> None:
+    from anvil.context.packet_metrics import _main
+    from tests.test_cli import _do_init_and_plan
+
+    _do_init_and_plan(tmp_path, with_git=False, storage=storage, monkeypatch=monkeypatch)
+    state = tmp_path / ".anvil"
+    before = (state / "events.jsonl").read_bytes()
+    capsys.readouterr()
+
+    assert _main([str(state)]) == 0
+
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert not captured.err
+    assert report["total_tasks"] == 2
+    assert {task["task_id"] for task in report["per_task"]} == {"T001", "T002"}
+    assert (state / "events.jsonl").read_bytes() == before
