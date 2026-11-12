@@ -62,6 +62,66 @@ def _require_safe_force_initialization_paths(state_dir: Path) -> None:
     _safe_sidecars(state_dir / "state.db")
 
 
+def _require_local_force_initialization_authority(state_dir: Path) -> None:
+    """Require positive local authority before a destructive reset."""
+    import yaml
+
+    from anvil.config import load_config
+    from anvil.state.backend import SchemaProbeFailed
+    from anvil.state.models import Event
+
+    database = state_dir / "state.db"
+    events = state_dir / "events.jsonl"
+    config = state_dir / "config.yaml"
+    database_nonempty = database.exists() and database.stat().st_size > 0
+    events_nonempty = events.exists() and events.stat().st_size > 0
+    if database_nonempty and not events_nonempty:
+        raise SchemaProbeFailed(
+            "Existing State has no authority log; explicit restoration or recovery is required."
+        )
+    if (
+        not database_nonempty and not events_nonempty
+        and (not config.exists() or config.stat().st_size == 0)
+    ):
+        return  # Absent or empty scaffolding has no history to destroy.
+    try:
+        storage = load_config(config).events_storage
+    except (OSError, ValueError, yaml.YAMLError):
+        raise SchemaProbeFailed(
+            "Existing State requires a valid local configuration before force initialization; "
+            "repair the configuration explicitly."
+        ) from None
+    if storage != "local":
+        raise SchemaProbeFailed("Git-backed State cannot be force-initialized.")
+    if not events_nonempty:
+        return
+    observed_local_event = False
+    with events.open("rb") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            try:
+                if not line.endswith(b"\n"):
+                    raise ValueError("unterminated record")
+                event = Event.model_validate_json(line)
+            except ValueError:
+                raise SchemaProbeFailed(
+                    "Existing event history is invalid; "
+                    "explicit restoration or recovery is required."
+                ) from None
+            if (
+                event.id.startswith("E-")
+                or event.parent_event_id is not None
+                or event.lamport is not None
+            ):
+                raise SchemaProbeFailed("Git-backed State cannot be force-initialized.")
+            observed_local_event = True
+    if not observed_local_event:
+        raise SchemaProbeFailed(
+            "Existing State has no authority records; explicit restoration or recovery is required."
+        )
+
+
 @contextmanager
 def _force_initialization_lock(state_dir: Path, *, force: bool) -> Iterator[None]:
     """Admit destructive local reset before changing any existing authority."""
@@ -69,7 +129,6 @@ def _force_initialization_lock(state_dir: Path, *, force: bool) -> Iterator[None
         yield
         return
 
-    from anvil.config import read_events_storage
     from anvil.state.backend import SchemaProbeFailed
     from anvil.state.sqlite import (
         _require_event_storage_fence,
@@ -86,16 +145,13 @@ def _force_initialization_lock(state_dir: Path, *, force: bool) -> Iterator[None
         try:
             _require_safe_force_initialization_paths(state_dir)
             _require_no_event_recovery(database)
-            if read_events_storage(state_dir / "config.yaml") == "git":
-                raise SchemaProbeFailed("Git-backed State cannot be force-initialized.")
+            _require_local_force_initialization_authority(state_dir)
             custody.enter_context(_state_operation_lock(
                 database, create=True, contention_error_type=SchemaProbeFailed,
             ))
             _require_safe_force_initialization_paths(state_dir)
             _require_no_event_recovery(database)
             _require_event_storage_fence(database, "local")
-            if read_events_storage(state_dir / "config.yaml") == "git":
-                raise SchemaProbeFailed("Git-backed State cannot be force-initialized.")
             if os.path.lexists(events):
                 # Drain a legacy writer that entered before token creation. New
                 # writers now need our token; late legacy waiters refuse. Close
@@ -104,6 +160,9 @@ def _force_initialization_lock(state_dir: Path, *, force: bool) -> Iterator[None
                     database, events, create_missing_log=False,
                 ):
                     _require_safe_force_initialization_paths(state_dir)
+                    _require_local_force_initialization_authority(state_dir)
+            else:
+                _require_local_force_initialization_authority(state_dir)
         except (OSError, RuntimeError, ValueError, SchemaProbeFailed) as exc:
             typer.echo(f"Error: force initialization refused: {exc}", err=True)
             raise typer.Exit(1) from None

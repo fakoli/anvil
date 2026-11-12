@@ -34,6 +34,7 @@ class _WindowsOSView:
 def _require_qualified_conversion_platform(request):
     if os.name == "nt" and not request.node.name.startswith((
         "test_windows_", "test_force_init_local_", "test_force_init_pending_local_",
+        "test_force_init_legacy_", "test_force_init_ambiguous_", "test_force_init_rechecks_",
     )):
         pytest.skip("POSIX conversion protocol; Windows refusal has separate coverage")
 
@@ -995,6 +996,117 @@ def test_force_init_local_fresh_initialization_creates_no_token(tmp_path):
     result = _run_in(tmp_path, ["init", "--force"])
     assert result.exit_code == 0, result.output
     assert not (tmp_path / ".anvil" / ".state-operation.lock").exists()
+
+
+@pytest.mark.parametrize("option", [[], ["--with-sample"], ["--from-repo"]])
+@pytest.mark.parametrize("configuration", [
+    None, "events_storage: [\nprivate-fixture-marker", "[local]\n",
+    "", "events_storage: local\n", "events_storage: git\n",
+])
+def test_force_init_legacy_git_refuses_ambiguous_configuration(
+    tmp_path, configuration, option,
+):
+    state = tmp_path / ".anvil"
+    state.mkdir()
+    (state / "events.jsonl").touch()
+    backend = _backend(state, "git")
+    try:
+        backend.append(_draft("project.created", {
+            "id": "proj-1", "name": "Legacy Git", "description": "",
+            "created_at": _T0.isoformat(), "updated_at": _T0.isoformat(),
+        }))
+        backend.append(_draft("state.initialized", {}))
+    finally:
+        backend.close()
+    assert not (state / ".state-operation.lock").exists()
+    if configuration is not None:
+        prefix = "project_name: Legacy Git\nproject_id: proj-1\n"
+        if configuration == "[local]\n":
+            prefix = ""
+        (state / "config.yaml").write_text(prefix + configuration)
+    before = _files(state)
+    identities = {name: (state / name).stat().st_ino for name in before}
+    result = _run_in(tmp_path, ["init", "--force", *option])
+    assert result.exit_code == 1, result.output
+    assert "force initialization refused" in result.output
+    assert "private-fixture-marker" not in result.output
+    assert _files(state) == before
+    assert {name: (state / name).stat().st_ino for name in before} == identities
+
+
+@pytest.mark.parametrize("authority", ["absent", "empty", "whitespace"])
+def test_force_init_ambiguous_database_without_authority_refuses(tmp_path, authority):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    events = state / "events.jsonl"
+    if authority == "absent":
+        events.unlink()
+    else:
+        events.write_bytes(b"" if authority == "empty" else b" \n")
+    before = _files(state)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 1, result.output
+    assert "explicit restoration or recovery" in result.output
+    assert _files(state) == before
+
+
+def test_force_init_local_nonempty_history_requires_configuration(tmp_path):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    (state / "config.yaml").unlink()
+    before = _files(state)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 1, result.output
+    assert "repair the configuration explicitly" in result.output
+    assert _files(state) == before
+
+
+@pytest.mark.parametrize("empty_files", [[], ["events.jsonl"], [
+    "events.jsonl", "state.db", "config.yaml",
+]])
+def test_force_init_local_empty_scaffolding_remains_supported(tmp_path, empty_files):
+    state = tmp_path / ".anvil"
+    state.mkdir()
+    for name in empty_files:
+        (state / name).touch()
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 0, result.output
+    assert _run_in(tmp_path, ["status", "--json"]).exit_code == 0
+
+
+@pytest.mark.parametrize("change", ["configuration", "history"])
+def test_force_init_rechecks_authority_after_legacy_writer_drain(tmp_path, monkeypatch, change):
+    from contextlib import contextmanager
+
+    import anvil.state.sqlite as engine
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    original = engine._schema_initialization_lock
+    admitted_files = None
+
+    @contextmanager
+    def change_after_drain(*args, **kwargs):
+        nonlocal admitted_files
+        with original(*args, **kwargs):
+            if change == "configuration":
+                (state / "config.yaml").write_text("events_storage: [\n")
+            else:
+                events = state / "events.jsonl"
+                records = events.read_text().splitlines()
+                record = json.loads(records[-1])
+                record.update(id="E-0123456789ab", parent_event_id=None, lamport=1)
+                records[-1] = json.dumps(record)
+                events.write_text("\n".join(records) + "\n")
+            admitted_files = _files(state)
+            yield
+
+    monkeypatch.setattr(engine, "_schema_initialization_lock", change_after_drain)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert admitted_files is not None
+    assert result.exit_code == 1, result.output
+    assert "force initialization refused" in result.output
+    assert _files(state) == admitted_files
 
 
 def test_force_init_pending_local_recovery_refuses_before_token_creation(tmp_path):
