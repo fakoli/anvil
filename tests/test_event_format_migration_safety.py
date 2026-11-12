@@ -79,7 +79,9 @@ def _append_native_sync_metadata(backend, metadata):
 
 
 def _files(state: Path) -> dict[str, bytes]:
-    return {str(p.relative_to(state)): p.read_bytes() for p in state.rglob("*") if p.is_file()}
+    from tests.test_cli import _recursive_file_manifest
+
+    return _recursive_file_manifest(state)
 
 
 def _leave_hot_rollback_journal(state: Path) -> None:

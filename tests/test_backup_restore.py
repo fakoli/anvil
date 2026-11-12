@@ -223,3 +223,59 @@ def test_s3_push_pull_live(tmp_path: Path) -> None:
             )
         except Exception:  # noqa: BLE001
             pass
+
+
+def test_warm_backup_uploads_closed_wal_snapshot_and_matching_log_after_custody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+    import sqlite3
+
+    from anvil.state import sqlite as sqlite_module
+    from tests.test_sqlite_file_safety import _require_retained_lock, _retained_database
+
+    backup_module = importlib.import_module("anvil.cli.backup")
+    state = tmp_path / ".anvil"
+    state.mkdir()
+    _write_s3_config(state)
+    uploaded_paths = []
+    with _retained_database(state) as (database, events, retained):
+        events.write_bytes(b"captured-event-log\n")
+
+        class ObservingStore(FakeDurableStore):
+            def push(self, local_path: str, remote_key: str) -> str:
+                path = Path(local_path)
+                uploaded_paths.append(path)
+                assert path.parent != state
+                assert getattr(sqlite_module._SCHEMA_INITIALIZATION_LOCAL, "stack", []) == []
+                if os.name == "posix":
+                    _require_retained_lock(database)
+                # The upload begins after capture and custody release. Later
+                # live commits cannot change either staged artifact.
+                if remote_key == "events.jsonl":
+                    retained.execute("INSERT INTO retained_owner_probe VALUES ('during-upload')")
+                    retained.commit()
+                    events.write_bytes(b"later-event-log\n")
+                else:
+                    assert not Path(f"{path}-wal").exists()
+                    assert not Path(f"{path}-journal").exists()
+                    snapshot = sqlite3.connect(path)
+                    try:
+                        assert snapshot.execute(
+                            "SELECT value FROM retained_owner_probe"
+                        ).fetchall() == [("before-inspection",)]
+                        assert snapshot.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+                    finally:
+                        snapshot.close()
+                return super().push(local_path, remote_key)
+
+        store = ObservingStore()
+        monkeypatch.setattr(backup_module, "_make_store", lambda _: store)
+        result = runner.invoke(app, ["backup", "--include-db", "--cwd", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert store._blobs["events.jsonl"] == b"captured-event-log\n"
+        assert retained.execute("SELECT COUNT(*) FROM retained_owner_probe").fetchone() == (2,)
+        if os.name == "posix":
+            _require_retained_lock(database)
+    assert len(uploaded_paths) == 2
+    assert all(not path.exists() for path in uploaded_paths)

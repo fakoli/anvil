@@ -44,7 +44,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -64,6 +64,7 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
+from anvil.state.file_inspection import BoundedFileInspection, BoundedSchemaProbe
 from anvil.state.hashing import (
     CanonicalJsonRefusal,
     canonical_json_bytes,
@@ -793,48 +794,21 @@ def _read_schema_from_rollback_snapshot(db_path: Path) -> int:
 
 
 @contextmanager
-def _stable_database_copy(db_path: str | os.PathLike[str]) -> Iterator[Path]:
-    """Copy a stable DB/WAL/journal set without opening live SQLite files.
+def _stable_database_copy(
+    db_path: str | os.PathLike[str], *, timeout_seconds: float | None = None,
+) -> Iterator[Path]:
+    """Capture a private stable DB/WAL/journal set in an owned child.
 
-    Callers hold the event lock. Rechecks detect concurrent checkpoint cleanup
-    by already-open readers; recovery and backup operations stay in scratch.
+    Callers hold native custody. Raw live descriptors must never be opened and
+    closed in the process that may retain SQLite connections and POSIX locks.
+    The child checks for concurrent checkpoint cleanup; SQLite recovery and
+    backup operations run only against the returned private copy.
     """
-    database = Path(db_path)
-    suffixes = ("", "-wal", "-journal")
-
-    def file_digests(database_path: Path) -> dict[str, bytes]:
-        digests = {}
-        for suffix in suffixes:
-            path = Path(f"{database_path}{suffix}")
-            if path.exists():
-                with path.open("rb") as source:
-                    digests[suffix] = hashlib.file_digest(source, "sha256").digest()
-        return digests
-
-    try:
-        for _ in range(3):
-            with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
-                scratch_db = Path(temporary) / "state.db"
-                for suffix in suffixes:
-                    source = Path(f"{database}{suffix}")
-                    if source.exists():
-                        shutil.copyfile(source, Path(f"{scratch_db}{suffix}"))
-                captured = file_digests(scratch_db)
-                if "" not in captured:
-                    raise SchemaProbeFailed("Migration database is unavailable.")
-                if captured != file_digests(database):
-                    continue
-                yield scratch_db
-                return
-        raise SchemaProbeFailed(
-            "State changed during migration custody inspection; retry when idle."
-        )
-    except SchemaProbeFailed:
-        raise
-    except (OSError, sqlite3.Error) as exc:
-        raise SchemaProbeFailed(
-            "Migration State could not be inspected without live mutation."
-        ) from exc
+    with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
+        scratch_db = Path(temporary) / "state.db"
+        with BoundedFileInspection(timeout_seconds) as inspection:
+            inspection.copy_database(db_path, scratch_db)
+        yield scratch_db
 
 
 def _active_claim_ids_from_event_log(events_path: str, events_storage: str) -> list[str]:
@@ -1022,7 +996,7 @@ def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
 
 
 def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
-    """Read page 1 and the current WAL prefix without opening live SQLite state.
+    """Worker-only raw page/WAL read, also usable on closed private test copies.
 
     WAL appends are sequential and frame-checksummed. A concurrent writer may
     extend the file after this read; that does not invalidate the complete,
@@ -1041,7 +1015,15 @@ def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
 
 
 def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
-    """Read the on-disk ``PRAGMA user_version`` WITHOUT migrating.
+    """Inspect schema in an owned child without releasing retained SQLite locks."""
+    if not Path(db_path).exists():
+        return 0
+    with BoundedSchemaProbe() as probe:
+        return probe(db_path)
+
+
+def _read_db_schema_version_in_worker(db_path: str | os.PathLike[str]) -> int:
+    """Worker-only on-disk ``PRAGMA user_version`` inspection without migration.
 
     T007/B11 (MUST-FIX 2a): the TRUE pre-migration schema version stamped on a
     database. Unlike ``SqliteBackend.get_schema_version()`` — which reads the
@@ -1088,15 +1070,19 @@ def query_only_transaction(
     db_path: str | os.PathLike[str],
     events_path: str | os.PathLike[str],
 ) -> Iterator[tuple[sqlite3.Connection, Any]]:
-    with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed):
-        with _query_only_event_transaction(db_path, events_path) as transaction:
-            yield transaction
+    with BoundedSchemaProbe() as schema_probe:
+        with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed):
+            with _query_only_event_transaction(
+                db_path, events_path, schema_probe=schema_probe,
+            ) as transaction:
+                yield transaction
 
 
 @contextmanager
 def _query_only_event_transaction(
     db_path: str | os.PathLike[str],
     events_path: str | os.PathLike[str],
+    *, schema_probe: Callable[[str | os.PathLike[str]], int],
 ) -> Iterator[tuple[sqlite3.Connection, Any]]:
     """Yield one transaction and the locked, pre-existing event log.
 
@@ -1119,7 +1105,7 @@ def _query_only_event_transaction(
     # Refuse incompatible state before SQLite can create WAL/SHM sidecars or
     # recover a live journal.  Repeat under the event lock below to close the
     # probe-to-open race.
-    probed = read_db_schema_version(database)
+    probed = schema_probe(database)
     if probed != SCHEMA_VERSION:
         raise SchemaMismatch(
             actual=probed,
@@ -1167,7 +1153,7 @@ def _query_only_event_transaction(
                 _require_current_state_lock(db_path, contention_error_type=SchemaProbeFailed)
                 _require_current_file_handle(lock_fh, events_path)
                 _require_no_event_recovery(db_path)
-                confirmed = read_db_schema_version(database)
+                confirmed = schema_probe(database)
                 if confirmed != SCHEMA_VERSION:
                     raise SchemaMismatch(
                         actual=confirmed,
@@ -1363,8 +1349,21 @@ class SqliteBackend:
         self.validate_schema_compatibility(on_disk)
 
     def initialize(self) -> None:
-        """Serialize same-process probes without creating filesystem entries."""
-        schema_probe = self._schema_probe_fn or read_db_schema_version
+        """Reuse one bounded probe across this initialization's admission checks."""
+        with (
+            nullcontext(self._schema_probe_fn)
+            if self._schema_probe_fn is not None else BoundedSchemaProbe()
+        ) as owned_probe:
+            def schema_probe(path: str) -> int:
+                # Missing files have no raw descriptors to isolate. Preserve the
+                # caller-supplied probe contract used by CLI preflight.
+                if self._schema_probe_fn is None and not os.path.exists(path):
+                    return 0
+                return owned_probe(path)
+
+            self._initialize_with_probe(schema_probe)
+
+    def _initialize_with_probe(self, schema_probe: Callable[[str], int]) -> None:
         # If existing state has a database but no event log, establish
         # compatibility and require its authority before creating the token. The
         # authoritative probe is repeated under the token below.
@@ -1376,9 +1375,9 @@ class SqliteBackend:
             )
         with _schema_initialization_lock(self._db_path, self._events_path):
             _require_event_storage_fence(self._db_path, self._events_storage)
-            self._initialize_under_lock()
+            self._initialize_under_lock(schema_probe)
 
-    def _initialize_under_lock(self) -> None:
+    def _initialize_under_lock(self, schema_probe: Callable[[str], int]) -> None:
         """Open the SQLite connection, set PRAGMAs, apply DDL if needed.
 
         Idempotent — safe to call multiple times.  Raises SchemaMismatch if
@@ -1422,7 +1421,6 @@ class SqliteBackend:
         # outer OS lock is the linearization boundary shared by every Anvil
         # initializer; direct SQLite schema writes that bypass the state engine
         # are not a supported coordination path.
-        schema_probe = self._schema_probe_fn or read_db_schema_version
         probed_version = schema_probe(self._db_path)
         confirmed_version = schema_probe(self._db_path)
         if probed_version != confirmed_version:
@@ -4062,10 +4060,7 @@ class SqliteBackend:
     def get_latest_evidence(self, task_id: str) -> Evidence | None:
         """Return the most recently submitted Evidence for task_id, or None."""
         conn = self._require_conn()
-        try:
-            row = self._latest_evidence_row(conn, task_id)
-        except Exception:  # noqa: BLE001
-            return None
+        row = self._latest_evidence_row(conn, task_id)
         if row is None:
             return None
         return self._row_to_evidence(row)

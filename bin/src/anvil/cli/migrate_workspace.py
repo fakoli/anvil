@@ -31,6 +31,8 @@ import typer
 
 from anvil.cli._helpers import _canonical_project_root, _home_workspace_base
 from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.state.backend import SchemaProbeFailed
+from anvil.state.file_inspection import BoundedFileInspection
 
 __all__ = ["migrate_workspace"]
 
@@ -136,9 +138,10 @@ def migrate_workspace(
         target_base.mkdir(parents=True, exist_ok=True)
         if staging.exists():
             shutil.rmtree(staging)
-        shutil.copytree(legacy_src, staging)  # dirs_exist_ok=False — staging is fresh
+        with BoundedFileInspection() as inspection:
+            inspection.copy_tree(legacy_src, staging)
         os.replace(staging, target_anvil)  # atomic; target_anvil confirmed absent above
-    except OSError as exc:
+    except (OSError, SchemaProbeFailed) as exc:
         shutil.rmtree(staging, ignore_errors=True)  # never leave a partial staging dir
         if json_output:
             fail(_COMMAND, str(exc), code="migration_failed")

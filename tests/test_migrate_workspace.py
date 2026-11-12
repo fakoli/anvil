@@ -162,3 +162,62 @@ def test_finds_worktree_stranded_state(home: Path, tmp_path: Path) -> None:
     data = json.loads(r.stdout)["data"]
     assert data["status"] == "migrated"
     assert (Path(data["target"]) / "state.db").read_text() == "WT-STRANDED-DB"
+
+
+def test_workspace_copy_preserves_retained_sqlite_locks_and_later_commit(
+    home: Path, tmp_path: Path,
+) -> None:
+    import os
+
+    from tests.test_sqlite_file_safety import (
+        _SQLITE_OBSERVER,
+        _observe_in_child,
+        _require_retained_lock,
+        _retained_database,
+    )
+
+    repo = tmp_path / "retained-project"
+    state = repo / ".anvil"
+    state.mkdir(parents=True)
+    with _retained_database(state) as (database, _, retained):
+        result = _run(repo, "--yes")
+        assert result.exit_code == 0, result.output
+        target = Path(json.loads(result.stdout)["data"]["target"])
+        if os.name == "posix":
+            _require_retained_lock(database)
+        assert _observe_in_child(_SQLITE_OBSERVER, database)["rows"] == [["before-inspection"]]
+        retained.execute("INSERT INTO retained_owner_probe VALUES ('after-copy')")
+        retained.commit()
+        assert _observe_in_child(_SQLITE_OBSERVER, database)["rows"] == [
+            ["before-inspection"], ["after-copy"],
+        ]
+        assert _observe_in_child(_SQLITE_OBSERVER, target / "state.db")["rows"] == [
+            ["before-inspection"],
+        ]
+
+
+def test_workspace_partial_child_copy_failure_removes_staging(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anvil.state.backend import SchemaProbeFailed
+    from anvil.state.file_inspection import BoundedFileInspection
+    from tests.test_cli import _recursive_file_manifest
+
+    repo = tmp_path / "failed-copy"
+    repo.mkdir()
+    legacy = _legacy(repo)
+    before = _recursive_file_manifest(legacy)
+    destinations = []
+
+    def failed_copy(self, source, destination):
+        destination.mkdir()
+        (destination / "state.db").write_bytes(b"partial")
+        destinations.append(destination)
+        raise SchemaProbeFailed("injected isolated copy failure")
+
+    monkeypatch.setattr(BoundedFileInspection, "copy_tree", failed_copy)
+    result = _run(repo, "--yes")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]["code"] == "migration_failed"
+    assert destinations and all(not path.exists() for path in destinations)
+    assert _recursive_file_manifest(legacy) == before

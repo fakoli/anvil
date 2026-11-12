@@ -25,6 +25,11 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 - Force initialization refuses pending recovery and Git-backed State before
   deletion. Local resets share conversion custody through bootstrap and discard
   old SQLite journals with the replaced database.
+- Raw SQLite inspection, stable snapshots, live fsync and legacy workspace copies
+  run in bounded owned child processes so closing their file descriptors cannot
+  drop another connection's POSIX locks. Warm backups include committed WAL data
+  and capture the matching event log before releasing custody for upload.
+- Evidence queries propagate database failures instead of reporting absent proof.
 
 ### Qualification limits
 

@@ -398,17 +398,25 @@ def test_projection_repair_publishes_into_peer_opened_before_repair(
     )
 
     assert result.exit_code == 0, result.output
-    assert peer.execute("SELECT id FROM projects").fetchone() == ("proj-1",)
-    peer.execute("CREATE TABLE peer_repair_probe (id INTEGER)")
-    peer.commit()
-    peer.close()
-    fresh = sqlite3.connect(state_db)
     try:
-        assert fresh.execute(
-            "SELECT name FROM sqlite_master WHERE name = 'peer_repair_probe'"
-        ).fetchone() == ("peer_repair_probe",)
-    finally:
+        assert peer.execute("SELECT id FROM projects").fetchone() == ("proj-1",)
+        # An external connection close must not discard WAL/SHM while this
+        # preopened owner retains its locks and subsequently commits.
+        import subprocess
+        import sys
+
+        observer = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.close()"
+        subprocess.run([sys.executable, "-c", observer, str(state_db)], check=True, timeout=10)
+        peer.execute("CREATE TABLE peer_repair_probe (id INTEGER)")
+        peer.commit()
+        with sqlite3.connect(state_db) as fresh:
+            assert fresh.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'peer_repair_probe'"
+            ).fetchone() == ("peer_repair_probe",)
+            assert fresh.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         fresh.close()
+    finally:
+        peer.close()
 
 
 def test_projection_repair_keeps_final_verification_under_operation_lock(
@@ -519,7 +527,15 @@ def test_projection_repair_checkpoints_and_fsyncs_live_database_and_wal(
     connection.execute("CREATE TABLE probe (id INTEGER)")
     connection.commit()
     fsynced: list[Path] = []
-    monkeypatch.setattr(repair_module, "_fsync_file", fsynced.append)
+    from anvil.state.file_inspection import BoundedFileInspection
+
+    real_fsync = BoundedFileInspection.fsync_files
+
+    def observe_fsync(self, paths):
+        fsynced.extend(paths)
+        return real_fsync(self, paths)
+
+    monkeypatch.setattr(BoundedFileInspection, "fsync_files", observe_fsync)
     monkeypatch.setattr(repair_module, "_fsync_directory", lambda _: None)
 
     try:

@@ -7,6 +7,7 @@ to/from an S3 bucket. restore = download events.jsonl then replay.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING
 import typer
 
 from anvil.cli._helpers import _resolve_state_dir
-from anvil.state.sqlite import _require_no_event_recovery
+from anvil.state.sqlite import _require_no_event_recovery, _schema_initialization_lock
 
 if TYPE_CHECKING:
     from anvil.config import Config
@@ -37,11 +38,27 @@ def backup(
     config = _load_config_required(state_dir)
     store = _make_store(config)
     try:
-        events_uri = store.push(str(state_dir / "events.jsonl"), "events.jsonl")
-        typer.echo(f"Pushed events.jsonl → {events_uri}")
-        if include_db:
-            db_uri = store.push(str(state_dir / "state.db"), "state.db")
-            typer.echo(f"Pushed state.db    → {db_uri}")
+        if not (state_dir / "events.jsonl").is_file():
+            raise FileNotFoundError("Backup event log is unavailable.")
+        if include_db and not (state_dir / "state.db").is_file():
+            raise FileNotFoundError("Backup database is unavailable.")
+        with tempfile.TemporaryDirectory(prefix="anvil-durable-backup-") as temporary:
+            staged = Path(temporary)
+            # Capture the log and committed DB/WAL contents under the same
+            # native custody window. Upload only closed private files after
+            # releasing custody; remote latency must not block local writers.
+            with _schema_initialization_lock(state_dir / "state.db", state_dir / "events.jsonl"):
+                _require_no_event_recovery(state_dir / "state.db")
+                shutil.copyfile(state_dir / "events.jsonl", staged / "events.jsonl")
+                if include_db:
+                    from anvil.cli.migrate import _backup_database
+
+                    _backup_database(state_dir / "state.db", staged / "state.db")
+            events_uri = store.push(str(staged / "events.jsonl"), "events.jsonl")
+            typer.echo(f"Pushed events.jsonl → {events_uri}")
+            if include_db:
+                db_uri = store.push(str(staged / "state.db"), "state.db")
+                typer.echo(f"Pushed state.db    → {db_uri}")
     except S3Error as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from None
