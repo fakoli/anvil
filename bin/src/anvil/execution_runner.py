@@ -355,6 +355,30 @@ def check_integrated_source(
             )
 
 
+def verified_stopped_owner(receipt: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    """Join returned lifecycle facts to the exact registered disposable owner."""
+    states = [receipt.get(name) for name in ("sandbox_before", "sandbox_running", "sandbox_after")]
+    if any(type(value) is not dict for value in states):
+        raise ExecutionError("result_mismatch", "Missing returned owner identities")
+    before, running, after = states
+    main_instance = running.get("main_process_instance_id")
+    if (
+        any(value.get("id") != profile["sandbox_id"] for value in states)
+        or before.get("phase") != "Stopped"
+        or running.get("phase") != "Ready"
+        or after.get("phase") != "Stopped"
+        or type(main_instance) is not str
+        or not 1 <= len(main_instance) <= 256
+        or after.get("main_process_instance_id") != main_instance
+        or receipt.get("cleanup_complete") is not True
+        or receipt.get("protected_unchanged") is not True
+    ):
+        raise ExecutionError(
+            "result_mismatch", "Returned owner identities do not prove exact stopped custody"
+        )
+    return after
+
+
 def portable_adapter_result(
     adapter: Any,
     output: Path,
@@ -366,19 +390,7 @@ def portable_adapter_result(
     receipt = read_receipt(output / "receipt.json")
     configuration = receipt["worker"]["configuration"]
     profile = adapter.profile_settings(Path(registration.profile))
-    before, running, after = (
-        receipt[name] for name in ("sandbox_before", "sandbox_running", "sandbox_after")
-    )
-    if (
-        any(value.get("id") != profile["sandbox_id"] for value in (before, running, after))
-        or after.get("phase") != "Stopped"
-        or after.get("main_process_instance_id") != running.get("main_process_instance_id")
-        or receipt.get("cleanup_complete") is not True
-        or receipt.get("protected_unchanged") is not True
-    ):
-        raise ExecutionError(
-            "result_mismatch", "Returned owner identities do not prove exact stopped custody"
-        )
+    after = verified_stopped_owner(receipt, profile)
     actual = adapter.snapshot(output / "results")
     raw_digest = digest((output / "receipt.json").read_bytes())
     value = {
@@ -497,6 +509,7 @@ def execute_capability_refresh(directory: Path, request: dict[str, Any]) -> dict
                 )
         native_task = retained_adapter_task(output, receipt)
         profile = adapter.profile_settings(Path(registration.profile))
+        verified_stopped_owner(receipt, profile)
         expected = {
             "version": 2,
             "task_id": "capabilities",
@@ -641,13 +654,19 @@ def execute_run(directory: Path) -> dict[str, Any]:
         remote_verified = True
         receipt = read_receipt(output / "receipt.json")
         outcome["adapter_run_id"] = receipt["run_id"]
-        if isinstance(receipt["worker"].get("configuration"), dict):
+        # Selected options, protocol and stopped custody were verified above.
+        # Optional chooser metadata cannot strand that completed task delivery.
+        try:
             save_execution_capabilities(
                 directory.parents[1],
                 receipt["worker"]["configuration"],
                 registration,
                 digest((output / "receipt.json").read_bytes()),
             )
+        except (ExecutionError, OSError, ValueError):
+            outcome["capability_cache"] = "unavailable"
+        else:
+            outcome["capability_cache"] = "updated"
         if not changes:
             raise ExecutionError("no_changes", "Implementation returned no scoped source changes")
         live_claim(backend, request)

@@ -1051,7 +1051,12 @@ def save_execution_capabilities(
         raise ExecutionError("invalid_capabilities", "Invalid verified model catalog")
     sanitized = []
     for model in models:
-        selection = RunOptions(provider=model["provider"], model=model["id"])
+        try:
+            selection = RunOptions(provider=model["provider"], model=model["id"])
+        except ExecutionError:
+            # Pi's catalog permits identifiers beyond this portable contract.
+            # Unselected, unrepresentable choices are never offered by Anvil.
+            continue
         sanitized.append({"provider": selection.provider, "id": selection.model})
     selection = RunOptions(**{key: effective[key] for key in ("provider", "model", "thinking")})
     if (
@@ -1072,6 +1077,7 @@ def save_execution_capabilities(
         "profile_sha256": registration.hashes["profile"],
         "receipt_sha256": receipt_sha256,
         "models": sanitized,
+        "omitted_models": len(models) - len(sanitized),
         "effective": selection.data(),
         "thinking": {"provider": selection.provider, "model": selection.model, "levels": levels},
     }

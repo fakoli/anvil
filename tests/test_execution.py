@@ -57,6 +57,24 @@ def verify_return(results, task, files, run_id):
     assert worker['artifacts'] == {str(p.relative_to(results)):sha(p.read_bytes()) for p in results.rglob('*') if p.is_file() and p.name != 'worker-receipt.json'}
     return worker
 
+def owner_receipt(profile):
+    value={'sandbox_before':{'id':profile['sandbox_id'],'main_process_instance_id':'before','phase':'Stopped'},'sandbox_running':{'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Ready'},'sandbox_after':{'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Stopped'}}
+    case=profile.get('bad_owner')
+    if case=='missing': return {}
+    if case=='foreign': value['sandbox_after']['id']='foreign-sandbox'
+    if case=='active': value['sandbox_after']['phase']='Ready'
+    if case=='main_mismatch': value['sandbox_after']['main_process_instance_id']='foreign-main'
+    if case=='missing_main':
+        value['sandbox_running'].pop('main_process_instance_id'); value['sandbox_after'].pop('main_process_instance_id')
+    if case=='protected': value['protected_unchanged']=False
+    if case=='cleanup': value['cleanup_complete']=False
+    return value
+
+def configuration_for(profile):
+    catalog=[{'provider':'synthetic','id':'model'}]
+    if profile.get('mixed_catalog'): catalog += [{'provider':'synthetic','id':'m'*256},{'provider':'p'*129,'id':'other'}]
+    return {'available_models':catalog,'effective':{'provider':'synthetic','model':'m'*256 if profile.get('invalid_selected') else 'model','thinking':'low'},'supported_thinking_levels':['off','low']}
+
 def main():
     metadata = sys.argv[1] == 'capabilities'
     task = {'version':2,'task_id':'capabilities','kind':'validation','instructions':'metadata','writable_paths':[],'checks':[],'run_options':{}} if metadata else json.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -74,10 +92,11 @@ def main():
         raw = json.dumps(native).encode(); item=tarfile.TarInfo('task.json'); item.size=len(raw); archive.addfile(item,io.BytesIO(raw))
     results=output/'results'; results.mkdir()
     if metadata:
-        configuration={'available_models':[{'provider':'synthetic','id':'model'}],'effective':{'provider':'synthetic','model':'model','thinking':'low'},'supported_thinking_levels':['off','low'],'prompt_sent':False}
+        configuration={**configuration_for(profile),'prompt_sent':False}
         worker={'run_id':run_id,'task_id':'capabilities','configuration':configuration,'artifacts':{}}
         (results/'worker-receipt.json').write_text(json.dumps(worker))
         receipt={'version':2,'task_id':'capabilities','run_id':run_id,'input_sha256':sha((output/'inputs.tar').read_bytes()),'worker':worker,'capabilities_valid':True,'cleanup_complete':True,'protected_unchanged':True,'artifacts_verified':True,'acceptance':'not_granted','outcome':'capabilities'}
+        receipt.update(owner_receipt(profile))
         (output/'receipt.json').write_text(json.dumps(receipt)); return
     (results/'changed-files').mkdir()
     name=task['writable_paths'][0]; target=results/'changed-files'/name; target.parent.mkdir(parents=True,exist_ok=True)
@@ -85,12 +104,12 @@ def main():
     changes=[{'path':name,'before_sha256':sha(files[name]) if name in files else None,'after_sha256':sha(target.read_bytes())}]
     if profile.get('wrong_preimage'): changes[0]['before_sha256']='0'*64
     (results/'changes.json').write_text(json.dumps(changes))
-    configuration={'available_models':[{'provider':'synthetic','id':'model'}],'effective':{'provider':'synthetic','model':'model','thinking':'low'},'supported_thinking_levels':['off','low'],'session_file':None}
+    configuration={**configuration_for(profile),'session_file':None}
     (results/'rpc-configuration.json').write_text(json.dumps(configuration))
     worker={'run_id':run_id,'task_id':task['task_id'],'checks':[],'configuration':configuration,'artifacts':{str(p.relative_to(results)):sha(p.read_bytes()) for p in results.rglob('*') if p.is_file()}}
     (results/'worker-receipt.json').write_text(json.dumps(worker))
     receipt={'version':2,'task_id':task['task_id'],'run_id':run_id,'source':source,'input_sha256':sha((output/'inputs.tar').read_bytes()),'worker':worker,'delivery_valid':True,'cleanup_complete':True,'protected_unchanged':True,'artifacts_verified':True,'acceptance':'not_granted','outcome':'returned'}
-    receipt.update(sandbox_before={'id':profile['sandbox_id'],'main_process_instance_id':'before','phase':'Stopped'},sandbox_running={'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Ready'},sandbox_after={'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Stopped'})
+    receipt.update(owner_receipt(profile))
     (output/'receipt.json').write_text(json.dumps(receipt))
 if __name__ == '__main__': main()
 """

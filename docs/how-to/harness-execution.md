@@ -94,9 +94,13 @@ owner conflicts also remain guarded by the adapter. Inspect its run ID for the
 actual outcome. Default Run never depends on this metadata cache.
 
 A verified catalog is fresh for 300 seconds and pins the adapter/profile bytes.
-Only model IDs, the effective selection and supported thinking levels for that
-exact observed model are exposed. Stale or changed-profile entries do not provide
-active choices. Other models' thinking levels remain unknown until matching
+Only selectable model IDs, the effective selection and supported thinking levels
+for that exact observed model are exposed. The cache counts omitted catalog entries that
+exceed Anvil’s portable selection bounds. An unrelated omitted model or optional
+cache storage failure cannot block a valid task return; Run status reports an
+unavailable cache. Selected options remain strict. Metadata refresh verifies the
+exact registered sandbox and stopped main instance before publishing its cache.
+Stale or changed-profile entries do not provide active choices. Other models' thinking levels remain unknown until matching
 verified evidence exists; the current metadata command selects the actual idle
 model only. Model-specific metadata selection and saved-session Continue remain
 follow-up work, not implied capability of this initial slice.

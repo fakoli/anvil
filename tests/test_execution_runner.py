@@ -655,3 +655,125 @@ def test_forged_portable_return_is_refused_before_submission(execution_project, 
     assert finished["error_code"] == "result_mismatch", finished
     assert backend.get_latest_evidence(task.id) is None
     assert not (directory / "submission.json").exists()
+
+
+def _set_synthetic_profile(project, **settings):
+    import dataclasses
+
+    import yaml
+
+    from anvil.config import global_config_path
+    from anvil.execution import digest
+
+    registration = project[3]
+    profile = Path(registration.profile)
+    profile.write_text(json.dumps(settings))
+    owner = dataclasses.asdict(registration)
+    owner["registration"]["profile_sha256"] = digest(profile.read_bytes())
+    global_config_path().write_text(yaml.safe_dump({"execution_adapter": owner}))
+
+
+def test_default_run_ignores_unselectable_unrelated_catalog_entries(execution_project):
+    from anvil.execution import read_execution_capabilities
+
+    backend, repo, _, _ = execution_project
+    _set_synthetic_profile(execution_project, mixed_catalog=True)
+    preview = preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    admitted = confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    finished = _wait(directory)
+    assert finished["state"] == "needs_review", finished
+    assert (
+        backend.get_latest_evidence("release:T001").proofs[0].evidence_core.claim_id
+        == admitted["claim_id"]
+    )
+    assert Path(admitted["cwd"]).joinpath("README.md").read_bytes() == b"implemented\n"
+    capabilities = read_execution_capabilities(repo)
+    assert capabilities["models"] == [{"provider": "synthetic", "id": "model"}]
+    assert capabilities["omitted_models"] == 2
+    assert capabilities["effective"] == {
+        "provider": "synthetic",
+        "model": "model",
+        "thinking": "low",
+    }
+    assert len(list(journal_root(repo).glob("runs/*/adapter.started.json"))) == 1
+
+
+@pytest.mark.parametrize(
+    "bad_owner",
+    ["missing", "foreign", "active", "main_mismatch", "missing_main", "protected", "cleanup"],
+)
+def test_metadata_requires_exact_stopped_owner_before_cache(execution_project, bad_owner):
+    from anvil.execution import read_execution_capabilities, refresh_execution_capabilities
+
+    backend, repo, state, _ = execution_project
+    _set_synthetic_profile(execution_project, bad_owner=bad_owner)
+    events = (state / "events.jsonl").read_bytes()
+    dispatched = refresh_execution_capabilities(repo)
+    directory = journal_root(repo) / "runs" / dispatched["run_id"]
+    finished = _wait(directory)
+    assert finished["state"] == "reconciliation_required", finished
+    assert finished["local_children_stopped"] is False
+    assert read_execution_capabilities(repo)["status"] == "unknown"
+    assert not (journal_root(repo) / "capabilities" / "current.json").exists()
+    assert (directory / "adapter" / "receipt.json").exists()
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == events
+
+
+def test_default_run_survives_optional_cache_storage_failure(execution_project):
+    backend, repo, _, _ = execution_project
+    preview = preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    cache = journal_root(repo) / "capabilities"
+    cache.write_bytes(b"synthetic storage obstruction")
+    admitted = confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    finished = _wait(directory)
+    assert finished["state"] == "needs_review", finished
+    assert finished["capability_cache"] == "unavailable"
+    assert cache.read_bytes() == b"synthetic storage obstruction"
+    assert (
+        backend.get_latest_evidence("release:T001").proofs[0].evidence_core.claim_id
+        == admitted["claim_id"]
+    )
+
+
+def test_metadata_projects_only_selectable_models(execution_project):
+    from anvil.execution import read_execution_capabilities, refresh_execution_capabilities
+
+    _, repo, _, _ = execution_project
+    _set_synthetic_profile(execution_project, mixed_catalog=True)
+    dispatched = refresh_execution_capabilities(repo)
+    finished = _wait(journal_root(repo) / "runs" / dispatched["run_id"])
+    assert finished["state"] == "capabilities_ready", finished
+    capabilities = read_execution_capabilities(repo)
+    assert capabilities["models"] == [{"provider": "synthetic", "id": "model"}]
+    assert capabilities["omitted_models"] == 2
+
+
+def test_run_rejects_unrepresentable_selected_model_before_integration(execution_project):
+    backend, repo, _, _ = execution_project
+    _set_synthetic_profile(execution_project, invalid_selected=True)
+    preview = preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    admitted = confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    finished = _wait(directory)
+    assert finished["state"] == "reconciliation_required", finished
+    assert finished["error_code"] in {"invalid_contract", "unsupported_options"}
+    assert not (directory / "integration.json").exists()
+    assert backend.get_latest_evidence("release:T001") is None
+    assert Path(admitted["cwd"]).joinpath("README.md").read_bytes() == b"initial\n"
+
+
+@pytest.mark.parametrize("bad_owner", ["missing", "main_mismatch"])
+def test_run_requires_exact_stopped_owner_before_integration(execution_project, bad_owner):
+    backend, repo, _, _ = execution_project
+    _set_synthetic_profile(execution_project, bad_owner=bad_owner)
+    preview = preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    admitted = confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    finished = _wait(directory)
+    assert finished["state"] == "reconciliation_required", finished
+    assert finished["error_code"] == "result_mismatch"
+    assert not (directory / "integration.json").exists()
+    assert backend.get_latest_evidence("release:T001") is None
