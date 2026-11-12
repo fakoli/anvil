@@ -271,7 +271,7 @@ def test_final_approval_wait_preserves_exact_attempt(
     assert payload["decision"] == "accepted"
     assert payload["review_attempt_id"] == payload["expected_evidence_id"] == saved_evidence[target.id].id
     assert payload["bundle_review_guard_version"] == 1
-    assert payload["expected_task_updated_at"] == saved_updated_at
+    assert datetime.fromisoformat(payload["expected_task_updated_at"]) == target.updated_at
     assert backend.get_task(target.id).status.value == "done"
     assert all(backend.get_task(task_id).status.value == "needs_review"
                for task_id in ("release:T002", "release:T003"))
