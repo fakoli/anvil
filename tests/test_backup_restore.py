@@ -279,3 +279,208 @@ def test_warm_backup_uploads_closed_wal_snapshot_and_matching_log_after_custody(
             _require_retained_lock(database)
     assert len(uploaded_paths) == 2
     assert all(not path.exists() for path in uploaded_paths)
+
+
+def _restore_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import importlib
+
+    from tests.test_git_events import _build_local_project
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    with (state / "config.yaml").open("a") as stream:
+        stream.write("durable_store: s3\ns3_bucket: test-bucket\n")
+    module = importlib.import_module("anvil.cli.backup")
+    store = FakeDurableStore()
+    monkeypatch.setattr(module, "_make_store", lambda _: store)
+    return state, module, store
+
+
+@pytest.mark.parametrize("storage", ["local", "git"])
+def test_restore_preserves_live_inode_and_retained_native_connection(
+    tmp_path, monkeypatch, storage,
+):
+    import sqlite3
+
+    from anvil.state import sqlite as sqlite_module
+    from tests.test_event_format_migration_safety import _append_native_sync_metadata
+    from tests.test_git_events import _run_in
+
+    if storage == "git" and os.name == "nt":
+        pytest.skip("Windows conversion is intentionally refused")
+    state, module, store = _restore_fixture(tmp_path, monkeypatch)
+    if storage == "git":
+        converted = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
+        assert converted.exit_code == 0, converted.output
+    store.push(str(state / "events.jsonl"), "events.jsonl")
+    original_inode = (state / "state.db").stat().st_ino
+    retained = SqliteBackend(
+        db_path=str(state / "state.db"), events_path=str(state / "events.jsonl"),
+        clock=FrozenClock(_T0), events_storage=storage,
+    )
+    retained.initialize()
+    original_pull = store.pull
+
+    def pull_outside_custody(key, destination):
+        assert not getattr(sqlite_module._STATE_OPERATION_LOCAL, "owned", {})
+        assert not getattr(sqlite_module._SCHEMA_INITIALIZATION_LOCAL, "stack", [])
+        original_pull(key, destination)
+
+    monkeypatch.setattr(store, "pull", pull_outside_custody)
+    try:
+        restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+        assert restored.exit_code == 0, (restored.output, restored.exception)
+        assert (state / "state.db").stat().st_ino == original_inode
+        _append_native_sync_metadata(retained, {"after_restore": True})
+        with sqlite3.connect(state / "state.db") as fresh:
+            assert fresh.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
+        assert len((state / "events.jsonl").read_text().splitlines()) == 25
+    finally:
+        retained.close()
+
+
+@pytest.mark.parametrize("marker", [".event-format-migration.json", ".local-event-recovery.json"])
+def test_restore_refuses_pending_recovery_before_download(tmp_path, monkeypatch, marker):
+    from tests.test_cli import _recursive_file_manifest
+
+    state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    (state / marker).write_text("pending recovery")
+    before = _recursive_file_manifest(state)
+    monkeypatch.setattr(store, "pull", lambda *_: pytest.fail("download entered pending State"))
+    restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+    assert restored.exit_code != 0
+    assert _recursive_file_manifest(state) == before
+    assert not (state / ".state-operation.lock").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX conversion; Windows apply refuses")
+@pytest.mark.parametrize("phase", ["after_marker", "after_database", "complete"])
+def test_restore_refuses_conversion_during_download_and_preserves_recovery(
+    tmp_path, monkeypatch, phase,
+):
+    import anvil.cli.migrate as migration
+    from tests.test_cli import _recursive_file_manifest
+    from tests.test_git_events import _run_in
+
+    state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    original_log = (state / "events.jsonl").read_bytes()
+    observed = {}
+
+    def interrupt(selected):
+        if selected == phase:
+            raise RuntimeError("ordinary publication fault fixture")
+
+    def pull_while_conversion_runs(key, destination):
+        assert key == "events.jsonl"
+        monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", interrupt)
+        converted = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
+        assert converted.exit_code == (0 if phase == "complete" else 1), converted.output
+        monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
+        observed["before_restore_publication"] = _recursive_file_manifest(state)
+        observed["inode"] = (state / "state.db").stat().st_ino
+        Path(destination).write_bytes(original_log)
+
+    monkeypatch.setattr(store, "pull", pull_while_conversion_runs)
+    restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+    assert restored.exit_code != 0
+    assert _recursive_file_manifest(state) == observed["before_restore_publication"]
+    assert (state / "state.db").stat().st_ino == observed["inode"]
+    if phase != "complete":
+        resumed = _run_in(tmp_path, ["migrate-events", "--to", "git", "--resume", "--yes"])
+        assert resumed.exit_code == 0, resumed.output
+    assert not (state / ".event-format-migration.json").exists()
+
+
+def test_restore_waits_for_permanent_custody_before_publication(tmp_path, monkeypatch):
+    import threading
+
+    from anvil.state import sqlite as sqlite_module
+    from tests.test_cli import _recursive_file_manifest
+
+    state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    store.push(str(state / "events.jsonl"), "events.jsonl")
+    ready, release = threading.Event(), threading.Event()
+    failures = []
+
+    def own_token():
+        try:
+            with sqlite_module._state_operation_lock(state / "state.db", create=True):
+                ready.set()
+                assert release.wait(10)
+        except BaseException as exc:
+            failures.append(exc)
+
+    holder = threading.Thread(target=own_token)
+    holder.start()
+    try:
+        assert ready.wait(5)
+        before = _recursive_file_manifest(state)
+        inode = (state / "state.db").stat().st_ino
+        monkeypatch.setattr(sqlite_module, "_FLOCK_TIMEOUT_S", 0.05)
+        restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+        assert restored.exit_code != 0
+        assert _recursive_file_manifest(state) == before
+        assert (state / "state.db").stat().st_ino == inode
+    finally:
+        release.set()
+        holder.join(timeout=5)
+    assert not holder.is_alive() and failures == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="forked legacy-waiter process fixture")
+def test_restore_fences_a_waiter_that_opened_the_previous_log(tmp_path, monkeypatch):
+    import multiprocessing
+
+    from anvil.state import sqlite as sqlite_module
+    state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    store.push(str(state / "events.jsonl"), "events.jsonl")
+    process_context = multiprocessing.get_context("fork")
+    observer, worker = process_context.Pipe()
+
+    def wait_on_previous_log():
+        original_acquire = sqlite_module._append_lock_acquire_nb
+
+        def delay_old_waiter(handle):
+            worker.send("opened")
+            assert worker.poll(10) and worker.recv() == "resume"
+            return original_acquire(handle)
+
+        sqlite_module._append_lock_acquire_nb = delay_old_waiter
+        try:
+            with sqlite_module._schema_initialization_lock(
+                str(state / "state.db"), str(state / "events.jsonl"),
+            ):
+                worker.send("entered")
+        except BaseException as exc:
+            worker.send(type(exc).__name__)
+        finally:
+            worker.close()
+
+    waiter = process_context.Process(target=wait_on_previous_log)
+    waiter.start()
+    try:
+        assert observer.poll(5) and observer.recv() == "opened"
+        restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+        assert restored.exit_code == 0, (restored.output, restored.exception)
+        observer.send("resume")
+        assert observer.poll(5) and observer.recv() == "SchemaProbeFailed"
+        waiter.join(timeout=5)
+        assert not waiter.is_alive() and waiter.exitcode == 0
+    finally:
+        if waiter.is_alive():
+            waiter.terminate()
+            waiter.join(timeout=5)
+        observer.close()
+        worker.close()
+
+
+def test_restore_can_recreate_an_absent_projection(tmp_path, monkeypatch):
+    import sqlite3
+
+    state, _, store = _restore_fixture(tmp_path, monkeypatch)
+    store.push(str(state / "events.jsonl"), "events.jsonl")
+    (state / "state.db").unlink()
+    restored = runner.invoke(app, ["restore", "--yes", "--cwd", str(tmp_path)])
+    assert restored.exit_code == 0, (restored.output, restored.exception)
+    with sqlite3.connect(state / "state.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
