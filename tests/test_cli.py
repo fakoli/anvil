@@ -1804,6 +1804,32 @@ def _invoke_cmd(tmp_path: Path, cmd: list[str]):  # type: ignore[no-untyped-def]
     return result
 
 
+def _select_project_storage_for_test(
+    project: Path, monkeypatch: pytest.MonkeyPatch, storage: str,
+) -> None:
+    """Select native project storage before claiming; global mode disagrees."""
+    import yaml
+
+    config_path = project / ".anvil" / "config.yaml"
+    if storage == "git":
+        if os.name == "nt":
+            pytest.skip("Native event conversion is qualified on POSIX only")
+        converted = _invoke_cmd(project, ["migrate-events", "--to", "git", "--yes"])
+        assert converted.exit_code == 0, converted.output
+        assert (project / ".anvil" / ".state-operation.lock").read_bytes() == b"git\n"
+    elif storage == "default":
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config.pop("events_storage", None)
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    global_config = project.parent / "opposite-global-config.yaml"
+    global_config.write_text(
+        "events_storage: " + ("local" if storage == "git" else "git") + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_config))
+
+
 # ---------------------------------------------------------------------------
 # prd parse command
 # ---------------------------------------------------------------------------
@@ -6028,7 +6054,10 @@ class TestReplanPreservesTaskStatus:
 # ---------------------------------------------------------------------------
 
 
-def _do_init_and_plan(tmp_path: Path, *, with_git: bool = True) -> Path:
+def _do_init_and_plan(
+    tmp_path: Path, *, with_git: bool = True, storage: str | None = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+) -> Path:
     """Full setup: optionally git-init, then anvil init + PRD + plan + review_tasks.
 
     Returns tmp_path ready for claim-related tests.
@@ -6053,6 +6082,9 @@ def _do_init_and_plan(tmp_path: Path, *, with_git: bool = True) -> Path:
         )
 
     _do_init(tmp_path, name="Phase4 Test Project")
+    if storage is not None:
+        assert monkeypatch is not None
+        _select_project_storage_for_test(tmp_path, monkeypatch, storage)
     _write_prd(tmp_path, _FULL_PRD_CONTENT)
     _invoke_cmd(tmp_path, ["prd", "parse"])
     _invoke_cmd(tmp_path, ["prd", "review"])
@@ -7126,6 +7158,96 @@ class TestHookSubcommands:
         content = events_path.read_text(encoding="utf-8")
         assert "file_changed" in content or "src/app.py" in content
 
+    @pytest.mark.parametrize("storage", ["local", "default", "git"])
+    def test_file_change_uses_project_storage_and_replays(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, storage: str,
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+        from anvil.clock import SystemClock
+        from anvil.state.models import Event
+        from anvil.state.snapshot import serialize_state
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _select_project_storage_for_test(tmp_path, monkeypatch, storage)
+        state = tmp_path / ".anvil"
+        log = state / "events.jsonl"
+        before = log.read_bytes()
+        result = _invoke_cmd(tmp_path, [
+            "hook", "record-file-change", "--file", "src/app.py",
+            "--tool", "Edit", "--actor", "editing-agent",
+        ])
+        assert result.exit_code == 0, result.output
+        after = log.read_bytes()
+        assert after.startswith(before)
+        appended = after[len(before):].splitlines()
+        assert len(appended) == 1
+        event = Event.model_validate_json(appended[0])
+        assert event.action == "file_changed"
+        assert event.actor == "editing-agent"
+        assert event.payload_json["file"] == "src/app.py"
+        assert event.payload_json["tool"] == "Edit"
+        assert event.id.startswith("E-") == (storage == "git")
+
+        backend = _open_backend(state)
+        try:
+            expected = serialize_state(backend)
+            assert backend.latest_event_payload(event.target_id, "file_changed")[0] == (
+                event.payload_json
+            )
+        finally:
+            backend.close()
+        replayed = _invoke_cmd(tmp_path, [
+            "replay", "--from-events", str(log), "--into", str(tmp_path / "replay.db"),
+        ])
+        assert replayed.exit_code == 0, replayed.output
+        (tmp_path / "scratch.jsonl").write_bytes(after)
+        scratch = SqliteBackend(
+            db_path=str(tmp_path / "replay.db"),
+            events_path=str(tmp_path / "scratch.jsonl"), clock=SystemClock(),
+            events_storage="git" if storage == "git" else "local",
+        )
+        try:
+            scratch.initialize()
+            assert serialize_state(scratch) == expected
+        finally:
+            scratch.close()
+        assert log.read_bytes() == after
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX event conversion")
+    @pytest.mark.parametrize("blocked_state", ["pending", "wrong-mode"])
+    def test_file_change_does_not_bypass_format_recovery_guards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_state: str,
+    ) -> None:
+        import yaml
+
+        import anvil.cli.migrate as migration
+
+        _do_init(tmp_path)
+        state = tmp_path / ".anvil"
+        if blocked_state == "pending":
+            def interrupt(phase: str) -> None:
+                if phase == "after_events.jsonl":
+                    raise RuntimeError("injected publication interruption")
+
+            monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", interrupt)
+            result = _invoke_cmd(tmp_path, ["migrate-events", "--to", "git", "--yes"])
+            assert result.exit_code == 1, result.output
+            assert (state / ".event-format-migration.json").is_file()
+        else:
+            _select_project_storage_for_test(tmp_path, monkeypatch, "git")
+            config_path = state / "config.yaml"
+            config = yaml.safe_load(config_path.read_text())
+            config["events_storage"] = "local"
+            config_path.write_text(yaml.safe_dump(config))
+        before = (state / "events.jsonl").read_bytes()
+        result = _invoke_cmd(tmp_path, [
+            "hook", "record-file-change", "--file", "src/app.py",
+            "--tool", "Edit", "--actor", "editing-agent",
+        ])
+        assert result.exit_code == 0
+        assert (state / "events.jsonl").read_bytes() == before
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — end-to-end claim + release cycle
@@ -7938,6 +8060,76 @@ class TestHookCaptureEvidence:
 
 
 class TestCaptureEvidenceByClaim:
+    @pytest.mark.parametrize("storage", ["local", "default", "git"])
+    def test_project_storage_preserves_claim_hooks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, storage: str,
+    ) -> None:
+        from anvil.state.models import HookCommandAttribution, hook_command_semantic_digest
+
+        _do_init_and_plan(tmp_path, with_git=True, storage=storage, monkeypatch=monkeypatch)
+        monkeypatch.setenv("ANVIL_SESSION_ID", "session-owner")
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        result = _invoke_cmd(tmp_path, ["claim", task_id, "--actor", "actor-a", "--json"])
+        assert result.exit_code == 0, result.output
+        claim = json.loads(result.stdout)["data"]["claim"]
+        claimed_file = claim["expected_files"][0]
+        log = tmp_path / ".anvil" / "events.jsonl"
+        before = log.read_bytes()
+
+        warning = _invoke_cmd(tmp_path, [
+            "hook", "check-claim", "--file", claimed_file, "--actor", "actor-b",
+        ])
+        assert warning.exit_code == 0
+        assert "WARNING" in warning.stderr
+        assert claim["id"] in warning.stderr
+        assert "actor-a" in warning.stderr
+        owner = _invoke_cmd(tmp_path, [
+            "hook", "check-claim", "--file", claimed_file, "--actor", "actor-a",
+        ])
+        assert owner.exit_code == 0 and not owner.output
+
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim["id"])
+        capture = _invoke_cmd(tmp_path, [
+            "hook", "capture-evidence", "--command", "pytest -q",
+            "--exit-code", "19", "--actor", "actor-a",
+        ])
+        assert capture.exit_code == 0, capture.output
+        buffer = self._buffer_dir(tmp_path) / f"{claim['id']}.json"
+        record = json.loads(buffer.read_text().splitlines()[0])
+        attribution = HookCommandAttribution.model_validate(record["attribution"])
+        assert attribution.claim_id == claim["id"]
+        assert attribution.generation == claim["generation"]
+        assert attribution.claimed_by == "actor-a"
+        assert attribution.task_id == task_id
+        assert attribution.task_revision == claim["attestation_context"]["task_revision"]
+        assert record["exit_code"] == 19
+        assert record["semantic_digest"] == hook_command_semantic_digest(
+            attribution=attribution, command=record["command"],
+            exit_code=record["exit_code"], output_sha256=record["output_sha256"],
+            captured_at=datetime.fromisoformat(record["timestamp"]),
+        )
+        captured_bytes = buffer.read_bytes()
+
+        for actor, pin, session in [
+            ("actor-b", claim["id"], "session-owner"),
+            ("actor-a", "C-stale", "session-owner"),
+            ("actor-a", claim["id"], "session-sibling"),
+        ]:
+            monkeypatch.setenv("ANVIL_CLAIM_ID", pin)
+            monkeypatch.setenv("ANVIL_SESSION_ID", session)
+            orphan = _invoke_cmd(tmp_path, [
+                "hook", "capture-evidence", "--command", "pytest -q",
+                "--exit-code", "0", "--actor", actor,
+            ])
+            assert orphan.exit_code == 0
+        orphans = (self._buffer_dir(tmp_path) / "orphan.json").read_text().splitlines()
+        assert len(orphans) == 3
+        assert all("attribution" not in json.loads(line) for line in orphans)
+        assert buffer.read_bytes() == captured_bytes
+        assert log.read_bytes() == before
+        assert _get_task_status(tmp_path, task_id) == "claimed"
+
     def _init_and_claim(self, tmp_path: Path, actor: str) -> str:
         """Full setup through a claim held by `actor`; returns the task id."""
         _do_init_and_plan(tmp_path, with_git=True)

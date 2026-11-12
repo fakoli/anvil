@@ -10761,6 +10761,27 @@ class SqliteBackend:
                 return False
         return True
 
+    @staticmethod
+    def _active_claims_for_bundle_conflict_check(
+        conn: sqlite3.Connection,
+        member_ids: list[str],
+        expected_files: list[str],
+        bundle_groups: set[str],
+    ) -> list[sqlite3.Row]:
+        query = (
+            "SELECT c.id, c.task_id, c.expected_files, t.conflict_groups "
+            "FROM claims c JOIN tasks t ON t.id = c.task_id "
+            "WHERE c.status = 'active'"
+        )
+        parameters: tuple[str, ...] = ()
+        if not expected_files and not bundle_groups:
+            # Empty file/group unions can only conflict on member identity.
+            # The existing (task_id, status) index avoids unrelated claims.
+            placeholders = ",".join("?" for _ in member_ids)
+            query += f" AND c.task_id IN ({placeholders})"
+            parameters = tuple(member_ids)
+        return conn.execute(query + " ORDER BY c.id", parameters).fetchall()
+
     def _check_bundle_claimed(
         self,
         conn: sqlite3.Connection,
@@ -10932,11 +10953,9 @@ class SqliteBackend:
                         f"bundle.claimed: external dependencies are not done: {blocked}."
                     )
 
-            active_rows = conn.execute(
-                "SELECT c.id, c.task_id, c.expected_files, t.conflict_groups "
-                "FROM claims c JOIN tasks t ON t.id = c.task_id "
-                "WHERE c.status = 'active' ORDER BY c.id"
-            ).fetchall()
+            active_rows = self._active_claims_for_bundle_conflict_check(
+                conn, member_ids, expected_files, bundle_groups,
+            )
             conflicts: list[str] = []
             expected_set = canonical_claim_file_scope(expected_files)
             for active in active_rows:
@@ -11067,17 +11086,15 @@ class SqliteBackend:
                 return
         try:
             expected_set = canonical_claim_file_scope(expected_files)
-            for active in conn.execute(
-                "SELECT c.task_id, c.expected_files, t.conflict_groups "
-                "FROM claims c JOIN tasks t ON t.id = c.task_id "
-                "WHERE c.status = 'active' ORDER BY c.id"
-            ).fetchall():
+            for active in self._active_claims_for_bundle_conflict_check(
+                conn, member_ids, expected_files, bundle_groups,
+            ):
                 if (
-                    active[0] in member_set
+                    active[1] in member_set
                     or (expected_set and expected_set.intersection(
-                        canonical_claim_file_scope(json.loads(active[1] or "[]"))
+                        canonical_claim_file_scope(json.loads(active[2] or "[]"))
                     ))
-                    or bundle_groups.intersection(json.loads(active[2] or "[]"))
+                    or bundle_groups.intersection(json.loads(active[3] or "[]"))
                 ):
                     return
         except BundlePlanningError:
