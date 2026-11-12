@@ -54,11 +54,7 @@ def _convert(root: Path, *, resume: bool = False):
 
 
 def _files(state: Path) -> dict[str, bytes]:
-    return {
-        str(p.relative_to(state)): p.read_bytes()
-        for p in state.rglob("*")
-        if p.is_file()
-    }
+    return {str(p.relative_to(state)): p.read_bytes() for p in state.rglob("*") if p.is_file()}
 
 
 def test_retained_local_backend_refuses_and_fresh_git_backend_can_append(tmp_path):
@@ -72,9 +68,7 @@ def test_retained_local_backend_refuses_and_fresh_git_backend_can_append(tmp_pat
         assert (state / "state.db").stat().st_ino == database_identity
         before = (state / "events.jsonl").read_bytes()
         with pytest.raises(SchemaProbeFailed, match="event format changed"):
-            retained.append(
-                _draft("task.status_changed", {"status": "blocked"}, target_id="T001")
-            )
+            retained.append(_draft("task.status_changed", {"status": "blocked"}, target_id="T001"))
         assert (state / "events.jsonl").read_bytes() == before
         with pytest.raises(SchemaProbeFailed, match="event format changed"):
             retained.initialize()
@@ -118,9 +112,7 @@ def test_retained_local_backend_refuses_and_fresh_git_backend_can_append(tmp_pat
         "after_fence",
     ],
 )
-def test_interrupted_publication_fences_clients_then_resumes(
-    tmp_path, monkeypatch, phase
-):
+def test_interrupted_publication_fences_clients_then_resumes(tmp_path, monkeypatch, phase):
     import anvil.cli.migrate as migration
 
     _build_local_project(tmp_path)
@@ -171,9 +163,7 @@ def test_interrupted_publication_fences_clients_then_resumes(
         "missing_token",
     ],
 )
-def test_resume_refuses_changed_authority_and_retains_evidence(
-    tmp_path, monkeypatch, changed
-):
+def test_resume_refuses_changed_authority_and_retains_evidence(tmp_path, monkeypatch, changed):
     import anvil.cli.migrate as migration
 
     _build_local_project(tmp_path)
@@ -194,9 +184,7 @@ def test_resume_refuses_changed_authority_and_retains_evidence(
     elif changed == "missing_token":
         (state / ".state-operation.lock").unlink()
     elif changed in {"db_inode", "token_inode"}:
-        path = state / (
-            "state.db" if changed == "db_inode" else ".state-operation.lock"
-        )
+        path = state / ("state.db" if changed == "db_inode" else ".state-operation.lock")
         replacement = state / "replacement"
         shutil.copyfile(path, replacement)
         os.replace(replacement, path)
@@ -223,7 +211,11 @@ def test_bundle_custody_on_either_side_of_crash_refuses(
     from anvil.roots.registry import RootSetRegistry
     from tests.test_bundle_state import (
         _T0 as bundle_time,
+    )
+    from tests.test_bundle_state import (
         _backend as bundle_backend,
+    )
+    from tests.test_bundle_state import (
         _create_bundle,
         _seed,
     )
@@ -431,12 +423,8 @@ finally:
             process.communicate(timeout=5)
 
 
-@pytest.mark.parametrize(
-    "malformed", ["missing_digest", "wrong_identity", "unsafe_path"]
-)
-def test_malformed_recovery_marker_refuses_before_writing(
-    tmp_path, monkeypatch, malformed
-):
+@pytest.mark.parametrize("malformed", ["missing_digest", "wrong_identity", "unsafe_path"])
+def test_malformed_recovery_marker_refuses_before_writing(tmp_path, monkeypatch, malformed):
     import anvil.cli.migrate as migration
 
     _build_local_project(tmp_path)
@@ -481,9 +469,7 @@ def test_bundle_only_custody_refuses_even_without_active_child_rows(tmp_path):
     assert not (state / ".event-format-migration.json").exists()
 
 
-@pytest.mark.parametrize(
-    "unsafe", ["state_directory", "config", "events", "database", "sidecar"]
-)
+@pytest.mark.parametrize("unsafe", ["state_directory", "config", "events", "database", "sidecar"])
 def test_unsafe_conversion_paths_refuse_before_coordination_creation(tmp_path, unsafe):
     _build_local_project(tmp_path)
     state = tmp_path / ".anvil"
@@ -513,14 +499,11 @@ def test_unsafe_conversion_paths_refuse_before_coordination_creation(tmp_path, u
     assert not (target / ".state-operation.lock").exists()
 
 
-@pytest.mark.skipif(
-    os.name == "nt", reason="POSIX file mode privacy; Windows uses owner ACLs"
-)
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file mode privacy; Windows uses owner ACLs")
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_conversion_and_resume_do_not_widen_private_file_modes(
-    tmp_path, monkeypatch, interrupted
-):
+def test_conversion_and_resume_do_not_widen_private_file_modes(tmp_path, monkeypatch, interrupted):
     import stat
+
     import anvil.cli.migrate as migration
 
     _build_local_project(tmp_path)
@@ -537,10 +520,7 @@ def test_conversion_and_resume_do_not_widen_private_file_modes(
 
             monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", interrupt)
             assert _convert(tmp_path).exit_code == 1
-            assert (
-                stat.S_IMODE((state / ".event-format-migration.json").stat().st_mode)
-                == 0o600
-            )
+            assert stat.S_IMODE((state / ".event-format-migration.json").stat().st_mode) == 0o600
             monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
         result = _convert(tmp_path, resume=interrupted)
         assert result.exit_code == 0, result.output
@@ -585,9 +565,7 @@ def test_windows_conversion_refuses_before_state_access_or_artifact_creation(
     assert _files(state) == before
 
 
-def test_windows_guard_preserves_dry_run_and_schema_only_commands(
-    tmp_path, monkeypatch
-):
+def test_windows_guard_preserves_dry_run_and_schema_only_commands(tmp_path, monkeypatch):
     import anvil.cli.migrate as migration
 
     _build_local_project(tmp_path)
@@ -601,3 +579,53 @@ def test_windows_guard_preserves_dry_run_and_schema_only_commands(
     schema = _run_in(tmp_path, ["migrate", "state", "--yes", "--json"])
     assert schema.exit_code == 0, schema.output
     assert _files(state) == before
+
+
+def test_projection_repair_after_conversion_reuses_same_state_token(tmp_path):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    converted = _convert(tmp_path)
+    assert converted.exit_code == 0, converted.output
+    before_log = (state / "events.jsonl").read_bytes()
+    token_identity = (state / ".state-operation.lock").stat().st_ino
+    database_identity = (state / "state.db").stat().st_ino
+    repaired = _run_in(tmp_path, ["repair", "projection", "--yes"])
+    assert repaired.exit_code == 0, repaired.output
+    assert (state / "events.jsonl").read_bytes() == before_log
+    assert (state / "state.db").stat().st_ino == database_identity
+    assert (state / ".state-operation.lock").stat().st_ino == token_identity
+    reopened = _backend(state, "git")
+    reopened.close()
+
+
+def test_scratch_placeholder_replay_is_supported_after_conversion(tmp_path):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    assert _convert(tmp_path).exit_code == 0
+    destination = tmp_path / "existing-scratch.db"
+    destination.write_bytes(b"replaceable scratch placeholder")
+    result = _run_in(
+        tmp_path,
+        ["replay", "--from-events", str(state / "events.jsonl"), "--into", str(destination)],
+    )
+    assert result.exit_code == 0, result.output
+    with closing(sqlite3.connect(destination)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
+
+
+def test_nested_legacy_writer_refuses_token_appearance_without_lock_inversion(tmp_path):
+    from anvil.state.backend import StateLocked
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    backend = _backend(state)
+    try:
+        with backend.claim_operation_lock():
+            # A converter can introduce its stable token while waiting for this
+            # old event lock. Nested work must refuse, never invert lock order.
+            (state / ".state-operation.lock").touch()
+            with pytest.raises(StateLocked, match="coordination changed"):
+                with backend.claim_operation_lock():
+                    pytest.fail("nested legacy writer bypassed stable admission")
+    finally:
+        backend.close()

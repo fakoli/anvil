@@ -503,6 +503,12 @@ _STATE_OPERATION_TOKEN = ".state-operation.lock"
 _EVENT_FORMAT_MIGRATION_MARKER = ".event-format-migration.json"
 
 
+def _state_operation_key(db_path: str | os.PathLike[str]) -> str:
+    # Native projection repair stages a second database in the same State
+    # directory. Both destinations must reuse ownership of the same token.
+    return os.path.normcase(os.path.realpath(Path(db_path).parent / _STATE_OPERATION_TOKEN))
+
+
 @contextmanager
 def _state_operation_lock(
     db_path: str | os.PathLike[str],
@@ -518,18 +524,31 @@ def _state_operation_lock(
     its event lock, so it cannot enter between admission and publication.
     Thread-local reuse supports native replay without serializing other States.
     """
-    canonical = os.path.normcase(os.path.realpath(db_path))
+    canonical = _state_operation_key(db_path)
     owned: dict[str, Any] = getattr(_STATE_OPERATION_LOCAL, "owned", {})
     _STATE_OPERATION_LOCAL.owned = owned
     if canonical in owned:
         yield owned[canonical]
         return
     token = Path(db_path).parent / _STATE_OPERATION_TOKEN
+    legacy: dict[str, int] = getattr(_STATE_OPERATION_LOCAL, "legacy", {})
+    _STATE_OPERATION_LOCAL.legacy = legacy
     if not create and not os.path.lexists(token):
-        yield None
+        legacy[canonical] = legacy.get(canonical, 0) + 1
+        try:
+            yield None
+        finally:
+            legacy[canonical] -= 1
+            if not legacy[canonical]:
+                legacy.pop(canonical)
         return
+    if legacy.get(canonical):
+        raise StateLocked("State coordination changed; reopen and retry when idle.")
     # Never invert stable-token -> event-file ordering during nested bootstrap.
-    if any(path == canonical for path, _ in getattr(_SCHEMA_INITIALIZATION_LOCAL, "stack", [])):
+    database_identity = os.path.normcase(os.path.realpath(db_path))
+    if any(
+        path == database_identity for path, _ in getattr(_SCHEMA_INITIALIZATION_LOCAL, "stack", [])
+    ):
         raise StateLocked("State coordination changed; reopen and retry when idle.")
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     if create:
@@ -583,7 +602,7 @@ def _require_current_file_handle(handle: Any, path: str | os.PathLike[str]) -> N
 
 
 def _require_current_state_lock(db_path: str | os.PathLike[str]) -> None:
-    canonical = os.path.normcase(os.path.realpath(db_path))
+    canonical = _state_operation_key(db_path)
     token = Path(db_path).parent / _STATE_OPERATION_TOKEN
     owned = getattr(_STATE_OPERATION_LOCAL, "owned", {})
     if os.path.lexists(token) and canonical not in owned:
@@ -591,7 +610,7 @@ def _require_current_state_lock(db_path: str | os.PathLike[str]) -> None:
 
 
 def _require_event_storage_fence(db_path: str, events_storage: str) -> None:
-    canonical = os.path.normcase(os.path.realpath(db_path))
+    canonical = _state_operation_key(db_path)
     handle = getattr(_STATE_OPERATION_LOCAL, "owned", {}).get(canonical)
     if handle is None:
         return
@@ -1978,10 +1997,27 @@ class SqliteBackend:
     # Replay
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _replay_operation_lock(self) -> Iterator[None]:
+        """Fence a live destination while preserving native private scratch replay."""
+        with _state_operation_lock(self._db_path):
+            _require_no_event_recovery(self._db_path)
+            _require_event_storage_fence(self._db_path, self._events_storage)
+            if os.path.exists(self._events_path):
+                with _schema_initialization_lock(
+                    self._db_path, self._events_path, create_missing_log=False,
+                ):
+                    yield
+            else:
+                # Backup/repair and explicit CLI replay use an existing scratch
+                # database placeholder with a not-yet-created private scratch log.
+                # Replay owns removing that placeholder before initialization.
+                _require_current_state_lock(self._db_path)
+                yield
+
     def replay_from_empty(self, events_path: str) -> None:
         """Replay under destination custody, fencing retained local converters."""
-        with _schema_initialization_lock(self._db_path, self._events_path):
-            _require_event_storage_fence(self._db_path, self._events_storage)
+        with self._replay_operation_lock():
             self._replay_from_empty_under_lock(events_path)
 
     def _replay_from_empty_under_lock(self, events_path: str) -> None:
@@ -3259,8 +3295,7 @@ class SqliteBackend:
 
     def replay_to_event_id(self, events_path: str, stop_after_event_id: str) -> None:
         """Replay a prefix under the same destination coordination as writers."""
-        with _schema_initialization_lock(self._db_path, self._events_path):
-            _require_event_storage_fence(self._db_path, self._events_storage)
+        with self._replay_operation_lock():
             self._replay_to_event_id_under_lock(events_path, stop_after_event_id)
 
     def _replay_to_event_id_under_lock(self, events_path: str, stop_after_event_id: str) -> None:
