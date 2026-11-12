@@ -22,6 +22,63 @@ from anvil.jev import JevConfig
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class ExecutionAdapter:
+    """Owner-registered executable, never loaded from project configuration."""
+
+    version: int
+    interpreter: str
+    script: str
+    extension: str
+    profile: str
+    hashes: dict[str, str]
+
+
+def execution_file_bytes(path: Path, maximum: int = 128 * 1024 * 1024) -> bytes:
+    """Reject aliases and writable-by-others executable/config inputs."""
+    import os
+    import stat
+
+    path = path.absolute()
+    if any(parent.is_symlink() for parent in (path, *path.parents)):
+        raise ValueError("Execution registration paths cannot contain symbolic links")
+    metadata = path.stat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+        raise ValueError("Execution input must be a bounded regular file")
+    if os.name == "posix" and (
+        metadata.st_uid not in {0, os.getuid()} or metadata.st_mode & 0o022
+    ):
+        raise ValueError("Execution input is writable by another owner")
+    return path.read_bytes()
+
+
+def load_execution_adapter() -> ExecutionAdapter:
+    """Only the global owner file may authorize adapter code or a profile."""
+    import hashlib
+
+    path = global_config_path()
+    if not path.exists():
+        raise ValueError("Run is not configured; use anvil run-configure")
+    value = yaml.safe_load(execution_file_bytes(path, 1024 * 1024))
+    registration = value.get("execution_adapter") if isinstance(value, dict) else None
+    fields = {"version", "interpreter", "script", "extension", "profile", "hashes"}
+    if not isinstance(registration, dict) or set(registration) != fields:
+        raise ValueError("Missing or invalid global execution_adapter registration")
+    if type(registration["version"]) is not int or registration["version"] != 1:
+        raise ValueError("Unsupported execution registration version")
+    paths = fields - {"version", "hashes"}
+    if not isinstance(registration["hashes"], dict) or set(registration["hashes"]) != paths:
+        raise ValueError("Invalid execution input hashes")
+    for name in paths:
+        location = registration[name]
+        if not isinstance(location, str) or not Path(location).is_absolute():
+            raise ValueError("Registered execution paths must be absolute")
+        actual_digest = hashlib.sha256(execution_file_bytes(Path(location))).hexdigest()
+        if actual_digest != registration["hashes"][name]:
+            raise ValueError("Registered execution input changed; review registration")
+    return ExecutionAdapter(**registration)
+
 # v1.21.0 — complexity score at/above which a task is queued for sub-task
 # expansion. Single source of truth: the Config dataclass default, the
 # scoring engine's expansion-queue builder, and every CLI/MCP call site that

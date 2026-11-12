@@ -1206,3 +1206,44 @@ class TestGlobalConfigLeasePrecedence:
         from anvil.cli._helpers import _lease_manager_kwargs
 
         assert _lease_manager_kwargs(None, lease_override=None) == {}
+
+
+def test_execution_registration_ignores_project_config(tmp_path, monkeypatch):
+    """Project settings cannot turn source-controlled data into trusted argv."""
+    import yaml
+
+    from anvil.config import load_execution_adapter
+
+    global_path = tmp_path / "global.yaml"
+    global_path.write_text("project_name: owner\nproject_id: owner\n")
+    global_path.chmod(0o600)
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "execution_adapter": {"script": "/attacker/chosen.py"},
+    }))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="global execution_adapter"):
+        load_execution_adapter()
+
+
+def test_execution_registration_hash_drift_refuses(tmp_path, monkeypatch):
+    import hashlib
+
+    import yaml
+
+    from anvil.config import load_execution_adapter
+
+    paths = {name: tmp_path / name for name in ("script", "extension", "profile", "interpreter")}
+    for path in paths.values():
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+    registration = {"version": 1, **{key: str(path) for key, path in paths.items()},
+                    "hashes": {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in paths.items()}}
+    config = tmp_path / "global.yaml"
+    config.write_text(yaml.safe_dump({"execution_adapter": registration}))
+    config.chmod(0o600)
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(config))
+    assert load_execution_adapter().version == 1
+    paths["script"].write_bytes(b"changed")
+    with pytest.raises(ValueError, match="input changed"):
+        load_execution_adapter()
