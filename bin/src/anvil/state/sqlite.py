@@ -1681,6 +1681,7 @@ class SqliteBackend:
                         raise EventRejected("root_set_authorization_required") from exc
 
         with self._append_lock():
+            self._require_appendable_event_tail()
             if self._events_storage == "git":
                 self._validate_git_log_before_append()
 
@@ -5935,6 +5936,37 @@ class SqliteBackend:
                         },
                     )
                 )
+
+    def _require_appendable_event_tail(self) -> None:
+        """Refuse unsafe final records before append can make them interior."""
+        refusal = (
+            "Append refused: the event log ends with an incomplete or invalid record. "
+            "Explicit restoration or recovery is required; the original log is unchanged."
+        )
+        with open(self._events_path, "rb") as stream:
+            if stream.seek(0, os.SEEK_END) == 0:
+                return
+            stream.seek(-1, os.SEEK_END)
+            if stream.read(1) != b"\n":
+                raise SchemaProbeFailed(refusal)
+        tail = next(
+            (line.strip() for line in reversed(self._read_tail_window()) if line.strip()), None,
+        )
+        if tail is None:
+            return
+        try:
+            event = Event.model_validate_json(tail)
+            if self._events_storage == "git":
+                if not event.id.startswith("E-") or event.lamport is None:
+                    raise ValueError("invalid Git event envelope")
+            elif (
+                not event.id[1:].isdigit()
+                or event.lamport is not None
+                or event.parent_event_id is not None
+            ):
+                raise ValueError("invalid local event envelope")
+        except ValueError:
+            raise SchemaProbeFailed(refusal) from None
 
     def _read_tail_window(self) -> list[bytes]:
         """Return candidate raw lines from the end of events.jsonl, oldest first.

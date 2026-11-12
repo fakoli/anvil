@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from anvil.clock import FrozenClock
+from anvil.state.backend import SchemaProbeFailed
 from anvil.state.models import EventDraft
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import (
@@ -309,8 +310,71 @@ def test_retained_tail_scan_keeps_large_complete_event_before_torn_suffix(
         else:
             assert backend._scan_tail_envelope() == (first.id, first.lamport)
         assert events.read_bytes() == complete + torn
-        if storage == "local":
-            following = backend.append(_init_draft())
-            assert following is not None and following.id == "E000002"
+        with pytest.raises(SchemaProbeFailed, match="Explicit restoration or recovery"):
+            backend.append(_init_draft())
+        assert events.read_bytes() == complete + torn
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("storage", ["local", "git"])
+@pytest.mark.parametrize("ending", ["torn", "malformed", "idless", "unterminated", "wrong_mode"])
+def test_unsafe_tail_append_refuses_before_mutation_and_preserves_read_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, storage: str, ending: str,
+) -> None:
+    from anvil.cli.doctor import _OK, _check_replay
+    from anvil.state.snapshot import serialize_state
+    from tests.test_sqlite import _init_draft, _project_draft
+
+    events = tmp_path / "events.jsonl"
+    events.touch()
+    (tmp_path / "config.yaml").write_text(f"events_storage: {storage}\n")
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"), events_path=str(events),
+        clock=FrozenClock(_NOW), events_storage=storage,
+    )
+    backend.initialize()
+    try:
+        event = backend.append(_project_draft())
+        assert event is not None
+        complete = events.read_bytes()
+        original_state = serialize_state(backend)
+        if ending == "unterminated":
+            unsafe = complete.rstrip(b"\n")
+        elif ending == "wrong_mode":
+            record = json.loads(complete)
+            if storage == "local":
+                record.update(id="E-0123456789ab", lamport=1)
+            else:
+                record.update(id="E000002", parent_event_id=None, lamport=None)
+            unsafe = complete + json.dumps(record).encode() + b"\n"
+        else:
+            suffixes = {"torn": b'{"id":', "malformed": b'{invalid}\n', "idless": b'{}\n'}
+            unsafe = complete + suffixes[ending]
+        events.write_bytes(unsafe)
+        counters = (backend._next_seq, backend._max_lamport)
+        signature = backend._git_validated_log_signature
+        content_heads = dict(backend._git_prd_content_heads)
+        graph_heads = dict(backend._git_prd_graph_heads)
+        audit = tmp_path / "audit.jsonl"
+        audit_before = audit.read_bytes() if audit.exists() else None
+
+        def unexpected_mutation(*args, **kwargs):
+            pytest.fail("unsafe tail reached append validation or callback")
+
+        monkeypatch.setattr(backend, "_bind_live_prd_lifecycle_draft", unexpected_mutation)
+        with pytest.raises(SchemaProbeFailed, match="Explicit restoration or recovery"):
+            backend.append(_init_draft(), pre_log_check=unexpected_mutation)
+        assert events.read_bytes() == unsafe
+        assert serialize_state(backend) == original_state
+        assert (backend._next_seq, backend._max_lamport) == counters
+        assert backend._git_validated_log_signature == signature
+        assert backend._git_prd_content_heads == content_heads
+        assert backend._git_prd_graph_heads == graph_heads
+        assert (audit.read_bytes() if audit.exists() else None) == audit_before
+        if ending != "wrong_mode":
+            replay = _check_replay(backend, tmp_path)
+            assert replay.severity == _OK, replay.to_json()
+            assert events.read_bytes() == unsafe
     finally:
         backend.close()

@@ -30,6 +30,10 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   drop another connection's POSIX locks. Warm backups include committed WAL data
   and capture the matching event log before releasing custody for upload.
 - Evidence queries propagate database failures instead of reporting absent proof.
+- Local and Git appends refuse unterminated, malformed or ID-less final log
+  records before changing State. Read/replay tolerance for a torn final record
+  remains; append requires explicit restoration or recovery and preserves the
+  original bytes without truncation.
 
 ### Qualification limits
 
