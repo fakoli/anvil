@@ -145,7 +145,16 @@ def test_interrupted_publication_fences_clients_then_resumes(
 
 
 @pytest.mark.parametrize(
-    "changed", ["log", "config", "backup", "projection", "db_inode", "token_inode"]
+    "changed",
+    [
+        "log",
+        "config",
+        "backup",
+        "projection",
+        "db_inode",
+        "token_inode",
+        "missing_token",
+    ],
 )
 def test_resume_refuses_changed_authority_and_retains_evidence(
     tmp_path, monkeypatch, changed
@@ -167,6 +176,8 @@ def test_resume_refuses_changed_authority_and_retains_evidence(
         with closing(sqlite3.connect(state / "state.db")) as conn:
             conn.execute("UPDATE tasks SET title='unrecorded mutation'")
             conn.commit()
+    elif changed == "missing_token":
+        (state / ".state-operation.lock").unlink()
     elif changed in {"db_inode", "token_inode"}:
         path = state / (
             "state.db" if changed == "db_inode" else ".state-operation.lock"
@@ -453,3 +464,84 @@ def test_bundle_only_custody_refuses_even_without_active_child_rows(tmp_path):
     assert result.exit_code == 1, result.output
     assert "active claim" in result.output
     assert not (state / ".event-format-migration.json").exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe", ["state_directory", "config", "events", "database", "sidecar"]
+)
+def test_unsafe_conversion_paths_refuse_before_coordination_creation(tmp_path, unsafe):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    external = tmp_path / "retained"
+    if unsafe == "state_directory":
+        state.rename(external)
+        state.symlink_to(external, target_is_directory=True)
+        target = external
+    else:
+        target = state
+        name = {
+            "config": "config.yaml",
+            "events": "events.jsonl",
+            "database": "state.db",
+            "sidecar": "state.db-journal",
+        }[unsafe]
+        artifact = state / name
+        if artifact.exists():
+            artifact.rename(external)
+        else:
+            external.write_bytes(b"unsafe sidecar")
+        artifact.symlink_to(external)
+    before = _files(target)
+    result = _convert(tmp_path)
+    assert result.exit_code == 1, result.output
+    assert _files(target) == before
+    assert not (target / ".state-operation.lock").exists()
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX file mode privacy; Windows uses owner ACLs"
+)
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_conversion_and_resume_do_not_widen_private_file_modes(
+    tmp_path, monkeypatch, interrupted
+):
+    import stat
+    import anvil.cli.migrate as migration
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    for name in ("events.jsonl", "config.yaml"):
+        (state / name).chmod(0o600)
+    previous_umask = os.umask(0o022)
+    try:
+        if interrupted:
+
+            def interrupt(phase):
+                if phase == "after_config.yaml":
+                    raise RuntimeError("injected interrupted publication")
+
+            monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", interrupt)
+            assert _convert(tmp_path).exit_code == 1
+            assert (
+                stat.S_IMODE((state / ".event-format-migration.json").stat().st_mode)
+                == 0o600
+            )
+            monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
+        result = _convert(tmp_path, resume=interrupted)
+        assert result.exit_code == 0, result.output
+    finally:
+        os.umask(previous_umask)
+    for name in (
+        "events.jsonl",
+        "config.yaml",
+        "events.jsonl.pre-git-migration.bak",
+        "id_mapping.json",
+        ".gitattributes",
+    ):
+        assert stat.S_IMODE((state / name).stat().st_mode) == 0o600
+    for recovery in state.glob(".event-format-migration-*"):
+        if recovery.is_dir():
+            assert stat.S_IMODE(recovery.stat().st_mode) == 0o700
+            for artifact in recovery.rglob("*"):
+                if artifact.is_file():
+                    assert stat.S_IMODE(artifact.stat().st_mode) == 0o600

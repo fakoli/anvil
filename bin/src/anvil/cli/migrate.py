@@ -142,7 +142,7 @@ def migrate_events(
     _require_state_dir(state_dir)
     probe = _preflight_schema_compatibility(state_dir)
     try:
-        _require_existing_state_files(state_dir)
+        _require_event_conversion_paths(state_dir)
         config = load_config(state_dir / "config.yaml")
         pending = os.path.lexists(state_dir / _EVENT_FORMAT_MIGRATION_MARKER)
         if resume and not pending:
@@ -155,14 +155,17 @@ def migrate_events(
         db_path = str(state_dir / "state.db")
         events_path = str(state_dir / "events.jsonl")
         # Dry runs and schema-only upgrades never introduce the permanent token.
-        with _state_operation_lock(db_path, create=yes and config.events_storage != "git") as token:
+        with _state_operation_lock(
+            db_path,
+            create=yes and not resume and config.events_storage != "git",
+        ) as token:
             with _schema_initialization_lock(
                 db_path,
                 events_path,
                 create_missing_log=False,
                 allow_event_conversion=resume,
             ):
-                _require_existing_state_files(state_dir)
+                _require_event_conversion_paths(state_dir)
                 SqliteBackend.validate_schema_compatibility(probe(Path(db_path)))
                 if resume:
                     marker = _read_event_conversion_marker(state_dir)
@@ -206,6 +209,27 @@ def migrate_events(
 _EVENT_CONVERSION_PREFIX = ".event-format-migration-"
 _EVENT_CONVERSION_FILES = ("events.jsonl", "config.yaml", "id_mapping.json", ".gitattributes")
 _EVENT_CONVERSION_PHASE_HOOK: Callable[[str], None] | None = None
+
+
+def _require_event_conversion_paths(state_dir: Path) -> None:
+    """Admit safe existing paths before introducing any coordination artifact."""
+    from anvil.cli.local_event_repair import _regular, _safe_sidecars
+    from anvil.cli.repair import _safe_state_directory
+    from anvil.state.sqlite import _EVENT_FORMAT_MIGRATION_MARKER, _STATE_OPERATION_TOKEN
+
+    _safe_state_directory(state_dir)
+    _require_existing_state_files(state_dir)
+    required = {"state.db", "events.jsonl", "config.yaml"}
+    optional = {
+        "id_mapping.json",
+        ".gitattributes",
+        _EVENT_FORMAT_MIGRATION_MARKER,
+        _STATE_OPERATION_TOKEN,
+        f"events.jsonl{_BACKUP_SUFFIX}",
+    }
+    for name in required | optional:
+        _regular(state_dir / name, required=name in required)
+    _safe_sidecars(state_dir / "state.db")
 
 
 def _event_conversion_hook(phase: str) -> None:
@@ -323,6 +347,7 @@ def _stage_event_conversion(
     _replay_into(str(after / "events.jsonl"), str(after / "state.db"), after)
     for directory in (before, after):
         for artifact in directory.iterdir():
+            artifact.chmod(0o600)
             _fsync_file(artifact)
         _fsync_directory(directory)
     marker = {
@@ -341,11 +366,19 @@ def _stage_event_conversion(
             for side in ("before", "after")
         },
     }
-    _write_file(backup, (before / "events.jsonl").read_bytes())
+    # This copy is outside the private staging directory. Restrict permissions
+    # at creation, independently of umask, and refuse any existing backup.
+    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write((before / "events.jsonl").read_bytes())
+        stream.flush()
+        os.fsync(stream.fileno())
     _fsync_file(state_dir / _STATE_OPERATION_TOKEN)
     _fsync_directory(recovery)
     temporary = recovery / "marker.json"
     _write_file(temporary, (json.dumps(marker, sort_keys=True) + "\n").encode())
+    temporary.chmod(0o600)
+    _fsync_file(temporary)
     os.replace(temporary, state_dir / _EVENT_FORMAT_MIGRATION_MARKER)
     _fsync_directory(state_dir)
     return marker
@@ -427,6 +460,7 @@ def _publish_event_conversion(state_dir: Path, marker: dict[str, Any], token: An
     from anvil.cli.repair import (
         _checkpoint_and_fsync_live_projection,
         _fsync_directory,
+        _fsync_file,
         _publish_staged_projection,
     )
     from anvil.project_snapshot import validate_converged_event_log
@@ -473,9 +507,15 @@ def _publish_event_conversion(state_dir: Path, marker: dict[str, Any], token: An
     for name in _EVENT_CONVERSION_FILES:
         target = state_dir / name
         if target.exists() and _conversion_digest(target) == marker["after"][name]:
+            target.chmod(0o600)
+            _fsync_file(target)
             continue
         temporary = recovery / f"publish-{uuid.uuid4().hex}"
         _write_file(temporary, (recovery / "after" / name).read_bytes())
+        # Staging's private parent protects the initial write. Restrict the file
+        # before it becomes visible at the public State pathname (also on resume).
+        temporary.chmod(0o600)
+        _fsync_file(temporary)
         os.replace(temporary, target)
         _fsync_directory(state_dir)
         _event_conversion_hook(f"after_{name}")
