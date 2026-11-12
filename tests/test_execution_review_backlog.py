@@ -168,7 +168,7 @@ def test_final_approval_wait_preserves_exact_attempt(
         _submit_real_capture(project, repository, "B001", task_id, tmp_path)
     _cli(repository, "bundle", "complete", "B001", "--actor", "codex-main")
     for reviewer, angle in (("review-a", "correctness"), ("review-b", "security"),
-                            ("review-c", "integration")):
+                            ("review-c", "boundary")):
         _cli(repository, "bundle", "review", "B001", "--round", "1", "--angle", angle,
              "--decision", "approve", "--actor", reviewer)
     _cli(repository, "bundle", "finalize-review", "B001", "--actor", "codex-main")
