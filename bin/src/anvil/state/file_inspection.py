@@ -144,7 +144,7 @@ class BoundedFileInspection:
             return self._process
         self.close()
         self._process = subprocess.Popen(
-            [sys.executable, "-m", "anvil.state._file_inspection_worker"],
+            [sys.executable, "-I", "-m", "anvil.state._file_inspection_worker"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

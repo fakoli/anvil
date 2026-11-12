@@ -12405,6 +12405,35 @@ class TestUnifiedSchemaMismatchBoundary:
         assert not (tmp_path / "state.db").exists()
         assert time.monotonic() - started < 0.5
 
+    @pytest.mark.parametrize("untrusted_import_source", ["cwd", "pythonpath"])
+    def test_schema_probe_ignores_repository_and_pythonpath_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        untrusted_import_source: str,
+    ) -> None:
+        from anvil.state.file_inspection import BoundedSchemaProbe
+
+        database = tmp_path / "state.db"
+        connection = sqlite3.connect(database)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.close()
+        hostile = tmp_path / "untrusted-repository"
+        package = hostile / "anvil"
+        package.mkdir(parents=True)
+        marker = tmp_path / "untrusted-code-executed"
+        malicious = f"from pathlib import Path; Path({str(marker)!r}).write_text('executed')\n"
+        (package / "__init__.py").write_text(malicious)
+        (hostile / "sitecustomize.py").write_text(malicious)
+        if untrusted_import_source == "cwd":
+            monkeypatch.chdir(hostile)
+        else:
+            monkeypatch.setenv("PYTHONPATH", str(hostile))
+        before = database.read_bytes()
+        with BoundedSchemaProbe() as probe:
+            assert probe(database) == SCHEMA_VERSION
+        assert probe.closed
+        assert not marker.exists()
+        assert database.read_bytes() == before
+
     def test_schema_probe_worker_startup_consumes_cumulative_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
