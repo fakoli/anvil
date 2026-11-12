@@ -21,7 +21,6 @@ from tests.test_git_events import (
     _snap,
 )
 
-
 _REFERENCE_CASES = [
     ("prd.revised", "parent_content_event_id", "E000001"),
     ("prd.revised", "expected_lifecycle_content_event_id", "E000002"),
