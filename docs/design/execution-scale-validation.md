@@ -60,6 +60,14 @@ run checks 1,000 simultaneous active member claims. The executor admits at most
 `--workers` real command subprocesses; one coordinator records all progress and
 evidence. This is a qualification harness, not a new product scheduler.
 
+The scale fixture uses empty file and conflict-group scopes. Bundle admission
+can use the existing task/status index to check only member-task claims in that
+case: unrelated claims cannot conflict with either empty union. A nonempty file
+or group union still checks all active claims, including other PRDs and actors,
+using claim-time file reservations. This optimization does not establish latency
+for general software tasks with file or group scopes. Semantic conflict and
+replay tests cover those cases separately from performance measurements.
+
 Each subprocess actually executes a deterministic Python assertion for its
 assigned task. The harness captures exact command, output bytes, timestamps and
 exit status, binds the artifact to the native immutable member claim context,
@@ -74,6 +82,25 @@ canonical State after replay. Failed captures remain on disk and do not become
 completion evidence. A separate focused regression executes a command that
 prints a success-looking message but exits nonzero, checks refusal, and proves
 unrelated members still complete.
+
+## Execution authorization and pending review
+
+The scale fixture seeds an exactly approved PRD and admits every cohort before
+executing commands. Its synthetic actor attribution and self-attested proofs
+measure execution and proof intake, not human deliberation or final approval
+throughput. It never records a successful final task acceptance.
+
+`tests/test_execution_review_backlog.py` exercises the distinct successive-cohort
+journey through both public CLI and HTTP confirmation. The first cohort submits
+actual subprocess proofs and remains pending review. A newly planned independent
+cohort then receives its own exact-scope authorization and submits real proofs
+while the first cohort stays unaccepted. The test also checks board readback,
+claim/proof identity and replay, and verifies that premature protected acceptance
+and a cohort with an unfinished dependency are refused without ledger changes.
+Pending review therefore does not reserve execution capacity for independent
+work; a dependency that requires completion still waits for final acceptance.
+This journey adds no atomic bulk final-acceptance operation and does not treat a
+local actor string as authenticated human approval.
 
 ## Measurement boundaries
 

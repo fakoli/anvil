@@ -31,7 +31,8 @@ from tests.test_bundle_state import _create_bundle, _event, _seed
 
 
 @pytest.fixture
-def project(git_repo, tmp_path):
+def project(git_repo, tmp_path, monkeypatch):
+    monkeypatch.delenv("ANVIL_STATE_LAYOUT", raising=False)
     state = _resolve_state_dir(git_repo)
     state.mkdir(parents=True)
     events = state / "events.jsonl"
@@ -63,9 +64,9 @@ def _claim(project):
     return manager.claim("B001", expected_scope_digest=bundle_execution_scope_digest(backend, "B001"))
 
 
-def _capture(project, claimed):
+def _capture(project, claimed, *, task_id="release:T001"):
     backend, _, repo, _, command = project
-    task = backend.get_task("release:T001")
+    task = backend.get_task(task_id)
     claim = backend.get_claim(claimed.claim.member_claim_ids[task.id])
     context = claim.attestation_context
     assert context is not None
