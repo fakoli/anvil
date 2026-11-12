@@ -62,8 +62,12 @@ _GITIGNORE_GUIDANCE = """\
     repo state and must be COMMITTED, together with `.anvil/.gitattributes`.
   - KEEP ignoring `.anvil/state.db*` (disposable projection, rebuilt by
     replay) and `.anvil/audit.jsonl` (machine-local audit trail).
-  - Consider ignoring `.anvil/*.bak` and `.anvil/id_mapping.json`
-    if you do not want migration artifacts in the repo."""
+  - KEEP machine-local `.anvil/.state-operation.lock`,
+    `.anvil/.event-format-migration.json`, `.anvil/.event-format-migration-*/`
+    and `.anvil/*.bak` out of Git. Recovery copies include private configuration;
+    retain them locally and never delete the token or marker to bypass recovery.
+  - Consider ignoring `.anvil/id_mapping.json` if you do not want the
+    event identifier mapping in the repo."""
 
 # Backup suffix for the state.db schema migration (T009). Distinct from
 # ``_BACKUP_SUFFIX`` above (the events.jsonl backup) so a schema migration and

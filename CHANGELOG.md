@@ -6,6 +6,31 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.23] - 2026-11-12
+
+### Added
+
+- Recoverable POSIX local-to-Git event conversion with an identity-bound native
+  `migrate-events --to git --resume --yes` recovery command.
+- Repeatable execution-scale campaigns with matched host cells, explicit targets,
+  source bindings and retained failed attempts.
+
+### Fixed
+
+- Event conversion holds stable custody across log replacement, checks task and
+  bundle claims, and fences waiting or retained clients with stale storage modes.
+- Conversion preserves private artifact permissions and rejects unsafe paths
+  before creating its coordination token. Native scratch replay and projection
+  repair retain the same State coordination boundary.
+
+### Qualification limits
+
+- Windows event-format apply and recovery refuse before artifact creation until
+  private backup DACL handling is qualified. Dry runs and schema-only migration
+  remain available. Older engine processes must be stopped before conversion.
+- Campaign support does not establish a universal 15ms latency guarantee or
+  qualify hundreds or thousands of physically executing containers.
+
 ## [0.6.22] - 2026-11-10
 
 ### Fixed

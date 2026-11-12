@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.22 (schema 26)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.23 (schema 26)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -2043,7 +2043,9 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
   If interrupted, normal reads/writes refuse while `.event-format-migration.json`
   is present. Run `anvil migrate-events --to git --resume --yes` to validate the
   recorded identities/digests and complete that conversion. Preserve the marker,
-  permanent token and all backups; do not remove them to bypass recovery. Changed
+  permanent token and all backups; do not remove them to bypass recovery. Keep
+  the token, marker, recovery directories and backups out of Git; recovery copies
+  include private configuration. Changed
   artifacts or unrecorded State changes refuse and require owner reconciliation.
   A failure before marker creation leaves authority unchanged and retains staging
   evidence; a pre-existing backup requires reconciliation before another apply.
