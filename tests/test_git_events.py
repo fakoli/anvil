@@ -5325,7 +5325,7 @@ def _build_local_project(project_dir: Path) -> str:
 
 
 def _build_conversion_eligible_project(project_dir: Path) -> str:
-    """Author a ready task and sync mapping without bound authority/acceptance.
+    """Author a draft PRD, ready task and sync mapping without bound authority.
 
     This is a distinct native history, not the accepted fixture with events
     removed. Positive conversion tests must not imply accepted work is eligible.
@@ -5343,6 +5343,10 @@ def _build_conversion_eligible_project(project_dir: Path) -> str:
     backend.initialize()
     try:
         _seed_ready_task(backend)
+        backend.append(_draft(
+            "prd.parsed", _prd_parsed_payload(expected_absent=True),
+            target_kind="prd", target_id="default",
+        ))
         backend.append(_draft("sync_mapping.upserted", {
             "task_id": "T001", "external_system": "conversion-fixture",
             "external_id": "fixture-1", "external_url": None,
