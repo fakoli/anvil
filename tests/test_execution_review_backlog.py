@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from tests.test_bundle_command_proofs import _capture
 from tests.test_bundle_command_proofs import project as project
 from tests.test_bundle_state import _event
 from tests.test_execution_journeys import _cli
-from tests.test_web_actions import _request, _running_server
+from tests.test_web_actions import _preview_request, _request, _running_server
 
 
 def _claim_public(repository, config_path, bundle_id, surface, *, succeeds=True):
@@ -143,6 +144,144 @@ def test_real_proof_cohorts_continue_while_review_waits(project, tmp_path, surfa
         assert plans["B001"]["counts"]["pending_review"] == 2
         assert plans["B002"]["counts"]["pending_review"] == 1
         assert all(plan["counts"]["completed"] == 0 for plan in plans.values())
+    snapshot = serialize_state(backend)
+    backend.replay_from_empty(str(events))
+    assert serialize_state(backend) == snapshot
+
+
+@pytest.mark.parametrize(("surface", "expire_preview"), [
+    pytest.param("cli", False, id="cli-confirmation"),
+    pytest.param("http", False, id="http-confirmation"),
+    pytest.param("http", True, id="http-expired-preview"),
+])
+def test_final_approval_wait_preserves_exact_attempt(
+    project, tmp_path, monkeypatch, surface, expire_preview,
+):
+    """Disposable synthetic approvals exercise native CLI/HTTP, not human authority."""
+    backend, _, repo, events, _ = project
+    template = backend.get_task("release:T001")
+    task_template = {**template.model_dump(mode="json"), "prd_id": template.prd_id}
+    config_path = tmp_path / "final-approval-web.json"
+    repository = web.enroll_repository(config_path, repo)
+    _claim_public(repository, config_path, "B001", surface)
+    for task_id in ("release:T001", "release:T002"):
+        _submit_real_capture(project, repository, "B001", task_id, tmp_path)
+    _cli(repository, "bundle", "complete", "B001", "--actor", "codex-main")
+    for reviewer, angle in (("review-a", "correctness"), ("review-b", "security"),
+                            ("review-c", "integration")):
+        _cli(repository, "bundle", "review", "B001", "--round", "1", "--angle", angle,
+             "--decision", "approve", "--actor", reviewer)
+    _cli(repository, "bundle", "finalize-review", "B001", "--actor", "codex-main")
+    assert backend.get_bundle("B001").status.value == "reviewed_unintegrated"
+    assert len(backend.list_bundle_reviews("B001")) == 3
+    assert not any(json.loads(line)["action"] == "task.applied"
+                   for line in events.read_text().splitlines())
+    target = backend.get_task("release:T001")
+    saved_evidence = {task_id: backend.get_latest_evidence(task_id)
+                      for task_id in ("release:T001", "release:T002")}
+    saved_claims = {evidence.claim_id: backend.get_claim(evidence.claim_id)
+                    for evidence in saved_evidence.values()}
+    proof_core = saved_evidence[target.id].proofs[0].evidence_core
+    saved_proof_hash = hashlib.sha256(canonical_json_bytes(proof_core.model_dump(mode="json"))).hexdigest()
+    saved_identity = (proof_core.claim_id, proof_core.generation)
+    saved_updated_at = target.updated_at.isoformat()
+
+    with _running_server(config_path, allow_writes=True, actor="synthetic-human") as server:
+        # Replace only this server module's clock reference; real capture/subprocess
+        # wall time and the process-wide time module remain untouched.
+        preview_clock = SimpleNamespace(now=1000.0)
+        if expire_preview:
+            monkeypatch.setattr(web, "time", SimpleNamespace(monotonic=lambda: preview_clock.now))
+        token = _request(server, "/api/catalog")[1]["csrf_token"]
+        prefix = f"/api/repositories/{repository.id}"
+        status, initial_snapshot = _request(server, prefix + "/snapshot")
+        assert status == 200, initial_snapshot
+        saved_version = initial_snapshot["workflow"]["versions"][target.id]
+        request = _preview_request(
+            "T001", "approve", version=saved_version,
+            digest=initial_snapshot["snapshot"]["snapshot_digest"],
+        )
+        request["prd_id"] = "release"
+        status, preview = _request(server, prefix + "/preview", request, token=token)
+        assert status == 200, preview
+        assert f"Evidence: {saved_evidence[target.id].id}" in preview["details"]
+        assert preview["requires_confirmation"] is True
+
+        # Independent work executes and submits real proof while this exact
+        # preview remains pending, within the existing command/HTTP deadlines.
+        now = datetime.now(UTC)
+        backend.append(_event("task.created", {
+            **task_template, "id": "release:T003", "title": "Independent work",
+            "created_at": now.isoformat(), "updated_at": now.isoformat(),
+        }, target_kind="task", target_id="release:T003", timestamp=now, actor="fixture-planner"))
+        _cli(repository, "bundle", "create", "B002", "release:T003", "--prd", "release",
+             "--coordinator", "codex-main", "--actor", "fixture-planner")
+        _claim_public(repository, config_path, "B002", surface)
+        _submit_real_capture(project, repository, "B002", "release:T003", tmp_path)
+        status, later_snapshot = _request(server, prefix + "/snapshot")
+        assert status == 200, later_snapshot
+        assert later_snapshot["snapshot"]["snapshot_digest"] != initial_snapshot["snapshot"]["snapshot_digest"]
+        assert later_snapshot["workflow"]["versions"][target.id] == saved_version
+        assert backend.get_task(target.id) == target
+        assert target.status.value == "needs_review"
+        for task_id, evidence in saved_evidence.items():
+            assert backend.get_latest_evidence(task_id) == evidence
+        saved_evidence["release:T003"] = backend.get_latest_evidence("release:T003")
+        independent_claim = saved_evidence["release:T003"].claim_id
+        saved_claims[independent_claim] = backend.get_claim(independent_claim)
+
+        if expire_preview:
+            assert web.PREVIEW_LIFETIME_SECONDS == 300
+            preview_clock.now += web.PREVIEW_LIFETIME_SECONDS + 1
+            before_bytes, before_state = events.read_bytes(), serialize_state(backend)
+            status, refusal = _request(server, prefix + "/transition", {
+                "preview_id": preview["preview_id"], "confirmed": True,
+            }, token=token)
+            assert status == 409 and refusal["error"]["code"] == "preview_expired", refusal
+            assert events.read_bytes() == before_bytes
+            assert serialize_state(backend) == before_state
+            request["snapshot_digest"] = later_snapshot["snapshot"]["snapshot_digest"]
+            status, preview = _request(server, prefix + "/preview", request, token=token)
+            assert status == 200, preview
+            assert f"Evidence: {saved_evidence[target.id].id}" in preview["details"]
+
+        if surface == "cli":
+            # Equivalent exact-attempt binding; CLI does not consume the HTTP token.
+            _cli(repository, "apply", target.id, "--approve", "--strict",
+                 "--reviewer", "synthetic-human", "--expected-evidence-id", saved_evidence[target.id].id,
+                 "--expected-task-updated-at", saved_updated_at)
+        else:
+            status, accepted = _request(server, prefix + "/transition", {
+                "preview_id": preview["preview_id"], "confirmed": True,
+            }, token=token)
+            assert status == 200, accepted
+            before_bytes, before_state = events.read_bytes(), serialize_state(backend)
+            status, refusal = _request(server, prefix + "/transition", {
+                "preview_id": preview["preview_id"], "confirmed": True,
+            }, token=token)
+            assert status == 409 and refusal["error"]["code"] == "preview_expired", refusal
+            assert events.read_bytes() == before_bytes
+            assert serialize_state(backend) == before_state
+
+    applied = [json.loads(line) for line in events.read_text().splitlines()
+               if json.loads(line)["action"] == "task.applied"]
+    assert len(applied) == 1
+    assert applied[0]["target_id"] == target.id
+    payload = applied[0]["payload_json"]
+    assert payload["decision"] == "accepted"
+    assert payload["review_attempt_id"] == payload["expected_evidence_id"] == saved_evidence[target.id].id
+    assert payload["bundle_review_guard_version"] == 1
+    assert payload["expected_task_updated_at"] == saved_updated_at
+    assert backend.get_task(target.id).status.value == "done"
+    assert all(backend.get_task(task_id).status.value == "needs_review"
+               for task_id in ("release:T002", "release:T003"))
+    for task_id, evidence in saved_evidence.items():
+        assert backend.get_latest_evidence(task_id) == evidence
+    for claim_id, claim in saved_claims.items():
+        assert backend.get_claim(claim_id) == claim
+    core = backend.get_latest_evidence(target.id).proofs[0].evidence_core
+    assert (core.claim_id, core.generation) == saved_identity
+    assert hashlib.sha256(canonical_json_bytes(core.model_dump(mode="json"))).hexdigest() == saved_proof_hash
     snapshot = serialize_state(backend)
     backend.replay_from_empty(str(events))
     assert serialize_state(backend) == snapshot
