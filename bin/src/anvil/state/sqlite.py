@@ -636,14 +636,17 @@ def _require_no_event_recovery(
     allow_event_conversion: bool = False,
 ) -> None:
     """Fail closed until an interrupted local history repair is resumed."""
-    marker = Path(db_path).parent / ".local-event-recovery.json"
+    state_directory = Path(db_path).parent
+    marker = state_directory / ".local-event-recovery.json"
     # lexists includes broken links: an unsafe marker never means idle state.
     if os.path.lexists(marker):
         raise SchemaProbeFailed(
             "Local event recovery is pending; use anvil repair local-event --resume."
         )
     if not allow_event_conversion and os.path.lexists(
-        Path(db_path).parent / _EVENT_FORMAT_MIGRATION_MARKER
+        # Non-string inputs can change or raise on their second conversion.
+        (state_directory if type(db_path) is str else Path(db_path).parent)
+        / _EVENT_FORMAT_MIGRATION_MARKER
     ):
         raise SchemaProbeFailed(
             "Event-format migration is pending; use anvil migrate-events --to git --resume --yes."
