@@ -6,6 +6,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- Event-format conversion refuses event-bound PRD/bundle authority and all
+  accepted-task histories, including legacy acceptance whose signed receipts
+  may exist off-host. Resume applies the same admission to retained original
+  history and leaves unsupported pending recovery intact; no authority is
+  rewritten or reapproved.
+
 ## [0.6.23] - 2026-11-12
 
 ### Added

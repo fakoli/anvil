@@ -2043,7 +2043,11 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
   accessing State because private backup/publication ACL enforcement is not yet
   qualified; dry-run inspection and schema-only `migrate state` remain available.
   Conversion requires idle task and bundle custody in both projection and event
-  history. Current engines coordinate through a permanent `.state-operation.lock`;
+  history. It also refuses histories with event-bound PRD lifecycle/lineage,
+  bundle grants or accepted work, including legacy acceptance: changing IDs
+  cannot preserve their frozen references or exported signed proof ranges.
+  No payload references or signed authority are rewritten. Current engines
+  coordinate through a permanent `.state-operation.lock`;
   retained local backends refuse after conversion and must reopen in Git mode.
   Stop older engine versions before applying: they do not implement this fence.
   The command retains the original log backup plus before/after projection and
@@ -2055,6 +2059,11 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
   the token, marker, recovery directories and backups out of Git; recovery copies
   include private configuration. Changed
   artifacts or unrecorded State changes refuse and require owner reconciliation.
+  Resume also checks the retained original history for authority eligibility.
+  An older pending conversion with unsupported authority remains fenced and
+  intact until an explicitly reviewed migration/recovery can preserve it.
+  Staged-file/projection integrity alone does not establish semantic authority
+  continuity; reapproval or removing recovery artifacts is not a workaround.
   A failure before marker creation leaves authority unchanged and retains staging
   evidence; a pre-existing backup requires reconciliation before another apply.
   Schema-only upgrades remain a separate operation and never convert event bytes.

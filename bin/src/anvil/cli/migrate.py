@@ -166,6 +166,15 @@ def migrate_events(
                 "Event-format migration is pending; "
                 "use anvil migrate-events --to git --resume --yes."
             )
+        if not resume and config.events_storage != "git":
+            # Refuse unsupported authority before creating a permanent token.
+            # Re-read below under custody: this preview grants no write authority.
+            with _schema_initialization_lock(
+                str(state_dir / "state.db"), str(state_dir / "events.jsonl"),
+                create_missing_log=False,
+            ):
+                _require_event_conversion_paths(state_dir)
+                _admit_local_event_conversion(state_dir)
         db_path = str(state_dir / "state.db")
         events_path = str(state_dir / "events.jsonl")
         # Dry runs and schema-only upgrades never introduce the permanent token.
@@ -189,13 +198,7 @@ def migrate_events(
                     if config.events_storage == "git":
                         typer.echo("events_storage is already 'git' — nothing to migrate.")
                         return
-                    active = _active_claim_ids_without_migrating(state_dir, Path(db_path))
-                    if active:
-                        raise _EventConversionRefused(
-                            "Event conversion refused: active claim custody (task or bundle): "
-                            + ", ".join(active)
-                        )
-                    rewritten, mapping, dropped = _converted_event_history(Path(events_path))
+                    rewritten, mapping, dropped = _admit_local_event_conversion(state_dir)
                     typer.echo(f"Events to rewrite : {len(mapping)}")
                     if dropped:
                         typer.echo("Note: dropped one torn trailing line (crash mid-append).")
@@ -253,6 +256,63 @@ def _event_conversion_hook(phase: str) -> None:
         _EVENT_CONVERSION_PHASE_HOOK(phase)
 
 
+def _admit_local_event_conversion(state_dir: Path) -> tuple[bytes, dict[str, str], bool]:
+    active = _active_claim_ids_without_migrating(state_dir, state_dir / "state.db")
+    if active:
+        raise _EventConversionRefused(
+            "Event conversion refused: active claim custody (task or bundle): "
+            + ", ".join(active)
+        )
+    return _converted_event_history(state_dir / "events.jsonl")
+
+
+def _require_convertible_authority(action: str, payload: dict[str, Any]) -> None:
+    """Refuse native authority that cannot survive changing event identities.
+
+    An ID map cannot retarget frozen grants or exported signed acceptance
+    receipts. Inspect native fields only; opaque metadata is not authority.
+    """
+    if action == "planning.batch_applied":
+        from anvil.state.payloads import PlanningBatchAppliedPayload
+
+        try:
+            batch = PlanningBatchAppliedPayload.model_validate(payload)
+        except ValueError:
+            raise _EventConversionRefused("Conversion requires valid planning history.") from None
+        for operation in batch.operations:
+            _require_convertible_authority(operation.action, operation.payload_json)
+        return
+    reference_fields = {
+        "prd.revised": (
+            "lineage_version", "parent_content_event_id",
+            "expected_lifecycle_content_event_id",
+        ),
+        "prd.reviewed": ("binding_version", "content_event_id"),
+        "prd.approved": ("binding_version", "content_event_id", "review_event_id"),
+        "bundle.status_changed": ("creation_event_id",),
+        "bundle.agent_observed": ("creation_event_id",),
+        "bundle.review_recorded": ("creation_event_id", "disposition_event_id"),
+        "bundle.checkpoint_recorded": ("creation_event_id",),
+        "bundle.superseded": ("creation_event_id",),
+        "bundle.withdrawn": ("creation_event_id",),
+        "bundle.claimed": ("creation_event_id", "expected_scope_digest"),
+        "bundle.progress_noted": ("creation_event_id",),
+    }
+    bound_authority = any(
+        payload.get(field) is not None for field in reference_fields.get(action, ())
+    )
+    accepted_history = action == "task.applied" and (
+        payload.get("decision") == "accepted" or payload.get("invalidation") is not None
+    )
+    if bound_authority or accepted_history:
+        raise _EventConversionRefused(
+            "Event conversion refused: this history contains event-bound authority "
+            "or accepted work and cannot safely change event identities. Keep the "
+            "local history or pending recovery intact until an explicitly reviewed "
+            "migration/recovery can preserve that authority."
+        )
+
+
 def _converted_event_history(events_path: Path) -> tuple[bytes, dict[str, str], bool]:
     from anvil.state.hashing import hash_event_id
     from anvil.state.models import Event
@@ -276,6 +336,7 @@ def _converted_event_history(events_path: Path) -> tuple[bytes, dict[str, str], 
             raise _EventConversionRefused(
                 "Conversion requires one local event history with unique ids."
             )
+        _require_convertible_authority(event.action, event.payload_json)
         identity = hash_event_id(
             parent_event_id=parent,
             action=event.action,
@@ -520,6 +581,9 @@ def _publish_event_conversion(state_dir: Path, marker: dict[str, Any], token: An
         != marker["before"]["events.jsonl"]
     ):
         raise _EventConversionRefused("Conversion event backup changed.")
+    # Old pending conversions may predate semantic admission. Their recorded
+    # before-history must be eligible too; preserve all recovery files on refusal.
+    _converted_event_history(recovery / "before" / "events.jsonl")
     for name in _EVENT_CONVERSION_FILES:
         path = state_dir / name
         _regular(path, required=marker["before"][name] is not None)

@@ -271,9 +271,9 @@ def test_explicit_migration_cannot_recreate_lost_authority(
     import anvil.state.sqlite as sqlite_module
 
     if migration_kind == "events":
-        from tests.test_git_events import _build_local_project
+        from tests.test_git_events import _build_conversion_eligible_project
 
-        _build_local_project(tmp_path)
+        _build_conversion_eligible_project(tmp_path)
         converted = _invoke(tmp_path, monkeypatch, ["migrate-events", "--to", "git", "--yes"])
         assert converted.exit_code == 0, converted.output
         state = tmp_path / ".anvil"

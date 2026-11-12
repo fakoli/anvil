@@ -254,7 +254,7 @@ def test_workspace_refuses_pending_native_recovery_then_copies_resumed_state(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery: str,
 ) -> None:
     import anvil.cli.migrate as migration
-    from tests.test_git_events import _build_local_project, _run_in
+    from tests.test_git_events import _build_conversion_eligible_project, _run_in
     from tests.test_local_event_repair import _pending, _resume_args, _state
 
     if os.name == "nt" and recovery != "local-event":
@@ -267,7 +267,7 @@ def test_workspace_refuses_pending_native_recovery_then_copies_resumed_state(
         marker = _pending(repo, receipt, monkeypatch)
         resume_arguments = _resume_args(repo)
     else:
-        _build_local_project(repo)
+        _build_conversion_eligible_project(repo)
         state = repo / ".anvil"
 
         def interrupt(phase):
