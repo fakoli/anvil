@@ -13,11 +13,13 @@ import json
 import math
 import multiprocessing
 import os
+import selectors
 import shlex
 import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,7 +41,7 @@ from anvil.clock import SystemClock  # noqa: E402
 from anvil.review.gates import evidence_complete  # noqa: E402
 from anvil.roots.registry import RootSetRegistry  # noqa: E402
 from anvil.state.hashing import canonical_json_bytes  # noqa: E402
-from anvil.state.models import EventDraft  # noqa: E402
+from anvil.state.models import Claim, EventDraft, Task  # noqa: E402
 from anvil.state.schema import get_schema_version  # noqa: E402
 from anvil.state.snapshot import serialize_state  # noqa: E402
 from anvil.state.sqlite import SqliteBackend  # noqa: E402
@@ -52,6 +54,7 @@ from anvil.web import (  # noqa: E402
 ACTOR = "scale-coordinator"
 PROJECT_ID = "execution-scale-fixture"
 MAX_STORAGE_BYTES = 256 * 1024 * 1024
+MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 NATIVE_STAGES = ("claim_append", "progress_append", "proof_validation", "evidence_append")
 
 
@@ -249,30 +252,131 @@ def _command(project, task_id, offered_at, command_timeout, command_argv):
     environment.update(
         {key: os.environ[key] for key in ("HOME", "XDG_CONFIG_HOME") if key in os.environ}
     )
-    process = subprocess.run(
-        command_argv,
-        cwd=project,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=command_timeout,
+    output = bytearray()
+    error = None
+    # Commands stay in the supervisor's owned group, including descendants.
+    # Never start a new session here: the outer deadline must still reach them.
+    with subprocess.Popen(
+        command_argv, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         env=environment,
-    )
+    ) as process:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    remaining = command_timeout - (time.perf_counter() - began)
+                    if remaining <= 0:
+                        raise TimeoutError("Fixture command exceeded timeout")
+                    for key, _ in selector.select(min(remaining, 0.1)):
+                        chunk = os.read(
+                            key.fd, min(65536, MAX_COMMAND_OUTPUT_BYTES + 1 - len(output))
+                        )
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        output.extend(chunk)
+                        if len(output) > MAX_COMMAND_OUTPUT_BYTES:
+                            del output[MAX_COMMAND_OUTPUT_BYTES:]
+                            raise ValueError(
+                                "Fixture command exceeded output limit; retained prefix"
+                            )
+                process.wait(timeout=max(0.001, command_timeout - (time.perf_counter() - began)))
+        except Exception as caught:
+            error = repr(caught)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+    ended_monotonic = time.perf_counter()
     ended = datetime.now(UTC)
     return {
         "task_id": task_id,
         "started_at": started.isoformat().replace("+00:00", "Z"),
         "ended_at": ended.isoformat().replace("+00:00", "Z"),
         "exit_code": process.returncode,
-        "output": process.stdout,
+        "output": bytes(output),
         "command_argv": command_argv,
         "queue_seconds": began - offered_at,
-        "command_seconds": time.perf_counter() - began,
+        "command_seconds": ended_monotonic - began,
+        "offered_monotonic": offered_at,
         "started_monotonic": began,
-        "ended_monotonic": time.perf_counter(),
+        "ended_monotonic": ended_monotonic,
+        "command_pid": process.pid,
+        "command_reaped": process.returncode is not None,
+        "error": error,
     }
 
 
-def _proof(project, task, claim, execution):
+class _ArtifactBudget:
+    """Serialize capture reservations; only the coordinator accounts for State."""
+
+    def __init__(self, work):
+        self.work = work
+        self.lock = threading.Lock()
+        self.capture_bytes = 0
+        self.exhausted = False
+        self.other_bytes = 0
+        self.refresh()
+
+    def refresh(self):
+        with self.lock:
+            self.other_bytes = sum(
+                path.stat().st_size for path in self.work.rglob("*")
+                if path.is_file() and path.parent != self.work / "captures"
+            )
+            total = self.other_bytes + self.capture_bytes
+            if total > MAX_STORAGE_BYTES:
+                self.exhausted = True
+                raise ValueError("Retained fixture exceeded 256 MiB storage budget")
+            return total
+
+    def write(self, path, raw):
+        with self.lock:
+            if (self.exhausted
+                    or self.other_bytes + self.capture_bytes + len(raw) > MAX_STORAGE_BYTES):
+                self.exhausted = True
+                raise ValueError("Retained fixture exceeded 256 MiB storage budget")
+            # Charge before opening; a failed/partial write never returns capacity.
+            self.capture_bytes += len(raw)
+            with path.open("xb") as stream:
+                stream.write(raw)
+
+
+def _prepare_proof(project, task_snapshot, claim_snapshot, execution, budget):
+    execution["proof_started_monotonic"] = time.perf_counter()
+    try:
+        task = Task.model_validate_json(task_snapshot)
+        claim = Claim.model_validate_json(claim_snapshot)
+        raw, proof = _proof(project, task, claim, execution, artifact_writer=budget.write)
+        execution["proof_sha256"] = hashlib.sha256(raw).hexdigest()
+        execution["proof"] = proof
+    except Exception as error:
+        execution["error"] = repr(error)
+    finally:
+        proof_path = project.parent / "captures" / f"{execution['task_id']}.proof.json"
+        try:
+            if proof_path.exists():
+                execution["proof_sha256"] = hashlib.sha256(proof_path.read_bytes()).hexdigest()
+        except OSError as error:
+            execution["error"] = repr(error)
+        execution["proof_finished_monotonic"] = time.perf_counter()
+    if execution["error"] is None:
+        execution["proof_ready_monotonic"] = execution["proof_finished_monotonic"]
+
+
+def _execute_task(project, task_id, offered_at, command_timeout, command_argv,
+                  task_snapshot, claim_snapshot, budget, proof_preparation):
+    execution = _command(project, task_id, offered_at, command_timeout, command_argv)
+    try:
+        budget.write(project.parent / "captures" / f"{task_id}.output", execution["output"])
+        if proof_preparation == "worker" and execution["error"] is None:
+            _prepare_proof(project, task_snapshot, claim_snapshot, execution, budget)
+    except Exception as error:
+        execution["error"] = repr(error)
+    return execution
+
+
+def _proof(project, task, claim, execution, *, artifact_writer=None):
     context = claim.attestation_context
     if context is None:
         raise ValueError("Native bundle member lacks immutable command-proof context")
@@ -280,7 +384,7 @@ def _proof(project, task, claim, execution):
     if shlex.join(execution["command_argv"]) != command:
         raise ValueError("Executed argv differs from the frozen task command")
     output = execution["output"]
-    if len(output) > 128 * 1024:
+    if len(output) > MAX_COMMAND_OUTPUT_BYTES:
         raise ValueError("Fixture command exceeded output limit")
     core = {
         "schema_version": 1,
@@ -304,7 +408,11 @@ def _proof(project, task, claim, execution):
         "output_sha256": hashlib.sha256(output).hexdigest(),
     }
     raw = canonical_json_bytes({"envelope_id": task.id, "payload": core, "issuer": None})
-    (project.parent / "captures" / f"{task.id}.proof.json").write_bytes(raw)
+    proof_path = project.parent / "captures" / f"{task.id}.proof.json"
+    if artifact_writer is None:
+        proof_path.write_bytes(raw)
+    else:
+        artifact_writer(proof_path, raw)
     proof = verify_claim_command_proof_batch(
         (load_claim_command_proof(raw),),
         claim=claim,
@@ -388,6 +496,7 @@ def _check_options(
     command_timeout=10,
     durability="relaxed",
     events_storage="local",
+    proof_preparation="coordinator",
 ):
     if not (
         1 <= tasks <= 2000
@@ -396,8 +505,13 @@ def _check_options(
         and 1 <= command_timeout <= 30
         and durability in {"relaxed", "strict"}
         and events_storage in {"local", "git"}
+        and proof_preparation in {"coordinator", "worker"}
     ):
-        raise ValueError("tasks=1..2000, workers=1..min(tasks,128), cohort=1..12, timeout=1..30")
+        raise ValueError(
+            "tasks=1..2000, workers=1..min(tasks,128), cohort=1..12, timeout=1..30; "
+            "durability=relaxed|strict, events_storage=local|git, "
+            "proof_preparation=coordinator|worker"
+        )
 
 
 def run(
@@ -410,11 +524,12 @@ def run(
     durability="relaxed",
     events_storage="local",
     prepare_executor=None,
+    proof_preparation="coordinator",
 ):
     """Run only below a fresh directory; the CLI additionally enforces a wall deadline."""
     _check_options(tasks=tasks, workers=workers, cohort_size=cohort_size,
                    command_timeout=command_timeout, durability=durability,
-                   events_storage=events_storage)
+                   events_storage=events_storage, proof_preparation=proof_preparation)
     work.mkdir(parents=True, exist_ok=False)
     source_identity = _source_identity()
     project = work / "project"
@@ -443,6 +558,7 @@ def run(
     failures = []
     completed = []
     intervals = []
+    raw_timings = []
     began = time.perf_counter()
     backend = _open(project, durability, events_storage)
 
@@ -506,63 +622,102 @@ def run(
                     detail="Awaiting a bounded executor slot",
                 )
         storage_guard()
+        budget = _ArtifactBudget(work)
+        # Serialized snapshots are immutable and independent of live backend objects.
+        task_snapshots = {}
+        for task_id in task_ids:
+            task = backend.get_task(task_id)
+            # Task's public serializer deliberately excludes its internal PRD selector.
+            task_snapshots[task_id] = json.dumps({**task.model_dump(mode="json"),
+                                                  "prd_id": task.prd_id})
+        claim_snapshots = {task_id: claim.model_dump_json() for task_id, claim in claims.items()}
         offered_at = time.perf_counter()
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(
-                    _command,
-                    project,
-                    task_id,
-                    offered_at,
-                    command_timeout,
-                    command_for_task(task_id),
-                ): task_id
-                for task_id in task_ids
+                    _execute_task, project, task_id, offered_at, command_timeout,
+                    command_for_task(task_id), task_snapshots[task_id], claim_snapshots[task_id],
+                    budget, proof_preparation,
+                ): task_id for task_id in task_ids
             }
             for future in as_completed(futures):
                 task_id = futures[future]
+                row = {"task_id": task_id, "claim_id": claims[task_id].id,
+                       "claim_generation": claims[task_id].generation,
+                       "task_revision": claims[task_id].attestation_context.task_revision,
+                       "proof_preparation": proof_preparation,
+                       "offered_monotonic": offered_at, "outcome": "failed"}
+                execution = None
                 try:
                     execution = future.result()
+                    execution["handled_monotonic"] = time.perf_counter()
                     intervals.extend(
                         [(execution["started_monotonic"], 1), (execution["ended_monotonic"], -1)]
                     )
                     for stage in ("queue", "command"):
                         measurements[stage].append(execution[f"{stage}_seconds"])
                     measurements["proof_queue"].append(
-                        time.perf_counter() - execution["ended_monotonic"]
+                        execution["handled_monotonic"] - execution["ended_monotonic"]
                     )
-                    (captures / f"{task_id}.output").write_bytes(execution["output"])
-                    task = backend.get_task(task_id)
-                    _, proof = timed(
-                        "proof_validation", _proof, project, task, claims[task_id], execution
-                    )
+                    if proof_preparation == "coordinator" and execution["error"] is None:
+                        _prepare_proof(project, task_snapshots[task_id], claim_snapshots[task_id],
+                                       execution, budget)
+                    if execution["error"] is not None:
+                        raise ValueError(execution["error"])
+                    if budget.exhausted:
+                        raise ValueError("Retained fixture storage budget exhausted")
+                    task = Task.model_validate_json(task_snapshots[task_id])
+                    execution["writer_started_monotonic"] = time.perf_counter()
                     timed(
-                        "evidence_append",
-                        _append,
-                        backend,
-                        "evidence.submitted",
-                        "task",
-                        task_id,
-                        {
-                            "task_id": task_id,
-                            "claim_id": claims[task_id].id,
-                            "submitted_by": ACTOR,
-                            "evidence_id": f"evidence-{task_id}",
-                            "commands_run": task.verification.commands,
-                            "files_changed": [],
-                            "proofs": [proof.model_dump(mode="json")],
-                        },
+                        "evidence_append", _append, backend, "evidence.submitted", "task", task_id,
+                        {"task_id": task_id, "claim_id": claims[task_id].id,
+                         "submitted_by": ACTOR, "evidence_id": f"evidence-{task_id}",
+                         "commands_run": task.verification.commands, "files_changed": [],
+                         "proofs": [execution["proof"].model_dump(mode="json")]},
                     )
+                    execution["append_returned_monotonic"] = time.perf_counter()
                     completed.append(task_id)
-                    measurements["command_end_to_durable_evidence"].append(
-                        time.perf_counter() - execution["ended_monotonic"]
-                    )
+                    row["outcome"] = "submitted"
+                    for stage, earlier in (
+                        ("command_end_to_durable_evidence", "ended_monotonic"),
+                        ("offered_to_ledger", "offered_monotonic"),
+                    ):
+                        measurements[stage].append(execution["append_returned_monotonic"]
+                                                   - execution[earlier])
                 except Exception as error:
-                    if isinstance(error, subprocess.TimeoutExpired) and error.output:
-                        (captures / f"{task_id}.output").write_bytes(error.output)
+                    row["error"] = repr(error)
                     failures.append({"task_id": task_id, "error": repr(error)})
-                if (len(completed) + len(failures)) % 16 == 0:
-                    storage_guard()
+                finally:
+                    if execution is not None:
+                        for stage, start, end in (
+                            ("proof_validation", "proof_started_monotonic",
+                             "proof_finished_monotonic"),
+                            ("proof_preparation_wait", "ended_monotonic",
+                             "proof_started_monotonic"),
+                            ("proof_ready_to_writer", "proof_ready_monotonic",
+                             "writer_started_monotonic"),
+                        ):
+                            if start in execution and end in execution:
+                                measurements[stage].append(execution[end] - execution[start])
+                        row.update({key: value for key, value in execution.items()
+                                    if key.endswith("_monotonic") or key in (
+                                        "started_at", "ended_at", "exit_code", "proof_sha256",
+                                        "command_pid", "command_reaped")})
+                        # Futures may remain until pool exit; retain artifacts, not duplicate bytes.
+                        execution.pop("output", None)
+                        execution.pop("proof", None)
+                    raw_timings.append(row)
+                    try:
+                        budget.write(captures / f"{task_id}.timing.json",
+                                     json.dumps(row, sort_keys=True).encode())
+                    except Exception as error:
+                        failures.append({"task_id": task_id, "stage": "timing_retention",
+                                         "error": repr(error)})
+                if len(raw_timings) % 16 == 0:
+                    try:
+                        budget.refresh()
+                    except ValueError as error:
+                        failures.append({"stage": "storage", "error": repr(error)})
         execution_seconds = time.perf_counter() - offered_at
         for bundle_id in bundle_ids:
             readiness = timed("bundle_readiness", manager.readiness, bundle_id)
@@ -575,8 +730,11 @@ def run(
             assert item.claim_id == claims[item.task_id].id
             assert evidence_complete(backend.get_task(item.task_id), item) == (True, [])
         for task in backend.list_tasks():
-            assert task.status.value == ("needs_review" if task.id in completed else "claimed")
-        assert len(backend.list_active_claims()) == len(failures)
+            if task.id in completed:
+                assert task.status.value == "needs_review"
+            else:
+                assert task.status.value in {"claimed", "ready"}
+        assert len(backend.list_active_claims()) <= len(failures)
         log = project / ".anvil" / "events.jsonl"
         events = [json.loads(line) for line in log.read_text().splitlines()]
         counts = Counter(event["action"] for event in events)
@@ -605,7 +763,11 @@ def run(
         backend.close()
     # Closing the sole writer checkpoints its WAL. Report the retained files,
     # not the small pre-checkpoint main file with most pages still in the WAL.
-    retained_bytes = storage_guard()
+    try:
+        retained_bytes = storage_guard()
+    except ValueError as error:
+        retained_bytes = sum(path.stat().st_size for path in work.rglob("*") if path.is_file())
+        failures.append({"stage": "storage", "error": repr(error)})
     database_bytes = (project / ".anvil/state.db").stat().st_size
     active = peak_overlap = 0
     for _, change in sorted(intervals):
@@ -620,6 +782,8 @@ def run(
         "sqlite": sqlite3.sqlite_version,
         "durability": durability,
         "events_storage": events_storage,
+        "proof_preparation": proof_preparation,
+        "raw_timings": raw_timings,
         "source_sha256": source_identity,
         "source_unchanged": source_unchanged,
         "tasks": tasks,
@@ -631,9 +795,14 @@ def run(
         "ledger_writers": 1,
         "containers": 0,
         "completed": len(completed),
+        "attempted": len(raw_timings),
+        "failed_tasks": sum(row["outcome"] == "failed" for row in raw_timings),
+        "command_captures": sum("command_pid" in row for row in raw_timings),
+        "retained_proof_artifacts": len(list(captures.glob("*.proof.json"))),
         "failures": failures,
         "event_counts": dict(counts),
         "stages": {stage: _summary(samples) for stage, samples in measurements.items()},
+        "raw_stage_seconds": dict(measurements),
         "execution_seconds": round(execution_seconds, 3),
         "completed_per_second": round(len(completed) / execution_seconds, 3),
         "elapsed_seconds": round(time.perf_counter() - began, 3),
@@ -649,7 +818,11 @@ def run(
         "work_directory": str(work),
         "limits": [
             "Active claims, executor slots, ledger writers and containers are separate counts.",
-            "One coordinator owns all mutations; only real command subprocesses fan out.",
+            "One coordinator owns all mutations; the bounded command pool may also prepare proofs.",
+            "Threaded preparation overlaps I/O, not necessarily Python CPU; native append "
+            "still verifies current custody and proof material.",
+            "Capture bytes are reserved under a lock; native State growth is checked every "
+            "16 handled tasks and after close. Any exceeded storage budget fails the run.",
             "Command latency includes process startup and a 20ms fixture wait; "
             "queue delay is separate.",
             "Proofs are actual fixture-command captures, claim-owner self-attested, "
@@ -743,6 +916,9 @@ def _supervise(output, options, deadline, *, child_target=_child):
             )
             + "\n"
         )
+    # Reap/stop any same-group command descendants even on an ordinary leader exit.
+    if not (timed_out or interrupted):
+        _stop_owned_process_group(process)
     if not output.exists():
         output.write_text(
             json.dumps({"validated": False, "child_exit_code": process.exitcode}) + "\n"
@@ -763,6 +939,8 @@ def main():
     parser.add_argument("--command-timeout", type=int, default=10)
     parser.add_argument("--durability", choices=("relaxed", "strict"), default="relaxed")
     parser.add_argument("--events-storage", choices=("local", "git"), default="local")
+    parser.add_argument("--proof-preparation", choices=("coordinator", "worker"),
+                        default="coordinator")
     parser.add_argument("--deadline", type=int, default=900)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -783,6 +961,7 @@ def main():
             "command_timeout",
             "durability",
             "events_storage",
+            "proof_preparation",
         )
     }
     receipt = _supervise(output, options, args.deadline)
