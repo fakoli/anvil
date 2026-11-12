@@ -262,7 +262,12 @@ def _plan(state_dir: Path, receipt_path: Path) -> _Plan:
     )
 
 
-def _table_rows(conn: sqlite3.Connection) -> dict[str, list[str]]:
+def _table_rows(
+    conn: sqlite3.Connection,
+    *,
+    encode_json: Callable[[Any], bytes] = canonical_json_bytes,
+) -> dict[str, list[str]]:
+    """Collect logical rows; local repair keeps its bounded encoder by default."""
     tables = [
         row[0]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -277,10 +282,10 @@ def _table_rows(conn: sqlite3.Connection) -> dict[str, list[str]]:
                 name: ({"bytes": bytes(item).hex()} if isinstance(item, bytes) else item)
                 for name, item in zip(cols, row, strict=True)
             }
-            rows.append(canonical_json_bytes(value).decode("utf-8"))
+            rows.append(encode_json(value).decode("utf-8"))
         result[table] = sorted(rows)
     result["__schema__"] = [
-        canonical_json_bytes(list(row)).decode("utf-8")
+        encode_json(list(row)).decode("utf-8")
         for row in conn.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
         )

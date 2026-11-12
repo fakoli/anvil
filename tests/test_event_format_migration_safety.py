@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -50,6 +51,28 @@ def _convert(root: Path, *, resume: bool = False):
     return _run_in(
         root,
         ["migrate-events", "--to", "git", "--yes", *(["--resume"] if resume else [])],
+    )
+
+
+def _append_native_sync_metadata(backend, metadata):
+    backend.append(
+        _draft(
+            "sync_mapping.upserted",
+            {
+                "task_id": "T001",
+                "external_system": "review-fixture",
+                "external_id": "fixture-1",
+                "external_url": None,
+                "last_synced_at": _T0.isoformat(),
+                "sync_state": "in_sync",
+                "conflict_resolution_strategy": "prompt",
+                "provider_metadata": metadata,
+                "prd_id": "default",
+                "entity_kind": "task",
+            },
+            target_kind="task",
+            target_id="T001",
+        )
     )
 
 
@@ -639,25 +662,7 @@ def test_native_float_metadata_survives_conversion_and_resume(tmp_path, monkeypa
     state = tmp_path / ".anvil"
     backend = _backend(state)
     try:
-        backend.append(
-            _draft(
-                "sync_mapping.upserted",
-                {
-                    "task_id": "T001",
-                    "external_system": "review-fixture",
-                    "external_id": "fixture-1",
-                    "external_url": None,
-                    "last_synced_at": _T0.isoformat(),
-                    "sync_state": "in_sync",
-                    "conflict_resolution_strategy": "prompt",
-                    "provider_metadata": {"confidence": 0.75},
-                    "prd_id": "default",
-                    "entity_kind": "task",
-                },
-                target_kind="task",
-                target_id="T001",
-            )
-        )
+        _append_native_sync_metadata(backend, {"confidence": 0.75})
     finally:
         backend.close()
     if interrupted:
@@ -751,6 +756,120 @@ def test_stable_token_contention_uses_callers_error_contract(tmp_path, monkeypat
     finally:
         backend.close()
     assert (state / "events.jsonl").read_bytes() == before_events
+
+
+@pytest.mark.parametrize("event_count,metadata_bytes", [(36, 512 * 1024), (1, 17 * 1024 * 1024)])
+def test_native_large_rows_and_history_convert_without_public_response_limits(
+    tmp_path, event_count, metadata_bytes,
+):
+    from anvil.cli.local_event_repair import _table_rows
+    from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    backend = _backend(state)
+    try:
+        for index in range(event_count):
+            _append_native_sync_metadata(backend, {"value": "x" * metadata_bytes, "index": index})
+    finally:
+        backend.close()
+    # Default local repair/public canonicalization stays bounded. Only native
+    # conversion's private comparison selects the complete-row encoder.
+    with closing(sqlite3.connect(state / "state.db")) as connection:
+        with pytest.raises(CanonicalJsonRefusal, match="byte_limit_exceeded"):
+            canonical_json_bytes(_table_rows(connection))
+    result = _convert(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert not (state / ".event-format-migration.json").exists()
+    _backend(state, "git").close()
+    with query_only_transaction(state / "state.db", state / "events.jsonl") as (connection, _):
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24 + event_count
+        metadata = json.loads(connection.execute(
+            "SELECT provider_metadata_json FROM sync_mappings WHERE external_system=?",
+            ("review-fixture",),
+        ).fetchone()[0])
+        assert len(metadata["value"]) == metadata_bytes
+        assert metadata["index"] == event_count - 1
+
+
+def test_private_projection_digest_preserves_existing_canonical_preimages(tmp_path):
+    from anvil.cli.local_event_repair import _table_rows
+    from anvil.cli.migrate import _conversion_projection_digest
+    from anvil.state.hashing import canonical_json_bytes
+
+    database = tmp_path / "projection.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE native_rows (payload BLOB, note TEXT, number INTEGER)")
+        connection.executemany(
+            "INSERT INTO native_rows VALUES (?, ?, ?)",
+            [(b"\x00\xff", '雪\n"\\\x00', -(2**63)), (None, "é", 2**63 - 1)],
+        )
+        connection.execute("PRAGMA user_version=26")
+        connection.commit()
+        expected = hashlib.sha256(canonical_json_bytes(_table_rows(connection))).hexdigest()
+    before = database.read_bytes()
+    assert _conversion_projection_digest(database) == expected
+    assert database.read_bytes() == before
+
+
+def test_private_projection_digest_has_no_public_aggregate_node_limit(tmp_path, monkeypatch):
+    import anvil.cli.local_event_repair as repair
+    from anvil.cli.migrate import _conversion_projection_digest
+    from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
+
+    database = tmp_path / "projection.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE native_rows (value INTEGER)")
+        connection.commit()
+    # Encoder-boundary fixture, not a task/concurrency or scale qualification.
+    rows = {"native_rows": ["{}"] * 100_001}
+    with pytest.raises(CanonicalJsonRefusal, match="node_limit_exceeded"):
+        canonical_json_bytes(rows)
+    monkeypatch.setattr(repair, "_table_rows", lambda connection, **kwargs: rows)
+    expected = hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
+    assert _conversion_projection_digest(database) == expected
+
+
+@pytest.mark.parametrize("phase", ["after_events.jsonl", "after_database"])
+def test_hot_journal_recovers_only_private_admission_copy_then_resumes(tmp_path, monkeypatch, phase):
+    import anvil.cli.migrate as migration
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+
+    def interrupt(observed):
+        if observed == phase:
+            raise RuntimeError("injected conversion interruption")
+
+    monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", interrupt)
+    assert _convert(tmp_path).exit_code == 1
+    monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
+    marker = json.loads((state / ".event-format-migration.json").read_text())
+    child = subprocess.run(
+        [sys.executable, "-c", """
+import os, sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+assert connection.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
+connection.execute('PRAGMA synchronous=FULL')
+connection.execute('PRAGMA cache_size=1')
+connection.execute('BEGIN IMMEDIATE')
+connection.execute('UPDATE events SET actor=?', ('uncommitted' * 1024,))
+os._exit(0)
+""", str(state / "state.db")],
+        capture_output=True, timeout=15,
+    )
+    assert child.returncode == 0, child.stderr
+    assert (state / "state.db-journal").stat().st_size > 512
+    before = _files(state)
+    recovered_digest = migration._conversion_projection_digest(state / "state.db")
+    side = "after" if phase == "after_database" else "before"
+    assert recovered_digest == marker["projections"][side]
+    assert _files(state) == before
+    result = _convert(tmp_path, resume=True)
+    assert result.exit_code == 0, result.output
+    assert not (state / ".event-format-migration.json").exists()
+    assert migration._conversion_projection_digest(state / "state.db") == marker["projections"]["after"]
+    _backend(state, "git").close()
 
 
 def test_lock_acquisition_error_contract_does_not_translate_body_exceptions(tmp_path):
