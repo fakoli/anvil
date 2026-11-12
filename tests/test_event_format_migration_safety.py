@@ -629,3 +629,180 @@ def test_nested_legacy_writer_refuses_token_appearance_without_lock_inversion(tm
                     pytest.fail("nested legacy writer bypassed stable admission")
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_native_float_metadata_survives_conversion_and_resume(tmp_path, monkeypatch, interrupted):
+    import anvil.cli.migrate as migration
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    backend = _backend(state)
+    try:
+        backend.append(
+            _draft(
+                "sync_mapping.upserted",
+                {
+                    "task_id": "T001",
+                    "external_system": "review-fixture",
+                    "external_id": "fixture-1",
+                    "external_url": None,
+                    "last_synced_at": _T0.isoformat(),
+                    "sync_state": "in_sync",
+                    "conflict_resolution_strategy": "prompt",
+                    "provider_metadata": {"confidence": 0.75},
+                    "prd_id": "default",
+                    "entity_kind": "task",
+                },
+                target_kind="task",
+                target_id="T001",
+            )
+        )
+    finally:
+        backend.close()
+    if interrupted:
+
+        def interrupt(phase):
+            if phase == "after_events.jsonl":
+                raise RuntimeError("injected interrupted publication")
+
+        monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", interrupt)
+        assert _convert(tmp_path).exit_code == 1
+        monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
+    result = _convert(tmp_path, resume=interrupted)
+    assert result.exit_code == 0, result.output
+    assert not (state / ".event-format-migration.json").exists()
+    _backend(state, "git").close()
+    with query_only_transaction(state / "state.db", state / "events.jsonl") as (connection, _):
+        metadata = connection.execute(
+            "SELECT provider_metadata_json FROM sync_mappings WHERE external_system=?",
+            ("review-fixture",),
+        ).fetchone()[0]
+        assert json.loads(metadata) == {"confidence": 0.75}
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25
+
+
+@pytest.mark.parametrize("changed", ["projection", "events"])
+def test_publication_refuses_drift_from_replayed_artifacts(tmp_path, monkeypatch, changed):
+    import anvil.cli.repair as repair
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    publish = repair._publish_staged_projection
+
+    def publish_with_drift(staged_database, connection):
+        publish(staged_database, connection)
+        if changed == "projection":
+            connection.execute("UPDATE tasks SET title='unrecorded publication drift'")
+            connection.commit()
+        else:
+            with (state / "events.jsonl").open("ab") as events:
+                events.write(b"\n")
+
+    monkeypatch.setattr(repair, "_publish_staged_projection", publish_with_drift)
+    result = _convert(tmp_path)
+    assert result.exit_code == 1, result.output
+    assert "does not match its replayed artifacts" in result.output
+    assert (state / ".event-format-migration.json").is_file()
+    assert (state / ".state-operation.lock").read_bytes() == b""
+    monkeypatch.setattr(repair, "_publish_staged_projection", publish)
+    before = _files(state)
+    resumed = _convert(tmp_path, resume=True)
+    assert resumed.exit_code == 1, resumed.output
+    assert _files(state) == before
+
+
+@pytest.mark.parametrize("operation", ["initialize", "query", "status", "convert", "append"])
+def test_stable_token_contention_uses_callers_error_contract(tmp_path, monkeypatch, operation):
+    import fcntl
+
+    import anvil.state.sqlite as sqlite_module
+    from anvil.state.backend import StateLocked
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    assert _convert(tmp_path).exit_code == 0
+    backend = _backend(state, "git")
+    before_events = (state / "events.jsonl").read_bytes()
+    monkeypatch.setattr(sqlite_module, "_FLOCK_TIMEOUT_S", 0.01)
+    try:
+        with (state / ".state-operation.lock").open("r+b") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if operation == "initialize":
+                with pytest.raises(SchemaProbeFailed, match="contention deadline"):
+                    backend.initialize()
+            elif operation == "query":
+                with pytest.raises(SchemaProbeFailed, match="contention deadline"):
+                    with query_only_transaction(state / "state.db", state / "events.jsonl"):
+                        pytest.fail("query entered held State")
+            elif operation == "append":
+                with pytest.raises(StateLocked, match="contention deadline"):
+                    backend.append(_draft("task.status_changed", {}, target_id="T001"))
+            else:
+                result = (
+                    _run_in(tmp_path, ["status", "--json"])
+                    if operation == "status" else _convert(tmp_path)
+                )
+                assert result.exit_code == 1, result.output
+                assert isinstance(result.exception, SystemExit)
+                assert "schema_probe_failed" in result.output
+                if operation == "status":
+                    assert json.loads(result.stdout)["error"]["code"] == "schema_probe_failed"
+    finally:
+        backend.close()
+    assert (state / "events.jsonl").read_bytes() == before_events
+
+
+def test_lock_acquisition_error_contract_does_not_translate_body_exceptions(tmp_path):
+    from anvil.state.backend import StateLocked
+    from anvil.state.sqlite import _state_operation_lock
+
+    with pytest.raises(StateLocked, match="body failure"):
+        with _state_operation_lock(
+            tmp_path / "state.db", create=True, contention_error_type=SchemaProbeFailed,
+        ):
+            raise StateLocked("body failure")
+
+
+@pytest.mark.parametrize("operation", ["initialize", "query", "status", "preview", "append"])
+def test_token_appearing_during_legacy_admission_uses_callers_error_contract(
+    tmp_path, monkeypatch, operation,
+):
+    import anvil.state.sqlite as sqlite_module
+    from anvil.state.backend import StateLocked
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    backend = _backend(state)
+    acquire = sqlite_module._append_lock_acquire_nb
+
+    def acquire_and_introduce_token(handle):
+        acquire(handle)
+        (state / ".state-operation.lock").touch()
+
+    monkeypatch.setattr(sqlite_module, "_append_lock_acquire_nb", acquire_and_introduce_token)
+    before_events = (state / "events.jsonl").read_bytes()
+    try:
+        if operation == "initialize":
+            with pytest.raises(SchemaProbeFailed, match="coordination changed"):
+                backend.initialize()
+        elif operation == "query":
+            with pytest.raises(SchemaProbeFailed, match="coordination changed"):
+                with query_only_transaction(state / "state.db", state / "events.jsonl"):
+                    pytest.fail("query entered unfenced State")
+        elif operation == "append":
+            with pytest.raises(StateLocked, match="coordination changed"):
+                backend.append(_draft("task.status_changed", {}, target_id="T001"))
+        else:
+            result = _run_in(
+                tmp_path,
+                ["status", "--json"] if operation == "status" else ["migrate-events", "--to", "git"],
+            )
+            assert result.exit_code == 1, result.output
+            assert isinstance(result.exception, SystemExit)
+            assert "schema_probe_failed" in result.output
+            if operation == "status":
+                assert json.loads(result.stdout)["error"]["code"] == "schema_probe_failed"
+    finally:
+        backend.close()
+    assert (state / "events.jsonl").read_bytes() == before_events

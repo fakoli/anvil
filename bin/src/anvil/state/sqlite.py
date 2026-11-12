@@ -516,6 +516,7 @@ def _state_operation_lock(
     create: bool = False,
     sleep_fn: Callable[[float], None] = time.sleep,
     monotonic_fn: Callable[[], float] = time.monotonic,
+    contention_error_type: type[StateLocked] | type[SchemaProbeFailed] = StateLocked,
 ) -> Iterator[Any | None]:
     """Own the permanent token introduced by event-format conversion.
 
@@ -543,13 +544,13 @@ def _state_operation_lock(
                 legacy.pop(canonical)
         return
     if legacy.get(canonical):
-        raise StateLocked("State coordination changed; reopen and retry when idle.")
+        raise contention_error_type("State coordination changed; reopen and retry when idle.")
     # Never invert stable-token -> event-file ordering during nested bootstrap.
     database_identity = os.path.normcase(os.path.realpath(db_path))
     if any(
         path == database_identity for path, _ in getattr(_SCHEMA_INITIALIZATION_LOCAL, "stack", [])
     ):
-        raise StateLocked("State coordination changed; reopen and retry when idle.")
+        raise contention_error_type("State coordination changed; reopen and retry when idle.")
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     if create:
         flags |= os.O_CREAT
@@ -571,7 +572,7 @@ def _state_operation_lock(
             except OSError as exc:
                 remaining = deadline - monotonic_fn()
                 if remaining <= 0:
-                    raise StateLocked(
+                    raise contention_error_type(
                         "State coordination lock exceeded its contention deadline."
                     ) from exc
                 sleep_fn(min(next(delays), remaining))
@@ -601,12 +602,16 @@ def _require_current_file_handle(handle: Any, path: str | os.PathLike[str]) -> N
         raise SchemaProbeFailed("State coordination authority changed; reopen before retrying.")
 
 
-def _require_current_state_lock(db_path: str | os.PathLike[str]) -> None:
+def _require_current_state_lock(
+    db_path: str | os.PathLike[str],
+    *,
+    contention_error_type: type[StateLocked] | type[SchemaProbeFailed] = StateLocked,
+) -> None:
     canonical = _state_operation_key(db_path)
     token = Path(db_path).parent / _STATE_OPERATION_TOKEN
     owned = getattr(_STATE_OPERATION_LOCAL, "owned", {})
     if os.path.lexists(token) and canonical not in owned:
-        raise StateLocked("State coordination changed; reopen and retry when idle.")
+        raise contention_error_type("State coordination changed; reopen and retry when idle.")
 
 
 def _require_event_storage_fence(db_path: str, events_storage: str) -> None:
@@ -653,7 +658,7 @@ def _schema_initialization_lock(
     create_missing_log: bool = True,
     allow_event_conversion: bool = False,
 ) -> Iterator[Any | None]:
-    with _state_operation_lock(db_path) as coordination:
+    with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed) as coordination:
         with _schema_initialization_event_lock(
             db_path,
             events_path,
@@ -732,7 +737,7 @@ def _schema_initialization_event_lock(
                     time.sleep(min(next(delays), remaining))
             stack.append((canonical, lock_fh))
             try:
-                _require_current_state_lock(db_path)
+                _require_current_state_lock(db_path, contention_error_type=SchemaProbeFailed)
                 _require_current_file_handle(lock_fh, events_path)
                 if not allow_event_recovery:
                     _require_no_event_recovery(
@@ -1083,7 +1088,7 @@ def query_only_transaction(
     db_path: str | os.PathLike[str],
     events_path: str | os.PathLike[str],
 ) -> Iterator[tuple[sqlite3.Connection, Any]]:
-    with _state_operation_lock(db_path):
+    with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed):
         with _query_only_event_transaction(db_path, events_path) as transaction:
             yield transaction
 
@@ -1159,7 +1164,7 @@ def _query_only_event_transaction(
                     time.sleep(min(next(delays), remaining))
             stack.append((canonical, lock_fh))
             try:
-                _require_current_state_lock(db_path)
+                _require_current_state_lock(db_path, contention_error_type=SchemaProbeFailed)
                 _require_current_file_handle(lock_fh, events_path)
                 _require_no_event_recovery(db_path)
                 confirmed = read_db_schema_version(database)

@@ -172,6 +172,7 @@ def migrate_events(
         with _state_operation_lock(
             db_path,
             create=yes and not resume and config.events_storage != "git",
+            contention_error_type=SchemaProbeFailed,
         ) as token:
             with _schema_initialization_lock(
                 db_path,
@@ -477,7 +478,6 @@ def _publish_event_conversion(state_dir: Path, marker: dict[str, Any], token: An
         _fsync_file,
         _publish_staged_projection,
     )
-    from anvil.project_snapshot import validate_converged_event_log
     from anvil.state.sqlite import _EVENT_FORMAT_MIGRATION_MARKER, _STATE_OPERATION_TOKEN
 
     directory = _directory(state_dir)
@@ -536,9 +536,15 @@ def _publish_event_conversion(state_dir: Path, marker: dict[str, Any], token: An
     with closing(sqlite3.connect(state_dir / "state.db")) as connection:
         _publish_staged_projection(recovery / "after" / "state.db", connection)
         _checkpoint_and_fsync_live_projection(connection, state_dir / "state.db")
-        connection.row_factory = sqlite3.Row
-        with (state_dir / "events.jsonl").open("rb") as events:
-            validate_converged_event_log(connection, events)
+    # Native replay admits opaque provider metadata, including finite floats.
+    # Provider-read canonical JSON is intentionally narrower, so it cannot be
+    # the publication oracle. Compare the complete replayed projection and the
+    # exact event bytes already bound to this recovery manifest instead.
+    if (
+        _conversion_projection_digest(state_dir / "state.db") != marker["projections"]["after"]
+        or _conversion_digest(state_dir / "events.jsonl") != marker["after"]["events.jsonl"]
+    ):
+        raise _EventConversionRefused("Published conversion does not match its replayed artifacts.")
     _event_conversion_hook("after_database")
     token.seek(0)
     token.write(b"git\n")
