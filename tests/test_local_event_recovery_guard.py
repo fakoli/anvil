@@ -181,7 +181,7 @@ def test_str_subclass_keeps_native_pathlib_conversion_semantics(tmp_path: Path) 
     # pathlib's str-subclass normalization differs between Python 3.11 and 3.14.
     # Preserve each runtime's actual conversions, including their side effects.
     reference = ChangingDatabaseString(str(first / "state.db"))
-    Path(reference).parent
+    assert Path(reference).parent == first
     conversion_parent = Path(reference).parent
     (conversion_parent / ".event-format-migration.json").write_text("{}")
     database = ChangingDatabaseString(str(first / "state.db"))
