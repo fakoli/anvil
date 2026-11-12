@@ -122,6 +122,27 @@ semantics.
 
 ## Exercise the journeys
 
+Use one journey contract across the surfaces: starting State, actor/custody,
+action, expected ledger outcome, refusal case, and retained evidence. Keep
+native transition evidence separate from browser interaction evidence. A CLI
+or HTTP pass cannot establish drag feedback, focus behavior or visual fit.
+
+| Journey | Executable CLI/HTTP check in `tests/test_execution_journeys.py` | Browser observation to retain |
+| --- | --- | --- |
+| J1 authorization | `test_execution_continues_from_cli_after_web_closes`, `test_changed_execution_preview_refuses_without_partial_claim`, `test_competing_execution_confirmations_have_one_owner` | Exact task/bundle preview, valid drag destinations, keyboard confirmation, stale-preview error remains visible |
+| J2 independent work | `test_execution_continues_from_cli_after_web_closes` | Refresh shows one member awaiting review while its independent sibling remains dispatchable |
+| J3 proof submission | `test_execution_continues_from_cli_after_web_closes`, `test_bad_proof_does_not_complete_bundle_or_block_independent_member` | A CLI submission appears in the board's review stage without accepting the task |
+| J4 refusal/recovery | `test_bad_proof_does_not_complete_bundle_or_block_independent_member`, `test_batch_access_requires_writer_and_matching_coordinator` | Refusal reason is visible and unrelated work can still be inspected |
+| J5 review/acceptance | `test_execution_continues_from_cli_after_web_closes`, `test_task_and_bundle_confirmation_tokens_are_not_interchangeable` | Preview identifies the intended disposition; do not accept real work during a fixture check |
+| J6 reconnect | `test_execution_continues_from_cli_after_web_closes` | Close/reopen the board; refresh reflects the CLI's persisted changes |
+
+Record each observation against its source revision, fixture and State identity,
+surface, actor, expected and actual outcome, and evidence path. Mark browser
+checks not run as untested; retain failures rather than replacing them with a
+reconstructed walkthrough. For fixture mutations, use native CLI/HTTP actions
+and inspect ledger outcomes. Keep fixture creation and all evidence outside
+canonical production State.
+
 Run the deterministic CLI/HTTP journeys from the source checkout:
 
 ```sh
@@ -150,8 +171,9 @@ pagination with more than 500 tasks, a narrow viewport, and an open review dialo
 while independent workers update the ledger. Record the source revision,
 fixture size, browser, observed outcome and any remaining gap.
 
-The native ledger latency target is p95 below 15 milliseconds for the explicitly
-measured operation and workload. Report lock wait, mutation duration, offered
+The initial native ledger campaign targeted p95 below 15 milliseconds for the explicitly
+measured operation and workload. A new campaign declares its target before
+execution. Report lock wait, mutation duration, offered
 load, refusals and correctness checks alongside it. CLI startup, HTTP delivery,
 canonical snapshots, browser rendering and model inference are separate latency
 measurements. A passing journey is correctness evidence, not a latency or fleet
