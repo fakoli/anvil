@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import UserDict
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from importlib import resources
 from pathlib import Path
@@ -703,6 +704,115 @@ def test_canonical_json_has_a_portable_exact_utf8_vector() -> None:
     assert canonical_json_bytes(right) == expected
     assert not expected.startswith(b"\xef\xbb\xbf")
     assert not expected.endswith((b"\n", b"\r"))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, b"null"),
+        (True, b"true"),
+        (False, b"false"),
+        (0, b"0"),
+        (-7, b"-7"),
+        (MIN_CANONICAL_JSON_INTEGER, b"-9223372036854775808"),
+        (MAX_CANONICAL_JSON_INTEGER, b"9223372036854775807"),
+        ("", b'""'),
+        ('"\\/', b'"\\"\\\\/"'),
+        ("line\n", b'"line\\n"'),
+        ("line\\n", b'"line\\\\n"'),
+        ("é", b'"\xc3\xa9"'),
+        ("e\u0301", b'"e\xcc\x81"'),
+        (
+            "😀\u2028\u2029\U0010ffff",
+            b'"\xf0\x9f\x98\x80\xe2\x80\xa8\xe2\x80\xa9\xf4\x8f\xbf\xbf"',
+        ),
+        (
+            "".join(chr(codepoint) for codepoint in range(32)),
+            b'"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007'
+            b'\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f'
+            b'\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017'
+            b'\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f"',
+        ),
+    ],
+)
+def test_canonical_scalar_bytes_digest_and_exact_budget(
+    value: object, expected: bytes,
+) -> None:
+    assert canonical_json_bytes(
+        value, max_bytes=len(expected), max_string_bytes=len(expected),
+    ) == expected
+    domain = b"anvil.scalar-conformance.v1\0"
+    assert domain_separated_sha256(domain, value) == hashlib.sha256(
+        domain + expected
+    ).hexdigest()
+
+    # Include container punctuation in the exact budget, including one-byte
+    # scalars whose standalone N-1 ceiling would be invalid configuration.
+    wrapped = b"[" + expected + b"]"
+    assert canonical_json_bytes(
+        [value], max_bytes=len(wrapped), max_string_bytes=len(wrapped),
+    ) == wrapped
+    with pytest.raises(CanonicalJsonRefusal) as refusal:
+        canonical_json_bytes(
+            [value], max_bytes=len(wrapped) - 1, max_string_bytes=len(wrapped) - 1,
+        )
+    assert refusal.value.code is CanonicalJsonRefusalCode.byte_limit_exceeded
+    assert refusal.value.path == "$[0]"
+
+    if isinstance(value, str):
+        keyed = b"{" + expected + b":null}"
+        assert canonical_json_bytes(
+            {value: None}, max_bytes=len(keyed), max_string_bytes=len(keyed),
+        ) == keyed
+        with pytest.raises(CanonicalJsonRefusal) as key_refusal:
+            canonical_json_bytes(
+                {value: None}, max_bytes=len(keyed) - 1, max_string_bytes=len(keyed) - 1,
+            )
+        assert key_refusal.value.code is CanonicalJsonRefusalCode.byte_limit_exceeded
+        assert key_refusal.value.path == "$.value[0]"
+
+
+@pytest.mark.parametrize("value", ["é", "😀", "\x00\n", '"\\'])
+def test_canonical_scalar_raw_utf8_budget_is_separate_from_escaped_size(
+    value: str,
+) -> None:
+    raw_size = len(value.encode("utf-8"))
+    expected = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    assert canonical_json_bytes(
+        value, max_string_bytes=raw_size, max_bytes=len(expected),
+    ) == expected
+    for material, path in ((value, "$"), ({value: None}, "$.key[0]"), ([value], "$[0]")):
+        with pytest.raises(CanonicalJsonRefusal) as refusal:
+            canonical_json_bytes(material, max_string_bytes=raw_size - 1)
+        assert refusal.value.code is CanonicalJsonRefusalCode.byte_limit_exceeded
+        assert refusal.value.path == path
+
+
+def test_canonical_scalar_calls_keep_budgets_and_refusals_independent() -> None:
+    def encode_and_refuse(index: int) -> bytes:
+        value = {f"key-{index}": [index, True, None, "é😀\n"]}
+        expected = json.dumps(
+            value, ensure_ascii=False, allow_nan=False,
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        assert canonical_json_bytes(
+            value, max_bytes=len(expected), max_string_bytes=len(expected),
+        ) == expected
+        # The cheap character bound retains precedence over Unicode validation.
+        for ceiling, code in (
+            (2, CanonicalJsonRefusalCode.byte_limit_exceeded),
+            (3, CanonicalJsonRefusalCode.invalid_unicode),
+        ):
+            with pytest.raises(CanonicalJsonRefusal) as refusal:
+                canonical_json_bytes("\ud800", max_bytes=ceiling, max_string_bytes=1)
+            assert refusal.value.code is code
+            assert refusal.value.path == "$"
+        assert canonical_json_bytes(value) == expected
+        return expected
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(encode_and_refuse, range(64)))
+    assert len(set(results)) == 64
 
 
 def test_canonical_json_materializes_mapping_and_sequence_implementations() -> None:
