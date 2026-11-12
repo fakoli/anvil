@@ -1,0 +1,15 @@
+{
+  "tasks": 1000,
+  "cohort_size": 12,
+  "command_timeout": 10,
+  "cell_deadline_seconds": 900,
+  "deadline_seconds": 3600,
+  "native_p95_target_ms": 15,
+  "cells": [
+    {"name": "relaxed-local-c8", "workers": 8, "durability": "relaxed", "events_storage": "local"},
+    {"name": "relaxed-local-c32", "workers": 32, "durability": "relaxed", "events_storage": "local"},
+    {"name": "relaxed-local-c128", "workers": 128, "durability": "relaxed", "events_storage": "local"},
+    {"name": "strict-local-c8", "workers": 8, "durability": "strict", "events_storage": "local"},
+    {"name": "relaxed-git-c8", "workers": 8, "durability": "relaxed", "events_storage": "git"}
+  ]
+}
