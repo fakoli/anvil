@@ -790,13 +790,18 @@ def _backup_database(db_path: Path, backup_path: Path) -> None:
 
     from anvil.state.sqlite import _stable_database_copy
 
-    with _stable_database_copy(db_path) as scratch_db:
+    with _stable_database_copy(
+        db_path, timeout_seconds=max(0.0, deadline - time.monotonic()),
+    ) as scratch_db:
+        check_deadline(0, 0, 0)
         with closing(sqlite3.connect(scratch_db)) as source:
             with closing(sqlite3.connect(backup_path)) as destination:
                 source.backup(destination, pages=256, progress=check_deadline, sleep=0.01)
                 destination.execute("PRAGMA journal_mode=DELETE")
+                destination.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
                 if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValueError("Schema-migration backup failed its integrity check.")
+    check_deadline(0, 0, 0)
 
 
 def _active_claim_ids_without_migrating(state_dir: Path, db_path: Path) -> list[str]:

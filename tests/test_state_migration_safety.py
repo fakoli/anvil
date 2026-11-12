@@ -24,7 +24,10 @@ from tests.test_bundle_state import _T0, _backend, _create_bundle, _event, _seed
 
 
 def _files(root: Path) -> dict[str, bytes]:
-    return {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+    from tests.test_cli import _recursive_file_manifest
+
+    return {name: content for name, content in _recursive_file_manifest(root).items()
+            if "/" not in name}
 
 
 def _older_state(root: Path) -> Path:
@@ -48,7 +51,7 @@ def _invoke(root: Path, monkeypatch, arguments: list[str]):
 
 
 def test_private_snapshot_streams_and_detects_same_metadata_changes(tmp_path, monkeypatch):
-    from anvil.state.sqlite import _stable_database_copy
+    from anvil.state._file_inspection_worker import _copy_database
 
     database = tmp_path / "state.db"
     database.write_bytes(b"before")
@@ -68,16 +71,16 @@ def test_private_snapshot_streams_and_detects_same_metadata_changes(tmp_path, mo
 
     monkeypatch.setattr(shutil, "copyfile", change_after_first_copy)
     monkeypatch.setattr(Path, "read_bytes", reject_whole_file_read)
-    with _stable_database_copy(database) as snapshot:
-        with snapshot.open("rb") as source:
-            assert source.read() == b"after!"
+    snapshot = tmp_path / "snapshot.db"
+    _copy_database(database, snapshot)
+    with snapshot.open("rb") as source:
+        assert source.read() == b"after!"
     assert len(copies) == 2
-    assert not snapshot.exists()
 
 
 @pytest.mark.parametrize("sidecar_suffix", ["-wal", "-journal"])
 def test_private_snapshot_retries_changed_sidecar_set(tmp_path, monkeypatch, sidecar_suffix):
-    from anvil.state.sqlite import _stable_database_copy
+    from anvil.state._file_inspection_worker import _copy_database
 
     database = tmp_path / "state.db"
     database.write_bytes(b"database")
@@ -94,9 +97,10 @@ def test_private_snapshot_retries_changed_sidecar_set(tmp_path, monkeypatch, sid
             database_copies.append(source)
 
     monkeypatch.setattr(shutil, "copyfile", remove_copied_sidecar)
-    with _stable_database_copy(database) as snapshot:
-        assert snapshot.read_bytes() == b"database"
-        assert not Path(f"{snapshot}{sidecar_suffix}").exists()
+    snapshot = tmp_path / "snapshot.db"
+    _copy_database(database, snapshot)
+    assert snapshot.read_bytes() == b"database"
+    assert not Path(f"{snapshot}{sidecar_suffix}").exists()
     assert len(database_copies) == 2
 
 
@@ -458,3 +462,25 @@ def test_open_writer_refuses_changed_schema_before_event_append(tmp_path):
         assert (tmp_path / "events.jsonl").read_bytes() == before
     finally:
         backend.close()
+
+
+def test_private_snapshot_failure_removes_partial_owned_files(tmp_path, monkeypatch):
+    from anvil.state.file_inspection import BoundedFileInspection
+    from anvil.state.sqlite import _stable_database_copy
+
+    database = tmp_path / "state.db"
+    database.write_bytes(b"unchanged")
+    captured = []
+
+    def fail_copy(self, source, destination):
+        destination.write_bytes(b"partial")
+        Path(f"{destination}-wal").write_bytes(b"partial-wal")
+        captured.append(destination)
+        raise SchemaProbeFailed("injected isolated copy failure")
+
+    monkeypatch.setattr(BoundedFileInspection, "copy_database", fail_copy)
+    with pytest.raises(SchemaProbeFailed):
+        with _stable_database_copy(database):
+            pytest.fail("partial snapshot must never be yielded")
+    assert captured and all(not path.parent.exists() for path in captured)
+    assert database.read_bytes() == b"unchanged"

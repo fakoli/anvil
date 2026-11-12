@@ -32,7 +32,10 @@ class _WindowsOSView:
 
 @pytest.fixture(autouse=True)
 def _require_qualified_conversion_platform(request):
-    if os.name == "nt" and not request.node.name.startswith("test_windows_"):
+    if os.name == "nt" and not request.node.name.startswith((
+        "test_windows_", "test_force_init_local_", "test_force_init_pending_local_",
+        "test_force_init_legacy_", "test_force_init_ambiguous_", "test_force_init_rechecks_",
+    )):
         pytest.skip("POSIX conversion protocol; Windows refusal has separate coverage")
 
 
@@ -77,7 +80,27 @@ def _append_native_sync_metadata(backend, metadata):
 
 
 def _files(state: Path) -> dict[str, bytes]:
-    return {str(p.relative_to(state)): p.read_bytes() for p in state.rglob("*") if p.is_file()}
+    from tests.test_cli import _recursive_file_manifest
+
+    return _recursive_file_manifest(state)
+
+
+def _leave_hot_rollback_journal(state: Path) -> None:
+    child = subprocess.run(
+        [sys.executable, "-c", """
+import os, sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+assert connection.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
+connection.execute('PRAGMA synchronous=FULL')
+connection.execute('PRAGMA cache_size=1')
+connection.execute('BEGIN IMMEDIATE')
+connection.execute('UPDATE events SET actor=?', ('uncommitted' * 1024,))
+os._exit(0)
+""", str(state / "state.db")],
+        capture_output=True, timeout=15,
+    )
+    assert child.returncode == 0, child.stderr
+    assert (state / "state.db-journal").stat().st_size > 512
 
 
 def test_retained_local_backend_refuses_and_fresh_git_backend_can_append(tmp_path):
@@ -845,21 +868,7 @@ def test_hot_journal_recovers_only_private_admission_copy_then_resumes(tmp_path,
     assert _convert(tmp_path).exit_code == 1
     monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
     marker = json.loads((state / ".event-format-migration.json").read_text())
-    child = subprocess.run(
-        [sys.executable, "-c", """
-import os, sqlite3, sys
-connection = sqlite3.connect(sys.argv[1])
-assert connection.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
-connection.execute('PRAGMA synchronous=FULL')
-connection.execute('PRAGMA cache_size=1')
-connection.execute('BEGIN IMMEDIATE')
-connection.execute('UPDATE events SET actor=?', ('uncommitted' * 1024,))
-os._exit(0)
-""", str(state / "state.db")],
-        capture_output=True, timeout=15,
-    )
-    assert child.returncode == 0, child.stderr
-    assert (state / "state.db-journal").stat().st_size > 512
+    _leave_hot_rollback_journal(state)
     before = _files(state)
     recovered_digest = migration._conversion_projection_digest(state / "state.db")
     side = "after" if phase == "after_database" else "before"
@@ -925,3 +934,350 @@ def test_token_appearing_during_legacy_admission_uses_callers_error_contract(
     finally:
         backend.close()
     assert (state / "events.jsonl").read_bytes() == before_events
+
+
+@pytest.mark.parametrize("option", [[], ["--with-sample"], ["--from-repo"]])
+@pytest.mark.parametrize("phase", [
+    None, "after_marker", "after_events.jsonl", "after_config.yaml",
+    "after_id_mapping.json", "after_.gitattributes", "after_database", "after_fence",
+])
+def test_force_init_preserves_converted_and_pending_state(tmp_path, monkeypatch, phase, option):
+    import anvil.cli.migrate as migration
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    if phase is not None:
+        def interrupt(observed):
+            if observed == phase:
+                raise RuntimeError("injected interruption before force-init")
+        monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", interrupt)
+    converted = _convert(tmp_path)
+    assert converted.exit_code == (0 if phase is None else 1), converted.output
+    monkeypatch.setattr(migration, "_EVENT_CONVERSION_PHASE_HOOK", None)
+    before = _files(state)
+    identities = {name: (state / name).stat().st_ino for name in before}
+    child = subprocess.run(
+        [sys.executable, "-m", "anvil.cli", "init", "--force", *option],
+        cwd=tmp_path, env={**os.environ, "ANVIL_ROOT": str(tmp_path)},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert child.returncode == 1, child.stdout + child.stderr
+    assert "force initialization refused" in child.stderr
+    assert "Traceback" not in child.stderr
+    assert _files(state) == before
+    assert {name: (state / name).stat().st_ino for name in before} == identities
+    if phase is not None:
+        assert "--resume" in child.stderr
+        resumed = _convert(tmp_path, resume=True)
+        assert resumed.exit_code == 0, resumed.output
+    _backend(state, "git").close()
+
+
+@pytest.mark.parametrize("option", [[], ["--with-sample"], ["--from-repo"]])
+def test_force_init_local_reset_keeps_token_and_discards_old_journal(tmp_path, option):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    _leave_hot_rollback_journal(state)
+    result = _run_in(tmp_path, ["init", "--force", "--name", "Replacement", *option])
+    assert result.exit_code == 0, result.output
+    assert not (state / "state.db-journal").exists()
+    assert (state / ".state-operation.lock").read_bytes() == b""
+    inode = (state / ".state-operation.lock").stat().st_ino
+    assert _run_in(tmp_path, ["status", "--json"]).exit_code == 0
+    again = _run_in(tmp_path, ["init", "--force", "--name", "Second"])
+    assert again.exit_code == 0, again.output
+    assert (state / ".state-operation.lock").stat().st_ino == inode
+    events = [json.loads(line) for line in (state / "events.jsonl").read_text().splitlines()]
+    assert [event["action"] for event in events] == ["project.created", "state.initialized"]
+    assert events[0]["payload_json"]["name"] == "Second"
+
+
+def test_force_init_local_fresh_initialization_creates_no_token(tmp_path):
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / ".anvil" / ".state-operation.lock").exists()
+
+
+@pytest.mark.parametrize("option", [[], ["--with-sample"], ["--from-repo"]])
+@pytest.mark.parametrize("configuration", [
+    None, "events_storage: [\nprivate-fixture-marker", "[local]\n",
+    "", "events_storage: local\n", "events_storage: git\n",
+])
+def test_force_init_legacy_git_refuses_ambiguous_configuration(
+    tmp_path, configuration, option,
+):
+    state = tmp_path / ".anvil"
+    state.mkdir()
+    (state / "events.jsonl").touch()
+    backend = _backend(state, "git")
+    try:
+        backend.append(_draft("project.created", {
+            "id": "proj-1", "name": "Legacy Git", "description": "",
+            "created_at": _T0.isoformat(), "updated_at": _T0.isoformat(),
+        }))
+        backend.append(_draft("state.initialized", {}))
+    finally:
+        backend.close()
+    assert not (state / ".state-operation.lock").exists()
+    if configuration is not None:
+        prefix = "project_name: Legacy Git\nproject_id: proj-1\n"
+        if configuration == "[local]\n":
+            prefix = ""
+        (state / "config.yaml").write_text(prefix + configuration)
+    before = _files(state)
+    identities = {name: (state / name).stat().st_ino for name in before}
+    result = _run_in(tmp_path, ["init", "--force", *option])
+    assert result.exit_code == 1, result.output
+    assert "force initialization refused" in result.output
+    assert "private-fixture-marker" not in result.output
+    assert _files(state) == before
+    assert {name: (state / name).stat().st_ino for name in before} == identities
+
+
+@pytest.mark.parametrize("authority", ["absent", "empty", "whitespace"])
+def test_force_init_ambiguous_database_without_authority_refuses(tmp_path, authority):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    events = state / "events.jsonl"
+    if authority == "absent":
+        events.unlink()
+    else:
+        events.write_bytes(b"" if authority == "empty" else b" \n")
+    before = _files(state)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 1, result.output
+    assert "explicit restoration or recovery" in result.output
+    assert _files(state) == before
+
+
+def test_force_init_local_nonempty_history_requires_configuration(tmp_path):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    (state / "config.yaml").unlink()
+    before = _files(state)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 1, result.output
+    assert "repair the configuration explicitly" in result.output
+    assert _files(state) == before
+
+
+@pytest.mark.parametrize("empty_files", [[], ["events.jsonl"], [
+    "events.jsonl", "state.db", "config.yaml",
+]])
+def test_force_init_local_empty_scaffolding_remains_supported(tmp_path, empty_files):
+    state = tmp_path / ".anvil"
+    state.mkdir()
+    for name in empty_files:
+        (state / name).touch()
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 0, result.output
+    assert _run_in(tmp_path, ["status", "--json"]).exit_code == 0
+
+
+@pytest.mark.parametrize("change", ["configuration", "history"])
+def test_force_init_rechecks_authority_after_legacy_writer_drain(tmp_path, monkeypatch, change):
+    from contextlib import contextmanager
+
+    import anvil.state.sqlite as engine
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    original = engine._schema_initialization_lock
+    admitted_files = None
+
+    @contextmanager
+    def change_after_drain(*args, **kwargs):
+        nonlocal admitted_files
+        with original(*args, **kwargs):
+            if change == "configuration":
+                (state / "config.yaml").write_text("events_storage: [\n")
+            else:
+                events = state / "events.jsonl"
+                records = events.read_text().splitlines()
+                record = json.loads(records[-1])
+                record.update(id="E-0123456789ab", parent_event_id=None, lamport=1)
+                records[-1] = json.dumps(record)
+                events.write_text("\n".join(records) + "\n")
+            admitted_files = _files(state)
+            yield
+
+    monkeypatch.setattr(engine, "_schema_initialization_lock", change_after_drain)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert admitted_files is not None
+    assert result.exit_code == 1, result.output
+    assert "force initialization refused" in result.output
+    assert _files(state) == admitted_files
+
+
+def test_force_init_pending_local_recovery_refuses_before_token_creation(tmp_path):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    (state / ".local-event-recovery.json").write_text("{}")
+    before = _files(state)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 1, result.output
+    assert "repair local-event --resume" in result.output
+    assert _files(state) == before
+
+
+@pytest.mark.parametrize("unsafe", ["state", "config.yaml", "state.db-journal", "state.db"])
+def test_force_init_unsafe_paths_refuse_before_token_creation(tmp_path, unsafe):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    if unsafe == "state":
+        real_state = tmp_path / "real-state"
+        state.rename(real_state)
+        state.symlink_to(real_state, target_is_directory=True)
+    else:
+        destination = tmp_path / "outside"
+        if unsafe == "state.db":
+            os.link(state / unsafe, destination)
+        else:
+            destination.write_text("protected outside bytes")
+            (state / unsafe).unlink(missing_ok=True)
+            (state / unsafe).symlink_to(destination)
+    before = _files(state)
+    result = _run_in(tmp_path, ["init", "--force"])
+    assert result.exit_code == 1, result.output
+    assert "unsafe" in result.output
+    assert _files(state) == before
+    assert not (state / ".state-operation.lock").exists()
+
+
+def _read_child_line(process):
+    import select
+
+    assert select.select([process.stdout], [], [], 10)[0], "child readiness timed out"
+    return process.stdout.readline().strip()
+
+
+@pytest.mark.parametrize("winner", ["conversion", "force_init"])
+def test_force_init_and_conversion_share_admission_boundary(tmp_path, monkeypatch, winner):
+    import anvil.state.sqlite as engine
+
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    code = r'''
+import os, sys
+from contextlib import contextmanager
+import anvil.cli.init_status as initialization
+import anvil.state.sqlite as engine
+os.environ['ANVIL_ROOT'] = sys.argv[1]
+if sys.argv[2] == 'conversion':
+    original_lock = engine._state_operation_lock
+    first = True
+    @contextmanager
+    def paused_lock(*args, **kwargs):
+        global first
+        if first:
+            first = False
+            print('preflight', flush=True)
+            sys.stdin.readline()
+        with original_lock(*args, **kwargs) as token:
+            yield token
+    engine._state_operation_lock = paused_lock
+else:
+    original_initialize = initialization._initialize_project_state
+    def paused_initialize(*args, **kwargs):
+        print('admitted', flush=True)
+        sys.stdin.readline()
+        return original_initialize(*args, **kwargs)
+    initialization._initialize_project_state = paused_initialize
+from anvil.cli import app
+app(['init', '--force', '--name', 'Replacement'])
+'''
+    process = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path), winner],
+        text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        assert _read_child_line(process) == ("preflight" if winner == "conversion" else "admitted")
+        if winner == "conversion":
+            converted = _convert(tmp_path)
+            assert converted.exit_code == 0, converted.output
+            before = _files(state)
+            stdout, stderr = process.communicate("continue\n", timeout=20)
+            assert process.returncode == 1, stdout + stderr
+            assert "force initialization refused" in stderr
+            assert _files(state) == before
+        else:
+            before = _files(state)
+            monkeypatch.setattr(engine, "_FLOCK_TIMEOUT_S", 0.05)
+            blocked = _convert(tmp_path)
+            assert blocked.exit_code == 1, blocked.output
+            assert "schema_probe_failed" in blocked.output
+            assert _files(state) == before
+            stdout, stderr = process.communicate("continue\n", timeout=20)
+            assert process.returncode == 0, stdout + stderr
+            converted = _convert(tmp_path)
+            assert converted.exit_code == 0, converted.output
+        _backend(state, "git").close()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+
+def test_force_init_drains_writer_that_entered_before_token_creation(tmp_path):
+    _build_local_project(tmp_path)
+    state = tmp_path / ".anvil"
+    holder_code = r'''
+import sys
+from pathlib import Path
+from anvil.clock import SystemClock
+from anvil.state.sqlite import SqliteBackend
+state = Path(sys.argv[1])
+backend = SqliteBackend(db_path=str(state/'state.db'), events_path=str(state/'events.jsonl'), clock=SystemClock())
+backend.initialize()
+try:
+    with backend.claim_operation_lock():
+        print('held', flush=True)
+        sys.stdin.readline()
+finally:
+    backend.close()
+'''
+    reset_code = r'''
+import os, sys
+import anvil.state.sqlite as engine
+os.environ['ANVIL_ROOT'] = sys.argv[1]
+original = engine._append_lock_acquire_nb
+announced = False
+def observe(handle):
+    global announced
+    if not announced and str(handle.name).endswith('events.jsonl'):
+        print('draining', flush=True)
+        announced = True
+    return original(handle)
+engine._append_lock_acquire_nb = observe
+from anvil.cli import app
+app(['init', '--force'])
+'''
+    processes = []
+    try:
+        holder = subprocess.Popen(
+            [sys.executable, "-c", holder_code, str(state)], text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        processes.append(holder)
+        assert _read_child_line(holder) == "held"
+        before = _files(state)
+        reset = subprocess.Popen(
+            [sys.executable, "-c", reset_code, str(tmp_path)], text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        processes.append(reset)
+        assert _read_child_line(reset) == "draining"
+        assert reset.poll() is None
+        after = _files(state)
+        assert {name: after[name] for name in before} == before
+        assert set(after) - set(before) == {".state-operation.lock"}
+        holder.communicate("release\n", timeout=10)
+        assert holder.returncode == 0
+        stdout, stderr = reset.communicate(timeout=20)
+        assert reset.returncode == 0, stdout + stderr
+        assert len((state / "events.jsonl").read_text().splitlines()) == 2
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)

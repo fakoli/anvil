@@ -228,25 +228,22 @@ def test_read_db_schema_version_does_not_migrate(tmp_path: Path) -> None:
 
 
 def _state_manifest(root: Path) -> dict[str, tuple[int, str]]:
-    """Return a recursive byte identity without opening SQLite."""
+    """Observe byte identity without opening raw DB files beside retained SQLite."""
     import hashlib
 
-    result: dict[str, tuple[int, str]] = {}
-    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
-        content = path.read_bytes()
-        result[path.relative_to(root).as_posix()] = (
-            len(content),
-            hashlib.sha256(content).hexdigest(),
-        )
-    return result
+    from tests.test_cli import _recursive_file_manifest
+
+    return {name: (len(content), hashlib.sha256(content).hexdigest())
+            for name, content in _recursive_file_manifest(root).items()}
 
 
 def _copy_live_wal_fixture(
     tmp_path: Path, *, version: int, include_shm: bool
 ) -> Path:
     """Copy an uncheckpointed WAL database while its writer remains open."""
-    import shutil
     import sqlite3
+
+    from anvil.state.file_inspection import BoundedFileInspection
 
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
@@ -261,11 +258,10 @@ def _copy_live_wal_fixture(
         conn.commit()
 
         state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        shutil.copyfile(seed_db, state_dir / "state.db")
-        shutil.copyfile(Path(f"{seed_db}-wal"), state_dir / "state.db-wal")
-        if include_shm:
-            shutil.copyfile(Path(f"{seed_db}-shm"), state_dir / "state.db-shm")
+        with BoundedFileInspection() as inspection:
+            inspection.copy_tree(seed_dir, state_dir)
+        if not include_shm:
+            (state_dir / "state.db-shm").unlink(missing_ok=True)
         (state_dir / "events.jsonl").write_text("sentinel-event\n", encoding="utf-8")
         return state_dir
     finally:
@@ -281,7 +277,8 @@ def test_schema_probe_retries_checkpoint_removed_wal_and_rereads_header(
     """Last-close checkpoint can remove WAL before or after its existence check."""
     import sqlite3
 
-    from anvil.state.sqlite import read_db_schema_version
+    from anvil.state.sqlite import _read_db_schema_version_in_worker
+    from tests.test_cli import _recursive_file_manifest
 
     database = tmp_path / "state.db"
     wal_path = Path(f"{database}-wal")
@@ -294,7 +291,14 @@ def test_schema_probe_retries_checkpoint_removed_wal_and_rereads_header(
     writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     writer.execute(f"PRAGMA user_version = {committed_version}")
     writer.commit()
-    assert int.from_bytes(database.read_bytes()[60:64], "big") == committed_version - 1
+    initial_bytes = _recursive_file_manifest(tmp_path)
+    assert int.from_bytes(initial_bytes["state.db"][60:64], "big") == committed_version - 1
+    writer.close()
+    checkpointed_database = database.read_bytes()
+    # Replay the actual checkpoint byte transition against private files. The
+    # worker algorithm is tested here without retaining any SQLite descriptor.
+    database.write_bytes(initial_bytes["state.db"])
+    wal_path.write_bytes(initial_bytes["state.db-wal"])
 
     original_exists = Path.exists
     wal_observations = []
@@ -306,7 +310,8 @@ def test_schema_probe_retries_checkpoint_removed_wal_and_rereads_header(
             wal_observations.append(existed)
             if len(wal_observations) == 1:
                 assert existed
-                writer.close()
+                database.write_bytes(checkpointed_database)
+                wal_path.unlink()
                 assert not original_exists(wal_path)
                 checkpoint_manifest.update(_state_manifest(tmp_path))
                 if checkpoint_window == "before_exists":
@@ -314,10 +319,7 @@ def test_schema_probe_retries_checkpoint_removed_wal_and_rereads_header(
         return existed
 
     monkeypatch.setattr(Path, "exists", close_writer_after_wal_exists)
-    try:
-        assert read_db_schema_version(database) == committed_version
-    finally:
-        writer.close()
+    assert _read_db_schema_version_in_worker(database) == committed_version
     assert wal_observations == [True, False]
     assert _state_manifest(tmp_path) == checkpoint_manifest
 
@@ -327,7 +329,7 @@ def test_schema_probe_exhausts_bounded_io_retries_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[OSError],
 ) -> None:
     from anvil.state.backend import SchemaProbeFailed
-    from anvil.state.sqlite import read_db_schema_version
+    from anvil.state.sqlite import _read_db_schema_version_in_worker
 
     state_dir = _copy_live_wal_fixture(
         tmp_path, version=SCHEMA_VERSION + 1, include_shm=False,
@@ -347,7 +349,7 @@ def test_schema_probe_exhausts_bounded_io_retries_without_mutation(
     with monkeypatch.context() as patch:
         patch.setattr(Path, "open", refuse_wal_open)
         with pytest.raises(SchemaProbeFailed) as raised:
-            read_db_schema_version(database)
+            _read_db_schema_version_in_worker(database)
     assert isinstance(raised.value.__cause__, error_type)
     assert len(wal_open_attempts) == 3
     assert _state_manifest(state_dir) == before
@@ -520,11 +522,11 @@ def test_future_wal_appearing_between_probes_never_reaches_live_open(
             return SCHEMA_VERSION
         return original_probe(path)
 
-    monkeypatch.setattr(sqlite_backend, "read_db_schema_version", race_once)
     backend = SqliteBackend(
         db_path=str(db_path),
         events_path=str(state_dir / "events.jsonl"),
         clock=SystemClock(),
+        schema_probe_fn=race_once,
     )
     try:
         with pytest.raises(SchemaProbeFailed, match="changed during"):
@@ -560,7 +562,7 @@ def test_unreadable_wal_probe_fails_closed_without_live_fallback(
         events_path=str(state_dir / "events.jsonl"),
         clock=SystemClock(),
     )
-    with pytest.raises(SchemaProbeFailed, match="checksum"):
+    with pytest.raises(SchemaProbeFailed, match="inspection failed"):
         backend.initialize()
 
     assert backend._conn is None  # noqa: SLF001

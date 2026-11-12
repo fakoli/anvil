@@ -487,6 +487,14 @@ def test_preopened_backend_survives_resumed_in_place_publication(
         assert runner.invoke(app, _resume_args(tmp_path)).exit_code == 0
         assert os.stat(state / "state.db").st_ino == old_inode
         assert peer.get_project() is not None
+        import subprocess
+        import sys
+
+        subprocess.run(
+            [sys.executable, "-c",
+             "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.close()",
+             str(state / "state.db")], check=True, timeout=10,
+        )
         peer.append(
             EventDraft(
                 timestamp=_NOW,
@@ -498,5 +506,12 @@ def test_preopened_backend_survives_resumed_in_place_publication(
             )
         )
         assert b'"id":"E000004"' in (state / "events.jsonl").read_bytes()
+        fresh = sqlite3.connect(state / "state.db")
+        try:
+            assert fresh.execute("SELECT COUNT(*) FROM events").fetchone() == (4,)
+            assert fresh.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        finally:
+            fresh.close()
+
     finally:
         peer.close()

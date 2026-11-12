@@ -44,7 +44,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -64,6 +64,7 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
+from anvil.state.file_inspection import BoundedFileInspection, BoundedSchemaProbe
 from anvil.state.hashing import (
     CanonicalJsonRefusal,
     canonical_json_bytes,
@@ -793,48 +794,21 @@ def _read_schema_from_rollback_snapshot(db_path: Path) -> int:
 
 
 @contextmanager
-def _stable_database_copy(db_path: str | os.PathLike[str]) -> Iterator[Path]:
-    """Copy a stable DB/WAL/journal set without opening live SQLite files.
+def _stable_database_copy(
+    db_path: str | os.PathLike[str], *, timeout_seconds: float | None = None,
+) -> Iterator[Path]:
+    """Capture a private stable DB/WAL/journal set in an owned child.
 
-    Callers hold the event lock. Rechecks detect concurrent checkpoint cleanup
-    by already-open readers; recovery and backup operations stay in scratch.
+    Callers hold native custody. Raw live descriptors must never be opened and
+    closed in the process that may retain SQLite connections and POSIX locks.
+    The child checks for concurrent checkpoint cleanup; SQLite recovery and
+    backup operations run only against the returned private copy.
     """
-    database = Path(db_path)
-    suffixes = ("", "-wal", "-journal")
-
-    def file_digests(database_path: Path) -> dict[str, bytes]:
-        digests = {}
-        for suffix in suffixes:
-            path = Path(f"{database_path}{suffix}")
-            if path.exists():
-                with path.open("rb") as source:
-                    digests[suffix] = hashlib.file_digest(source, "sha256").digest()
-        return digests
-
-    try:
-        for _ in range(3):
-            with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
-                scratch_db = Path(temporary) / "state.db"
-                for suffix in suffixes:
-                    source = Path(f"{database}{suffix}")
-                    if source.exists():
-                        shutil.copyfile(source, Path(f"{scratch_db}{suffix}"))
-                captured = file_digests(scratch_db)
-                if "" not in captured:
-                    raise SchemaProbeFailed("Migration database is unavailable.")
-                if captured != file_digests(database):
-                    continue
-                yield scratch_db
-                return
-        raise SchemaProbeFailed(
-            "State changed during migration custody inspection; retry when idle."
-        )
-    except SchemaProbeFailed:
-        raise
-    except (OSError, sqlite3.Error) as exc:
-        raise SchemaProbeFailed(
-            "Migration State could not be inspected without live mutation."
-        ) from exc
+    with tempfile.TemporaryDirectory(prefix="anvil-migration-snapshot-") as temporary:
+        scratch_db = Path(temporary) / "state.db"
+        with BoundedFileInspection(timeout_seconds) as inspection:
+            inspection.copy_database(db_path, scratch_db)
+        yield scratch_db
 
 
 def _active_claim_ids_from_event_log(events_path: str, events_storage: str) -> list[str]:
@@ -1022,7 +996,7 @@ def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
 
 
 def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
-    """Read page 1 and the current WAL prefix without opening live SQLite state.
+    """Worker-only raw page/WAL read, also usable on closed private test copies.
 
     WAL appends are sequential and frame-checksummed. A concurrent writer may
     extend the file after this read; that does not invalidate the complete,
@@ -1041,7 +1015,15 @@ def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
 
 
 def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
-    """Read the on-disk ``PRAGMA user_version`` WITHOUT migrating.
+    """Inspect schema in an owned child without releasing retained SQLite locks."""
+    if not Path(db_path).exists():
+        return 0
+    with BoundedSchemaProbe() as probe:
+        return probe(db_path)
+
+
+def _read_db_schema_version_in_worker(db_path: str | os.PathLike[str]) -> int:
+    """Worker-only on-disk ``PRAGMA user_version`` inspection without migration.
 
     T007/B11 (MUST-FIX 2a): the TRUE pre-migration schema version stamped on a
     database. Unlike ``SqliteBackend.get_schema_version()`` — which reads the
@@ -1088,15 +1070,19 @@ def query_only_transaction(
     db_path: str | os.PathLike[str],
     events_path: str | os.PathLike[str],
 ) -> Iterator[tuple[sqlite3.Connection, Any]]:
-    with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed):
-        with _query_only_event_transaction(db_path, events_path) as transaction:
-            yield transaction
+    with BoundedSchemaProbe() as schema_probe:
+        with _state_operation_lock(db_path, contention_error_type=SchemaProbeFailed):
+            with _query_only_event_transaction(
+                db_path, events_path, schema_probe=schema_probe,
+            ) as transaction:
+                yield transaction
 
 
 @contextmanager
 def _query_only_event_transaction(
     db_path: str | os.PathLike[str],
     events_path: str | os.PathLike[str],
+    *, schema_probe: Callable[[str | os.PathLike[str]], int],
 ) -> Iterator[tuple[sqlite3.Connection, Any]]:
     """Yield one transaction and the locked, pre-existing event log.
 
@@ -1119,7 +1105,7 @@ def _query_only_event_transaction(
     # Refuse incompatible state before SQLite can create WAL/SHM sidecars or
     # recover a live journal.  Repeat under the event lock below to close the
     # probe-to-open race.
-    probed = read_db_schema_version(database)
+    probed = schema_probe(database)
     if probed != SCHEMA_VERSION:
         raise SchemaMismatch(
             actual=probed,
@@ -1167,7 +1153,7 @@ def _query_only_event_transaction(
                 _require_current_state_lock(db_path, contention_error_type=SchemaProbeFailed)
                 _require_current_file_handle(lock_fh, events_path)
                 _require_no_event_recovery(db_path)
-                confirmed = read_db_schema_version(database)
+                confirmed = schema_probe(database)
                 if confirmed != SCHEMA_VERSION:
                     raise SchemaMismatch(
                         actual=confirmed,
@@ -1279,7 +1265,7 @@ class SqliteBackend:
         self._schema_probe_fn = schema_probe_fn
         self._project_root = Path(project_root) if project_root is not None else None
         self._conn: sqlite3.Connection | None = None
-        # In-memory monotonic counter; seeded from log max on initialize().
+        # In-memory counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
         # Local mode only — git mode derives ids from content hashes.
         self._next_seq: int = 0
@@ -1363,8 +1349,21 @@ class SqliteBackend:
         self.validate_schema_compatibility(on_disk)
 
     def initialize(self) -> None:
-        """Serialize same-process probes without creating filesystem entries."""
-        schema_probe = self._schema_probe_fn or read_db_schema_version
+        """Reuse one bounded probe across this initialization's admission checks."""
+        with (
+            nullcontext(self._schema_probe_fn)
+            if self._schema_probe_fn is not None else BoundedSchemaProbe()
+        ) as owned_probe:
+            def schema_probe(path: str) -> int:
+                # Missing files have no raw descriptors to isolate. Preserve the
+                # caller-supplied probe contract used by CLI preflight.
+                if self._schema_probe_fn is None and not os.path.exists(path):
+                    return 0
+                return owned_probe(path)
+
+            self._initialize_with_probe(schema_probe)
+
+    def _initialize_with_probe(self, schema_probe: Callable[[str], int]) -> None:
         # If existing state has a database but no event log, establish
         # compatibility and require its authority before creating the token. The
         # authoritative probe is repeated under the token below.
@@ -1376,9 +1375,9 @@ class SqliteBackend:
             )
         with _schema_initialization_lock(self._db_path, self._events_path):
             _require_event_storage_fence(self._db_path, self._events_storage)
-            self._initialize_under_lock()
+            self._initialize_under_lock(schema_probe)
 
-    def _initialize_under_lock(self) -> None:
+    def _initialize_under_lock(self, schema_probe: Callable[[str], int]) -> None:
         """Open the SQLite connection, set PRAGMAs, apply DDL if needed.
 
         Idempotent — safe to call multiple times.  Raises SchemaMismatch if
@@ -1422,7 +1421,6 @@ class SqliteBackend:
         # outer OS lock is the linearization boundary shared by every Anvil
         # initializer; direct SQLite schema writes that bypass the state engine
         # are not a supported coordination path.
-        schema_probe = self._schema_probe_fn or read_db_schema_version
         probed_version = schema_probe(self._db_path)
         confirmed_version = schema_probe(self._db_path)
         if probed_version != confirmed_version:
@@ -1683,6 +1681,7 @@ class SqliteBackend:
                         raise EventRejected("root_set_authorization_required") from exc
 
         with self._append_lock():
+            self._require_appendable_event_tail()
             if self._events_storage == "git":
                 self._validate_git_log_before_append()
 
@@ -1874,11 +1873,11 @@ class SqliteBackend:
                 #
                 # _scan_tail_id() is O(last-line) and already tolerates a torn
                 # trailing line, so it is safe to call here under the flock.
-                # The in-memory counter remains a valid fast-path for the
-                # single-process case: if no other process has written since
-                # our last append, scan_tail returns _next_seq and max() is a
-                # no-op.
-                self._next_seq = max(self._next_seq, self._scan_tail_id())
+                # A coordinated restore can move the authoritative tail
+                # backwards while keeping this connection open. Reseed from
+                # that tail too: retaining a higher cached counter would leave
+                # a gap in the restored local history.
+                self._next_seq = self._scan_tail_id()
                 self._next_seq += 1
                 event_id = f"E{self._next_seq:06d}"
                 event = Event(id=event_id, **materialized_draft.model_dump())
@@ -4062,10 +4061,7 @@ class SqliteBackend:
     def get_latest_evidence(self, task_id: str) -> Evidence | None:
         """Return the most recently submitted Evidence for task_id, or None."""
         conn = self._require_conn()
-        try:
-            row = self._latest_evidence_row(conn, task_id)
-        except Exception:  # noqa: BLE001
-            return None
+        row = self._latest_evidence_row(conn, task_id)
         if row is None:
             return None
         return self._row_to_evidence(row)
@@ -5941,6 +5937,37 @@ class SqliteBackend:
                     )
                 )
 
+    def _require_appendable_event_tail(self) -> None:
+        """Refuse unsafe final records before append can make them interior."""
+        refusal = (
+            "Append refused: the event log ends with an incomplete or invalid record. "
+            "Explicit restoration or recovery is required; the original log is unchanged."
+        )
+        with open(self._events_path, "rb") as stream:
+            if stream.seek(0, os.SEEK_END) == 0:
+                return
+            stream.seek(-1, os.SEEK_END)
+            if stream.read(1) != b"\n":
+                raise SchemaProbeFailed(refusal)
+        tail = next(
+            (line.strip() for line in reversed(self._read_tail_window()) if line.strip()), None,
+        )
+        if tail is None:
+            return
+        try:
+            event = Event.model_validate_json(tail)
+            if self._events_storage == "git":
+                if not event.id.startswith("E-") or event.lamport is None:
+                    raise ValueError("invalid Git event envelope")
+            elif (
+                not event.id[1:].isdigit()
+                or event.lamport is not None
+                or event.parent_event_id is not None
+            ):
+                raise ValueError("invalid local event envelope")
+        except ValueError:
+            raise SchemaProbeFailed(refusal) from None
+
     def _read_tail_window(self) -> list[bytes]:
         """Return candidate raw lines from the end of events.jsonl, oldest first.
 
@@ -5949,9 +5976,9 @@ class SqliteBackend:
         O(file size). Returns ``[]`` when the file is missing or empty.
 
         Large-line tolerance (SHOULD FIX 1): starts with a 4096-byte window
-        and doubles until the window contains at least one newline separator
-        (ensuring at least one complete prior line to fall back to) or spans
-        the entire file, so events with large ``prd.parsed`` /
+        and doubles until the window contains at least two newline separators
+        (ensuring a complete prior line before a possibly torn final line) or
+        spans the entire file, so events with large ``prd.parsed`` /
         ``task.expanded`` payloads are handled correctly.
         """
         log_path = self._events_path
@@ -5968,11 +5995,11 @@ class SqliteBackend:
                 chunk = fh.read(chunk_size)
                 # Strip trailing whitespace/newlines to ignore blank trailing lines.
                 stripped = chunk.rstrip(b"\n\r ")
-                # Check whether the stripped chunk contains at least one newline
-                # (meaning we have at least one complete prior line to fall back to).
-                if b"\n" in stripped or chunk_size >= file_size:
+                # The first line can be partial when the window starts mid-file.
+                # Two separators bound a complete fallback before the last line.
+                if stripped.count(b"\n") >= 2 or chunk_size >= file_size:
                     break
-                # No newline found and we haven't read the full file yet — double.
+                # Expand until the fallback line or the start of the file fits.
                 chunk_size = min(chunk_size * 2, file_size)
 
         return stripped.split(b"\n")

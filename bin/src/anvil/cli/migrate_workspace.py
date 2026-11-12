@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,14 @@ import typer
 
 from anvil.cli._helpers import _canonical_project_root, _home_workspace_base
 from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.state.backend import SchemaProbeFailed
+from anvil.state.file_inspection import BoundedFileInspection
+from anvil.state.sqlite import (
+    _require_current_state_lock,
+    _require_no_event_recovery,
+    _schema_initialization_lock,
+    _state_operation_lock,
+)
 
 __all__ = ["migrate_workspace"]
 
@@ -111,6 +120,16 @@ def migrate_workspace(
         })
         return
 
+    # Pending recovery binds physical identities in the original State. Copying
+    # it would publish a new default authority that cannot resume that recovery.
+    try:
+        _require_no_event_recovery(legacy_src / "state.db")
+    except SchemaProbeFailed as exc:
+        if json_output:
+            fail(_COMMAND, str(exc), code="migration_failed")
+        typer.echo(f"Error: migration failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
     files = sum(1 for p in legacy_src.rglob("*") if p.is_file())
 
     if not yes:
@@ -132,14 +151,34 @@ def migrate_workspace(
     # rename is intra-filesystem — no EXDEV), then atomically rename into place.
     # The legacy source is never modified.
     staging = target_base / ".anvil.migrating"
+    staging_owned = False
     try:
-        target_base.mkdir(parents=True, exist_ok=True)
-        if staging.exists():
-            shutil.rmtree(staging)
-        shutil.copytree(legacy_src, staging)  # dirs_exist_ok=False — staging is fresh
-        os.replace(staging, target_anvil)  # atomic; target_anvil confirmed absent above
-    except OSError as exc:
-        shutil.rmtree(staging, ignore_errors=True)  # never leave a partial staging dir
+        database = str(legacy_src / "state.db")
+        events = str(legacy_src / "events.jsonl")
+        with ExitStack() as custody:
+            # Preserve opaque legacy bytes: do not initialize State, create a
+            # source token or manufacture a missing authority log.
+            custody.enter_context(_state_operation_lock(
+                database, contention_error_type=SchemaProbeFailed,
+            ))
+            if os.path.lexists(events):
+                custody.enter_context(_schema_initialization_lock(
+                    database, events, create_missing_log=False,
+                ))
+            _require_no_event_recovery(database)
+            target_base.mkdir(parents=True, exist_ok=True)
+            if staging.exists():
+                shutil.rmtree(staging)
+            staging_owned = True
+            with BoundedFileInspection() as inspection:
+                inspection.copy_tree(legacy_src, staging)
+            _require_current_state_lock(database, contention_error_type=SchemaProbeFailed)
+            _require_no_event_recovery(database)
+            _require_no_event_recovery(staging / "state.db")
+            os.replace(staging, target_anvil)  # atomic; target_anvil confirmed absent above
+    except (OSError, SchemaProbeFailed) as exc:
+        if staging_owned:
+            shutil.rmtree(staging, ignore_errors=True)  # remove only this attempt's partial copy
         if json_output:
             fail(_COMMAND, str(exc), code="migration_failed")
         typer.echo(f"Error: migration failed: {exc}", err=True)

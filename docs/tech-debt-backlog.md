@@ -42,6 +42,24 @@ conversion holds the stable token across full task/bundle custody admission,
 backups, atomic log publication and in-place SQLite projection publication.
 Retained local backends refuse once the storage fence records Git format.
 
+Destructive local `init --force` joins this boundary before deletion: it validates
+paths, creates or reuses the permanent token, drains any earlier event writer and
+holds custody through reset and bootstrap. It refuses pending local/event-format
+recovery and Git-backed State before changing authority. Local reset discards old
+SQLite journals with the database; fresh initialization creates no token. Stop
+other clients before a destructive reset: this is not a transactional reset or a
+promise that previously retained clients can safely reuse a replaced database.
+
+Raw live database descriptors are isolated in a bounded owned child: closing any
+raw SQLite database descriptor in the retaining process can release its POSIX
+locks and strand subsequent WAL commits. Schema probes share one cumulative 2s
+budget per native open/read; stable copy and fsync owners use a 10s budget. Normal
+initialized appends create no inspection process. Failure never falls back to
+raw parent-process I/O, and an unreaped worker retains explicit ownership.
+Warm backup captures committed WAL rows and the log under native custody, then
+uploads only closed private files after releasing that custody. Evidence lookup
+propagates database errors; only a genuinely absent evidence row returns None.
+
 A pending marker fences ordinary access after interruption. The native
 `migrate-events --to git --resume --yes` command validates State/database/token
 identities, all staged file digests and the live before/after projection before
@@ -167,9 +185,11 @@ unless a future manifest restores them.
 **Status**: OPEN (low risk). `migrate-workspace` copies the whole `.anvil/` (incl.
 `-wal`/`-shm`) of LEGACY in-repo state. If that legacy db were being actively written
 during the (manual, explicit) migrate, the WAL snapshot could be inconsistent. Low
-risk: legacy in-repo state is by definition the old, not-actively-used location, and
-the command is human-invoked. Close by `PRAGMA wal_checkpoint(TRUNCATE)` on the
-source before copy if it ever matters.
+risk depends on the caller stopping legacy writers first. The copy now runs in
+a bounded owned child to preserve retained parent SQLite locks; this does not
+make a concurrently changing whole tree transactional. Opaque legacy bytes and
+sidecars remain unchanged, without current-schema validation or source recovery.
+A future consistency protocol must preserve those legacy recovery semantics.
 
 ---
 

@@ -217,14 +217,16 @@ def _checkpoint_and_fsync_live_projection(
     # PASSIVE never waits for readers that opened before repair. A committed WAL
     # remains durable after its own fsync even when those readers defer checkpoint.
     connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
-    _fsync_file(state_db)
+    from anvil.state.file_inspection import BoundedFileInspection
+
     live_wal = Path(f"{state_db}-wal")
     try:
         _regular_path(live_wal, required=False)
     except RuntimeError:
         raise RuntimeError("unsafe live SQLite WAL") from None
-    if live_wal.exists():
-        _fsync_file(live_wal)
+    paths = [state_db, live_wal] if live_wal.exists() else [state_db]
+    with BoundedFileInspection() as inspection:
+        inspection.fsync_files(paths)
     _fsync_directory(state_db.parent)
 
 
