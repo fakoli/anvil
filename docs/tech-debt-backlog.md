@@ -32,23 +32,29 @@ Items deferred from PR-level critic + Greptile reviews. Each entry links the ori
 
 ### MIG-1 · Concurrent local-to-Git event conversion (HIGH)
 
-**Status**: OPEN. Deferred from [Copilot review 5847760385](https://github.com/fakoli/anvil/pull/259#pullrequestreview-5847760385).
-The existing `migrate-events --to git --yes` conversion closes its backend before
-rewriting the log and atomically replaces the file used as the writer lock token.
-Checking active claims alone does not stop a new writer or fence a retained
-backend. Wrapping `replace()` in the current event-file lock would still leave
-waiters holding the old inode.
+**Status**: Implemented for current-engine local conversion, pending delivery qualification.
+Originally deferred from [Copilot review 5847760385](https://github.com/fakoli/anvil/pull/259#pullrequestreview-5847760385).
 
-Until this is repaired, run event-format conversion only after all writers and
-retained backend handles have stopped; preserve the backup authority and reopen
-clients afterward. Concurrent conversion remains unqualified. The 0.6.21 fleet
-rollout uses only `migrate state`, which preserves event bytes and holds its
-native lock through admission, backup and schema upgrade; it performs no
-event-format conversion.
+Conversion introduces a permanent sibling coordination token. Native initialization,
+query-only reads, appends and destination replay honor it; waiters that opened the
+old log before token creation refuse after acquiring their obsolete lock. The
+conversion holds the stable token across full task/bundle custody admission,
+backups, atomic log publication and in-place SQLite projection publication.
+Retained local backends refuse once the storage fence records Git format.
 
-Close this item with a stable coordination boundary that survives publication,
-full task/bundle custody admission, and crash/recovery tests covering new claims,
-old waiters and retained writers. No such concurrency fix is claimed here.
+A pending marker fences ordinary access after interruption. The native
+`migrate-events --to git --resume --yes` command validates State/database/token
+identities, all staged file digests and the live before/after projection before
+completing publication. Original backups and failed staging evidence remain.
+The focused migration tests exercise retained writers, an old-inode waiter,
+a new claim during conversion, task/bundle custody disagreement, publication
+faults, process death and recovery tampering.
+
+Older engine processes do not implement this protocol and must stop before
+conversion; mixed-version concurrent conversion is unqualified. No live State
+conversion is part of this repair. Schema-only fleet rollout continues to use
+`migrate state`, preserving event bytes. Bounded local fixture timings do not
+establish a universal latency target or fleet-scale qualification.
 
 ## E13 agent-fleet (PRs #57–#65) — deferred review findings
 
