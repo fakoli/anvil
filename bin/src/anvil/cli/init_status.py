@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -46,6 +49,67 @@ def _suggest_project_dir(plugin_root: Path) -> str | None:
     for pyproject in sorted(plugin_root.glob("*/pyproject.toml")):
         return pyproject.parent.name
     return None
+
+
+def _require_safe_force_initialization_paths(state_dir: Path) -> None:
+    from anvil.cli.local_event_repair import _regular, _safe_sidecars
+    from anvil.cli.repair import _safe_state_directory
+    from anvil.state.sqlite import _STATE_OPERATION_TOKEN
+
+    _safe_state_directory(state_dir)
+    for name in ("state.db", "events.jsonl", "config.yaml", _STATE_OPERATION_TOKEN):
+        _regular(state_dir / name, required=False)
+    _safe_sidecars(state_dir / "state.db")
+
+
+@contextmanager
+def _force_initialization_lock(state_dir: Path, *, force: bool) -> Iterator[None]:
+    """Admit destructive local reset before changing any existing authority."""
+    if not force or not os.path.lexists(state_dir):
+        yield
+        return
+
+    from anvil.config import read_events_storage
+    from anvil.state.backend import SchemaProbeFailed
+    from anvil.state.sqlite import (
+        _require_event_storage_fence,
+        _require_no_event_recovery,
+        _schema_initialization_lock,
+        _state_operation_lock,
+    )
+
+    database = str(state_dir / "state.db")
+    events = str(state_dir / "events.jsonl")
+    with ExitStack() as custody:
+        # Refuse unsafe paths and pending recovery before even creating a token.
+        # Repeat admission after owning it: conversion may have won the race.
+        try:
+            _require_safe_force_initialization_paths(state_dir)
+            _require_no_event_recovery(database)
+            if read_events_storage(state_dir / "config.yaml") == "git":
+                raise SchemaProbeFailed("Git-backed State cannot be force-initialized.")
+            custody.enter_context(_state_operation_lock(
+                database, create=True, contention_error_type=SchemaProbeFailed,
+            ))
+            _require_safe_force_initialization_paths(state_dir)
+            _require_no_event_recovery(database)
+            _require_event_storage_fence(database, "local")
+            if read_events_storage(state_dir / "config.yaml") == "git":
+                raise SchemaProbeFailed("Git-backed State cannot be force-initialized.")
+            if os.path.lexists(events):
+                # Drain a legacy writer that entered before token creation. New
+                # writers now need our token; late legacy waiters refuse. Close
+                # the old log handle before unlinking it (also on Windows).
+                with _schema_initialization_lock(
+                    database, events, create_missing_log=False,
+                ):
+                    _require_safe_force_initialization_paths(state_dir)
+        except (OSError, RuntimeError, ValueError, SchemaProbeFailed) as exc:
+            typer.echo(f"Error: force initialization refused: {exc}", err=True)
+            raise typer.Exit(1) from None
+        # Keep the permanent token through reset, bootstrap and optional seeding.
+        # Errors from the operation itself retain their ordinary CLI handling.
+        yield
 
 
 def init(
@@ -105,8 +169,6 @@ def init(
     review tasks) is run offline, leaving at least one task in ``ready`` so
     ``anvil next`` works immediately.
     """
-    from anvil.config import write_default_config
-
     # --from-repo and --with-sample both own prd.md and seed the task graph;
     # running both would double-seed. Refuse the combination up front.
     if from_repo and with_sample:
@@ -155,6 +217,27 @@ def init(
         )
         raise typer.Exit(code=1)
 
+    project_name = name if name else cwd.name
+    project_id = id if id else _slug(project_name)
+    with _force_initialization_lock(state_dir, force=force):
+        _initialize_project_state(
+            state_dir, project_dir, project_name=project_name, project_id=project_id,
+            force=force, with_sample=with_sample, from_repo=from_repo,
+        )
+
+
+def _initialize_project_state(
+    state_dir: Path,
+    project_dir: Path,
+    *,
+    project_name: str,
+    project_id: str,
+    force: bool,
+    with_sample: bool,
+    from_repo: bool,
+) -> None:
+    from anvil.config import write_default_config
+
     # --force reinit: wipe the canonical state files before scaffolding so the
     # replay/audit guarantee holds. Without this, the new project.created and
     # state.initialized events would be appended to the old events.jsonl,
@@ -167,18 +250,14 @@ def init(
         db_file = state_dir / "state.db"
         if db_file.exists():
             db_file.unlink()
-        # WAL/SHM sidecar files left by SQLite must go too.
-        for sidecar in ("state.db-wal", "state.db-shm"):
+        # No old WAL or rollback journal may be applied to the replacement DB.
+        for sidecar in ("state.db-wal", "state.db-shm", "state.db-journal"):
             sidecar_path = state_dir / sidecar
             if sidecar_path.exists():
                 sidecar_path.unlink()
         events_file = state_dir / "events.jsonl"
         if events_file.exists():
             events_file.unlink()
-
-    # Resolve project name and id.
-    project_name = name if name else cwd.name
-    project_id = id if id else _slug(project_name)
 
     # Create directory structure.
     state_dir.mkdir(parents=True, exist_ok=True)

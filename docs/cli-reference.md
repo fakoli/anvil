@@ -175,9 +175,15 @@ to seed the project row.
   basename of the current directory.
 - `--id TEXT` *(optional)* — project identifier slug (e.g. `my-project`).
   Defaults to a slug derived from `--name`.
-- `--force` *(flag)* — overwrite an existing resolved state directory.
-  Wipes `state.db` (including the `-wal` / `-shm` sidecars), `events.jsonl`,
+- `--force` *(flag)* — overwrite existing local-format State after stopping
+  other clients. Wipes `state.db` (including the `-wal` / `-shm` / `-journal`
+  sidecars), `events.jsonl`,
   and `config.yaml`. Preserves `packets/` and `snapshots/` (user-generated).
+  Refuses pending recovery or Git-backed State before deletion, including with
+  either seeding flag. Local reset creates or reuses `.state-operation.lock`
+  and holds it through bootstrap; preserve this permanent coordination file.
+  Fresh initialization creates no token. This does not make destructive reset
+  transactional or permit old clients to keep using a replaced database.
 - `--with-sample` *(flag)* — seed a runnable toy project (sample `prd.md` +
   parsed/planned/scored task graph) so `anvil next` works immediately.
 - `--from-repo` *(flag)* — brownfield ingest: after scaffolding, run
@@ -189,7 +195,9 @@ to seed the project row.
 
 - `0` — initialisation succeeded.
 - `1` — the resolved state directory already exists and `--force` was not
-  passed; or local layout would scaffold inside the anvil plugin root.
+  passed; local layout would scaffold inside the anvil plugin root; or force
+  initialization encounters unsafe paths, pending recovery, Git-backed State
+  or a contended coordination boundary.
 
 **Example:**
 

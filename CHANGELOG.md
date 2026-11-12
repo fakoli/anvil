@@ -22,6 +22,9 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 - Conversion preserves private artifact permissions and rejects unsafe paths
   before creating its coordination token. Native scratch replay and projection
   repair retain the same State coordination boundary.
+- Force initialization refuses pending recovery and Git-backed State before
+  deletion. Local resets share conversion custody through bootstrap and discard
+  old SQLite journals with the replaced database.
 
 ### Qualification limits
 

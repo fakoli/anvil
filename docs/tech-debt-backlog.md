@@ -42,6 +42,14 @@ conversion holds the stable token across full task/bundle custody admission,
 backups, atomic log publication and in-place SQLite projection publication.
 Retained local backends refuse once the storage fence records Git format.
 
+Destructive local `init --force` joins this boundary before deletion: it validates
+paths, creates or reuses the permanent token, drains any earlier event writer and
+holds custody through reset and bootstrap. It refuses pending local/event-format
+recovery and Git-backed State before changing authority. Local reset discards old
+SQLite journals with the database; fresh initialization creates no token. Stop
+other clients before a destructive reset: this is not a transactional reset or a
+promise that previously retained clients can safely reuse a replaced database.
+
 A pending marker fences ordinary access after interruption. The native
 `migrate-events --to git --resume --yes` command validates State/database/token
 identities, all staged file digests and the live before/after projection before
