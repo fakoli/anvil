@@ -7219,8 +7219,9 @@ class TestHookSubcommands:
     def test_file_change_does_not_bypass_format_recovery_guards(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_state: str,
     ) -> None:
-        import anvil.cli.migrate as migration
         import yaml
+
+        import anvil.cli.migrate as migration
 
         _do_init(tmp_path)
         state = tmp_path / ".anvil"
