@@ -28,6 +28,9 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -3367,6 +3370,214 @@ class TestSubmitProgress:
 # ===========================================================================
 
 class TestSubmitCompletionEvidence:
+    @staticmethod
+    def _prepare_imported_submission(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="approved")
+        command = "pytest -q"
+        _set_required_command_proof(state_dir, "T001", command)
+        monkeypatch.chdir(tmp_path)
+
+        async def claim_task() -> Any:
+            async with Client(mcp) as client:
+                return _data(await client.call_tool(
+                    "claim_task", {"task_id": "T001", "claimed_by": "agent-x"},
+                ))
+
+        claim = _run(claim_task())
+        return state_dir, claim, {
+            "task_id": "T001", "actor": "agent-x", "commands_run": [command],
+            "files_changed": ["src/foo.py"], "cwd": str(tmp_path),
+            "command_proof_artifacts_base64": [
+                _claim_command_artifact_base64(state_dir, claim, command),
+            ],
+        }
+
+    @staticmethod
+    async def _submit(arguments: dict[str, Any]) -> Any:
+        async with Client(mcp) as client:
+            return _data(await client.call_tool("submit_completion_evidence", arguments))
+
+    def _submit_after_independent_write(
+        self, state_dir: Path, arguments: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+        write: Callable[[Any], None],
+    ) -> Any:
+        from anvil.claims import command_proof_artifact
+        from anvil.mcp_server import _open_backend
+
+        verification_finished = threading.Event()
+        release_verification = threading.Event()
+        writer_ready = threading.Event()
+        writer_finished = threading.Event()
+        real_verifier = command_proof_artifact.verify_claim_command_proof_batch
+
+        def verify_then_wait(*args: Any, **kwargs: Any) -> Any:
+            proofs = real_verifier(*args, **kwargs)
+            verification_finished.set()
+            assert release_verification.wait(15), "test did not release proof preparation"
+            return proofs
+
+        def independent_writer() -> None:
+            # A distinct connection and thread must acquire the actual cross-process
+            # lock; a reentrant append on the submitting backend would be a false pass.
+            backend = _open_backend(state_dir, project_root=state_dir.parent)
+            try:
+                writer_ready.set()
+                assert verification_finished.wait(15), "proof preparation did not finish"
+                write(backend)
+                writer_finished.set()
+            finally:
+                backend.close()
+
+        monkeypatch.setattr(
+            command_proof_artifact, "verify_claim_command_proof_batch", verify_then_wait,
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            writer = executor.submit(independent_writer)
+            submission = None
+            try:
+                assert writer_ready.wait(10), "independent backend did not initialize"
+                submission = executor.submit(lambda: _run(self._submit(arguments)))
+                assert verification_finished.wait(10), "proof preparation did not finish"
+                # This is an ordering/deadlock bound, not a latency assertion.
+                wrote_before_release = writer_finished.wait(2)
+            finally:
+                release_verification.set()
+                # The executor joins both workers even if a barrier/assertion fails.
+            writer.result(timeout=10)
+            assert wrote_before_release, "unrelated writer blocked behind proof preparation"
+            assert submission is not None
+            return submission.result(timeout=10)
+
+    @staticmethod
+    def _assert_no_completion(
+        state_dir: Path, claim_id: str, *, claim_status: str = "active",
+        task_status: str = "claimed",
+    ) -> None:
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT status FROM claims WHERE id = ?", (claim_id,),
+            ).fetchone()[0] == claim_status
+        assert _task_status(state_dir, "T001") == task_status
+        events = [json.loads(line) for line in (state_dir / "events.jsonl").read_text().splitlines()]
+        assert not any(event["action"] == "evidence.submitted" for event in events)
+
+    def test_unrelated_writer_proceeds_during_proof_preparation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.state.models import EventDraft
+
+        state_dir, claim, arguments = self._prepare_imported_submission(tmp_path, monkeypatch)
+        _add_task(state_dir, task_id="T002", status="ready")
+
+        def write(backend: Any) -> None:
+            now = datetime.now(UTC)
+            backend.append(EventDraft(
+                timestamp=now, actor="other-agent", action="progress.noted",
+                target_kind="task", target_id="T002",
+                payload_json={"task_id": "T002", "actor": "other-agent",
+                              "notes": "independent work", "noted_at": now.isoformat()},
+            ))
+
+        response = self._submit_after_independent_write(state_dir, arguments, monkeypatch, write)
+        assert response["missing_claim_bound_proofs"] == []
+        assert response["claim_bound_command_proofs"][0]["generation"] == claim["generation"]
+        assert _task_status(state_dir, "T001") == "needs_review"
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT status FROM claims WHERE id = ?", (claim["id"],),
+            ).fetchone()[0] == "released"
+        actions = [json.loads(line)["action"]
+                   for line in (state_dir / "events.jsonl").read_text().splitlines()]
+        assert actions.index("progress.noted") < actions.index("evidence.submitted")
+
+    def test_claim_released_after_preverification_refuses_completion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.state.models import EventDraft
+
+        state_dir, claim, arguments = self._prepare_imported_submission(tmp_path, monkeypatch)
+
+        def release(backend: Any) -> None:
+            backend.append(EventDraft(
+                timestamp=datetime.now(UTC), actor="agent-x", action="claim.released",
+                target_kind="claim", target_id=claim["id"],
+                payload_json={"claim_id": claim["id"], "released_by": "agent-x",
+                              "release_reason": "intervening owner release"},
+            ))
+
+        with pytest.raises(ToolError, match="exact active claim generation"):
+            self._submit_after_independent_write(state_dir, arguments, monkeypatch, release)
+        self._assert_no_completion(
+            state_dir, claim["id"], claim_status="released", task_status="ready",
+        )
+
+    def test_expiry_after_successful_preverification_refuses_completion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import anvil.clock as clock_module
+        from anvil.claims import command_proof_artifact
+
+        state_dir, claim, arguments = self._prepare_imported_submission(tmp_path, monkeypatch)
+        expiry = datetime.fromisoformat(claim["lease_expires_at"].replace("Z", "+00:00"))
+
+        class AdvancingClock:
+            current = datetime.now(UTC)
+
+            def now(self) -> datetime:
+                return self.current
+
+        real_verifier = command_proof_artifact.verify_claim_command_proof_batch
+        verified = []
+
+        def verify_then_expire(*args: Any, **kwargs: Any) -> Any:
+            proofs = real_verifier(*args, **kwargs)
+            verified.extend(proofs)
+            AdvancingClock.current = expiry + timedelta(seconds=1)
+            return proofs
+
+        monkeypatch.setattr(clock_module, "SystemClock", AdvancingClock)
+        monkeypatch.setattr(
+            command_proof_artifact, "verify_claim_command_proof_batch", verify_then_expire,
+        )
+        with pytest.raises(ToolError, match="exact active claim generation"):
+            _run(self._submit(arguments))
+        assert len(verified) == 1
+        self._assert_no_completion(state_dir, claim["id"])
+
+    def test_hook_buffer_change_after_inspection_refuses_imported_completion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.cli import packet_apply
+        from anvil.naming import task_claim_buffer_path
+
+        state_dir, claim, arguments = self._prepare_imported_submission(tmp_path, monkeypatch)
+        real_inspector = packet_apply.inspect_command_buffer
+        inspected = []
+
+        def inspect_then_change(*args: Any, **kwargs: Any) -> Any:
+            inspection = real_inspector(*args, **kwargs)
+            inspected.append(inspection)
+            buffer = task_claim_buffer_path(state_dir / ".evidence-buffer", claim["id"])
+            assert buffer is not None
+            buffer.parent.mkdir(exist_ok=True)
+            # An external, non-cooperating buffer writer must fail the final guard.
+            buffer.write_text('{}\n', encoding="utf-8")
+            return inspection
+
+        monkeypatch.setattr(packet_apply, "inspect_command_buffer", inspect_then_change)
+        with pytest.raises(ToolError, match="buffer changed before submission"):
+            _run(self._submit(arguments))
+        assert len(inspected) == 1
+        self._assert_no_completion(state_dir, claim["id"])
+
     def test_expiry_during_artifact_decode_refuses_without_mutation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

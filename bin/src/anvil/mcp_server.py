@@ -2132,6 +2132,28 @@ def submit_completion_evidence(
                     f"command_proof_error[{exc.code}]: {exc}"
                 ) from exc
 
+        # Repository/cwd checks and portable-proof preparation do not need the
+        # shared State lock. Append still rechecks live custody, lease and proof
+        # material under that lock, as it does for CLI submissions.
+        if command_proof_artifacts_base64:
+            if proof_project is None or proof_project_root is None:
+                raise ToolError("command_proof_error[context_missing]: project context missing")
+            try:
+                claim_bound_proofs = verify_claim_command_proof_batch(
+                    loaded_claim_proofs,
+                    claim=active_claim,
+                    task=task,
+                    project_id=proof_project.id,
+                    project_root=proof_project_root,
+                    actor=actor,
+                    declared_commands=commands_run,
+                    now=clock.now(),
+                )
+            except ClaimCommandProofError as exc:
+                raise ToolError(
+                    f"command_proof_error[{exc.code}]: {exc}"
+                ) from exc
+
         evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
 
         with backend.claim_operation_lock():
@@ -2144,28 +2166,10 @@ def submit_completion_evidence(
             except CommandProofImportOverflow as exc:
                 raise ToolError(f"{exc.code}: {exc}") from exc
 
-            # Refresh after every artifact/buffer read, then revalidate the exact
-            # lease window immediately before drafting. SQLite repeats this check
-            # against its authoritative clock while holding the append lock.
+            # Refresh after preparation, lock acquisition and buffer I/O. SQLite
+            # revalidates the exact lease against its authoritative clock before
+            # appending; a preverified proof cannot extend or replace a claim.
             now = clock.now()
-            if command_proof_artifacts_base64:
-                if proof_project is None or proof_project_root is None:
-                    raise ToolError("command_proof_error[context_missing]: project context missing")
-                try:
-                    claim_bound_proofs = verify_claim_command_proof_batch(
-                        loaded_claim_proofs,
-                        claim=active_claim,
-                        task=task,
-                        project_id=proof_project.id,
-                        project_root=proof_project_root,
-                        actor=actor,
-                        declared_commands=commands_run,
-                        now=now,
-                    )
-                except ClaimCommandProofError as exc:
-                    raise ToolError(
-                        f"command_proof_error[{exc.code}]: {exc}"
-                    ) from exc
 
             draft = EventDraft(
                 timestamp=now,
