@@ -266,24 +266,45 @@ def _explicitly_selects_live_github(config: pytest.Config) -> bool:
     return _explicitly_selects_live_github_args(config.invocation_params.args)
 
 
+def _parse_test_shard(value: str) -> tuple[int, int]:
+    try:
+        index, count = (int(part) for part in value.split("/"))
+    except ValueError:
+        raise pytest.UsageError("--anvil-test-shard requires INDEX/COUNT, for example 1/4") from None
+    if not 1 <= index <= count:
+        raise pytest.UsageError("--anvil-test-shard requires 1 <= INDEX <= COUNT")
+    return index, count
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--anvil-test-shard", type=_parse_test_shard, default=None,
+        help="Run one disjoint INDEX/COUNT partition of the selected tests (CLI only).",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
     """Keep credentialed live tests opt-in under replacement CLI selectors."""
-    if _explicitly_selects_live_github(config):
+    if not _explicitly_selects_live_github(config):
+        live_items = [item for item in items if item.get_closest_marker("live_github")]
+        if live_items:
+            items[:] = [item for item in items if not item.get_closest_marker("live_github")]
+            config.hook.pytest_deselected(items=live_items)
+    shard = config.getoption("--anvil-test-shard")
+    if shard is None:
         return
-    selected_items: list[pytest.Item] = []
-    live_items: list[pytest.Item] = []
-    for item in items:
-        if item.get_closest_marker("live_github"):
-            live_items.append(item)
-        else:
-            selected_items.append(item)
-    if not live_items:
-        return
-    items[:] = selected_items
-    config.hook.pytest_deselected(items=live_items)
+    arguments = config.invocation_params.args
+    arguments = arguments[:arguments.index("--")] if "--" in arguments else arguments
+    if not any(argument == "--anvil-test-shard" or argument.startswith("--anvil-test-shard=")
+               for argument in arguments):
+        raise pytest.UsageError("Pass --anvil-test-shard explicitly, not through inherited addopts")
+    index, count = shard
+    excluded = [item for position, item in enumerate(items) if position % count != index - 1]
+    items[:] = items[index - 1::count]
+    config.hook.pytest_deselected(items=excluded)
 
 
 @pytest.fixture(autouse=True)

@@ -1,5 +1,36 @@
 # Contributing
 
+## Fast feedback and complete CI
+
+Run the tests related to the change first. A layout edit usually needs the web
+tests; changes to execution receipts need native execution, continuation and
+approval regressions. Keep expensive integration tests in the full suite, and
+select them when their behavior is affected. Test count alone is not a reason
+to delete a regression: inspect its timing and whether it duplicates coverage.
+
+Use existing pytest workers for focused checks, for example:
+
+```sh
+uv run --project bin --locked pytest tests/test_web_execution.py -n 4 --dist worksteal --durations=20
+```
+
+For a complete local run:
+
+```sh
+uv run --project bin --locked pytest -n auto --dist worksteal --durations=30
+```
+
+Linux CI and release qualification split the full selected collection over four
+independent runners. Windows CI partitions its existing delivery-contract set
+the same way. Each runner uses four pytest workers; their stable aggregate checks
+require every shard to pass. Every shard retains JUnit timings, including failed
+runs. Full regression, artifact and publication checks remain required.
+
+To reproduce one CI partition, add `--anvil-test-shard 1/4` explicitly to the
+same pytest selection. The four partitions are disjoint and cover that entire
+selection. A single partition is partial verification. Do not put this option
+in inherited `PYTEST_ADDOPTS`, where it could silently narrow nested test runs.
+
 ## Test workflows on Windows
 
 Run these commands from the repository root. They work in PowerShell and keep
