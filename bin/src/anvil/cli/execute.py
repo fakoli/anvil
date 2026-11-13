@@ -42,7 +42,7 @@ def run_configure(
     try:
         registration = register_execution_adapter(script, interpreter, profile)
         path = global_config_path()
-        original = execution_file_bytes(path, 1024 * 1024) if path.exists() else b""
+        original = execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b""
         existing = execution_config_mapping(original)
         data = dataclasses.asdict(registration)
         previous = existing.get("execution_adapter")
@@ -63,6 +63,10 @@ def run_configure(
             raise ValueError("Execution registration cannot preserve the owner configuration")
         if write and changed:
             private_directory(path.parent)
+            # Newly created intermediate directories inherit the caller's umask.
+            # Recheck the complete prefix before any lock/configuration write.
+            if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
+                raise ValueError("Global configuration changed during registration")
             lock = path.with_name(path.name + ".execution-registration.lock")
             with lock.open("xb") as guard:
                 os.chmod(lock, 0o600)
@@ -70,7 +74,7 @@ def run_configure(
                 guard.flush()
                 os.fsync(guard.fileno())
             try:
-                if (execution_file_bytes(path, 1024 * 1024) if path.exists() else b"") != original:
+                if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
                     raise ValueError("Global configuration changed during registration")
                 if original:
                     backup = path.with_name(path.name + ".before-execution-" + uuid.uuid4().hex)
@@ -85,7 +89,7 @@ def run_configure(
                     stream.write(raw)
                     stream.flush()
                     os.fsync(stream.fileno())
-                if (execution_file_bytes(path, 1024 * 1024) if path.exists() else b"") != original:
+                if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
                     raise ValueError("Global configuration changed before registration publication")
                 os.replace(temporary, path)
                 sync_directory(path.parent)

@@ -7,6 +7,7 @@ import yaml
 from typer.testing import CliRunner
 
 from anvil.cli import app
+from tests.test_config import execution_permission_root as execution_permission_root
 from tests.test_execution import execution_project as execution_project
 
 
@@ -118,6 +119,62 @@ def test_run_configure_preserves_owner_config_and_refuses_replacement(
     assert [
         path.read_bytes() for path in global_path.parent.glob("*.before-execution-*")
     ] == [original]
+
+
+@pytest.mark.parametrize("failure_stage", [None, "before", "after"])
+def test_run_configure_missing_config_checks_ancestry(execution_permission_root, monkeypatch, failure_stage):
+    import anvil.cli.execute as execute_cli
+    from anvil.config import load_execution_adapter
+
+    plugin = execution_permission_root / "plugin"
+    plugin.mkdir(mode=0o700)
+    script = plugin / "scripts" / "coordinate.py"
+    extension = plugin / "extensions" / "coordination.js"
+    profile = plugin / "profile.json"
+    package = plugin / "package.json"
+    for path in (script, extension, profile, package):
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+    package.write_text('{"name":"codex-pi-coordination","version":"0.3.0"}')
+    outer = execution_permission_root / "owner"
+    outer.mkdir()
+    outer.chmod(0o777 if failure_stage == "before" else 0o755 if failure_stage else 0o700)
+    config = outer / "new" / "private" / "config.yaml"
+    if failure_stage == "after":
+        original_directory = execute_cli.private_directory
+
+        def create_unsafe_intermediate(path):
+            result = original_directory(path)
+            (outer / "new").chmod(0o777)
+            return result
+
+        monkeypatch.setattr(execute_cli, "private_directory", create_unsafe_intermediate)
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(config))
+    arguments = ["run-configure", "--script", str(script), "--interpreter", str(script),
+                 "--profile", str(profile), "--json"]
+    runner = CliRunner()
+    preview = runner.invoke(app, arguments)
+    assert preview.exit_code == (1 if failure_stage == "before" else 0), preview.output
+    assert not config.parent.exists()
+    written = runner.invoke(app, [*arguments, "--write"])
+    assert written.exit_code == (1 if failure_stage else 0), written.output
+    if failure_stage:
+        assert not config.exists()
+        assert not list(outer.rglob("*.execution*"))
+        if failure_stage == "before":
+            assert not list(outer.iterdir())
+        else:
+            assert not list(config.parent.iterdir())
+        assert json.loads(written.output)["error"]["code"] == "invalid_registration"
+    else:
+        assert load_execution_adapter().script == str(script)
+        saved = config.read_bytes()
+        noop = runner.invoke(app, [*arguments, "--write"])
+        assert noop.exit_code == 0, noop.output
+        assert not json.loads(noop.output)["data"]["changed"]
+        assert config.read_bytes() == saved
+        assert sorted(path.name for path in config.parent.iterdir()) == ["config.yaml"]
 
 
 @pytest.mark.parametrize(

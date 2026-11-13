@@ -14,7 +14,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, overload
 
 import yaml
 
@@ -141,20 +141,117 @@ def register_execution_adapter(script: Path, interpreter: Path, profile: Path) -
     )
 
 
-def execution_file_bytes(path: Path, maximum: int = 128 * 1024 * 1024) -> bytes:
-    """Reject aliases and writable-by-others executable/config inputs."""
+@overload
+def execution_file_bytes(
+    path: Path, maximum: int = 128 * 1024 * 1024, *, missing_ok: Literal[False] = False
+) -> bytes: ...
+
+
+@overload
+def execution_file_bytes(
+    path: Path, maximum: int = 128 * 1024 * 1024, *, missing_ok: Literal[True]
+) -> bytes | None: ...
+
+
+def execution_file_bytes(
+    path: Path, maximum: int = 128 * 1024 * 1024, *, missing_ok: bool = False
+) -> bytes | None:
+    """Read bounded registered bytes through protected, no-follow ancestry.
+
+    POSIX trust is root/current effective UID, not group membership. A protected
+    private directory can shield writable installed files; a deeper private
+    directory cannot repair an already replaceable ancestor. Missing paths grant
+    no sticky-directory exception. This does not attest privileged/same-UID writers.
+    """
     import os
     import stat
+    from contextlib import ExitStack
 
     path = path.absolute()
-    if any(parent.is_symlink() for parent in (path, *path.parents)):
-        raise ValueError("Execution registration paths cannot contain symbolic links")
-    metadata = path.stat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
-        raise ValueError("Execution input must be a bounded regular file")
-    if os.name == "posix" and (metadata.st_uid not in {0, os.getuid()} or metadata.st_mode & 0o022):
-        raise ValueError("Execution input is writable by another owner")
-    return path.read_bytes()
+    if ".." in path.parts or maximum < 0:
+        raise ValueError("Invalid execution registration path or byte limit")
+    private_ancestor = False
+    parent_metadata = None
+    descriptor = None
+    current = Path(path.anchor)
+    with ExitStack() as stack:
+        for index, component in enumerate((path.anchor, *path.parts[1:])):
+            if index:
+                current /= component
+            directory = index < len(path.parts) - 1
+            try:
+                if os.name == "nt":
+                    # Reuse the native reparse-point-safe open; actual execution
+                    # remains Linux-only, without a Windows ACL trust claim.
+                    from anvil.verification_profiles import _windows_open
+
+                    current.lstat()  # Preserve FileNotFoundError for missing_ok.
+                    descriptor = _windows_open(current, directory=directory)
+                else:
+                    flags = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                    flags |= (
+                        getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
+                        if directory else os.O_RDONLY | os.O_NONBLOCK
+                    )
+                    descriptor = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if missing_ok:
+                    if (
+                        os.name == "posix" and not private_ancestor
+                        and parent_metadata is not None and parent_metadata.st_mode & 0o022
+                    ):
+                        raise ValueError("Missing execution input has an unsafe parent") from None
+                    return None
+                raise
+            stack.callback(os.close, descriptor)
+            metadata = os.fstat(descriptor)
+            path_metadata = current.lstat()
+            if (
+                stat.S_ISLNK(path_metadata.st_mode)
+                or getattr(path_metadata, "st_file_attributes", 0) & 0x400
+                or not os.path.samestat(metadata, path_metadata)
+                or not (
+                    stat.S_ISDIR(metadata.st_mode) if directory
+                    else stat.S_ISREG(metadata.st_mode)
+                )
+            ):
+                raise ValueError("Execution input must have regular, non-symlink ancestry")
+            if os.name == "posix":
+                if metadata.st_uid not in {0, os.geteuid()}:
+                    raise ValueError("Execution input has an untrusted owner")
+                if not private_ancestor:
+                    # Sticky protects an existing trusted-owned child's entry,
+                    # never its writable contents or a yet-to-be-created name.
+                    parent = parent_metadata if parent_metadata is not None else metadata
+                    if parent.st_mode & 0o022 and not parent.st_mode & stat.S_ISVTX:
+                        raise ValueError("Execution input has a replaceable ancestor")
+                if directory:
+                    private_ancestor |= metadata.st_mode & 0o077 == 0
+                elif metadata.st_mode & 0o022 and (
+                    not private_ancestor or metadata.st_nlink != 1
+                ):
+                    raise ValueError("Execution input is writable through an unprotected path")
+            parent_metadata = metadata
+        assert descriptor is not None
+        if metadata.st_size > maximum:
+            raise ValueError("Execution input exceeds its byte limit")
+        chunks = []
+        size = 0
+        while chunk := os.read(descriptor, min(65536, maximum + 1 - size)):
+            size += len(chunk)
+            if size > maximum:
+                raise ValueError("Execution input exceeds its byte limit")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        attributes = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                      "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            any(getattr(metadata, name) != getattr(after, name) for name in attributes)
+            or size != after.st_size
+            or not os.path.samestat(after, path.lstat())
+        ):
+            raise ValueError("Execution input changed while reading")
+        return b"".join(chunks)
 
 
 def execution_config_mapping(raw: bytes) -> dict[str, object]:
@@ -175,9 +272,10 @@ def load_execution_adapter() -> ExecutionAdapter:
     import hashlib
 
     path = global_config_path()
-    if not path.exists():
+    raw = execution_file_bytes(path, 1024 * 1024, missing_ok=True)
+    if raw is None:
         raise ValueError("Run is not configured; use anvil run-configure")
-    value = execution_config_mapping(execution_file_bytes(path, 1024 * 1024))
+    value = execution_config_mapping(raw)
     registration = value.get("execution_adapter")
     if type(registration) is not dict or set(registration) != {
         "registration",

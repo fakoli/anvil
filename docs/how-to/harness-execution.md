@@ -19,6 +19,18 @@ Project configuration cannot replace executable or profile paths. Registration
 pins the interpreter, script, extension and profile bytes; it does not qualify
 the model or runtime. Changed registered bytes require an intentional reviewed
 registration update.
+On POSIX, registered inputs and the canonical global configuration target are
+read through trusted root/current-owner, non-symlink ancestry. Script and profile
+paths cannot contain symbolic links. The owner-selected global configuration and
+interpreter keep their existing canonical-target resolution; their resolved
+targets receive the same ancestry checks. Group-writable installed files
+are supported beneath a protected owner-only directory, provided writable files
+have no additional hardlinks. A private directory beneath a reachable writable
+ancestor does not make that path safe. These checks also cover missing config
+parents before registration writes; they do not change installed permissions or
+attest privileged or same-owner writers. Actual Run remains Linux-only; Windows
+registration checks aliases and bounded files without claiming POSIX permissions
+or Windows ACL qualification.
 This initial command refuses replacement and does not yet provide an upgrade
 command; a supported expected-registration update is follow-up work. Do not
 edit private registration files as a normal upgrade procedure.
