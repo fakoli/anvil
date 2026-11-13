@@ -894,11 +894,9 @@ def preview_run(
     cwd: Path, task_id: str, actor: str, options: RunOptions, wall_seconds: int = 600
 ) -> dict[str, Any]:
     from anvil.cli._helpers import _open_backend, _require_state_dir, _resolve_state_dir
+    from anvil.execution_runner import require_linux_capture
 
-    if os.name != "posix":
-        raise ExecutionError(
-            "unsupported_platform", "Owned Run currently requires POSIX; no claim was created"
-        )
+    require_linux_capture()
     if type(wall_seconds) is not int or not 1 <= wall_seconds <= 1800:
         raise ExecutionError("invalid_budget", "Run budget must be 1..1800 seconds")
     require_isolated_state_layout()
@@ -973,9 +971,9 @@ def preview_run(
 
 def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[str, Any]:
     from anvil.cli._helpers import _open_backend
+    from anvil.execution_runner import require_linux_capture
 
-    if os.name != "posix":
-        raise ExecutionError("unsupported_platform", "Owned Run currently requires POSIX")
+    require_linux_capture()
     require_isolated_state_layout()
     root = journal_root(cwd)
     preview = read_receipt(root / "previews" / (identifier(preview_id) + ".json"))
@@ -1242,10 +1240,9 @@ def read_execution_capabilities(cwd: Path) -> dict[str, Any]:
 
 def refresh_execution_capabilities(cwd: Path) -> dict[str, Any]:
     """An explicit bounded metadata action; Default Run never calls this."""
-    if os.name != "posix":
-        raise ExecutionError(
-            "unsupported_platform", "Capability refresh requires owned POSIX execution"
-        )
+    from anvil.execution_runner import require_linux_capture
+
+    require_linux_capture()
     registration = load_execution_adapter()
     validate_adapter_contract(registration, cwd)
     root = journal_root(cwd)

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,7 +23,7 @@ from anvil.execution_runner import capture, integrate, process_group_absent
 from tests.test_execution import execution_project as execution_project
 
 pytestmark = pytest.mark.skipif(
-    os.name != "posix", reason="Owned Run adapter requires POSIX process-group custody"
+    sys.platform != "linux", reason="Owned Run adapter requires Linux descendant custody"
 )
 
 
@@ -181,8 +184,324 @@ def test_capture_failures_preserve_output_and_stop_owned_group(tmp_path, command
     assert error.value.code == code
     result = read_receipt(tmp_path / "check.result.json")
     assert result["group_absent"] is True
-    assert process_group_absent(result["pid"])
+    assert process_group_absent(result["supervisor_pid"])
+    assert not Path(f"/proc/{result['pid']}").exists()
     assert (tmp_path / "check.log").exists()
+
+
+@pytest.fixture
+def adopted_test_children():
+    """Own any escaped baseline descendant so a failing regression is cleaned up."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0
+    assert libc.prctl(36, 1, 0, 0, 0) == 0
+    try:
+        yield
+    finally:
+        assert libc.prctl(36, previous.value, 0, 0, 0) == 0
+
+
+def _stop_recorded_descendant(directory):
+    import signal
+
+    path = directory / "descendant.pid"
+    if not path.exists():
+        return
+    pid = int(path.read_text())
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def _detached_capture_command(detached, outcome):
+    descendant = (
+        "import os,signal,time;from pathlib import Path;"
+        + ("os.setsid();" if detached else "")
+        + "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+        "Path('descendant.pid').write_text(str(os.getpid()));time.sleep(60)"
+    )
+    return (
+        "import subprocess,sys,time;from pathlib import Path;"
+        f"subprocess.Popen([sys.executable,'-c',{descendant!r}]"
+        + (",stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
+           if outcome != "inherited_pipe" else ")")
+        + "\nwhile not Path('descendant.pid').exists():time.sleep(.005)\n"
+        "print('captured-prefix',flush=True)\n"
+        + {"success": "", "nonzero": "sys.exit(7)", "timeout": "time.sleep(60)",
+           "overflow": "sys.stdout.write('x'*200000);sys.stdout.flush()",
+           "inherited_pipe": ""}[outcome]
+    )
+
+
+@pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "nonzero", "timeout", "overflow", "inherited_pipe"])
+def test_capture_reaps_all_descendants_before_return(
+    tmp_path, adopted_test_children, detached, outcome
+):
+    try:
+        options = (
+            [sys.executable, "-c", _detached_capture_command(detached, outcome)],
+            tmp_path, tmp_path, "contained", time.monotonic() + 1, 1024,
+        )
+        if outcome in {"success", "nonzero"}:
+            result = capture(*options, require_success=False)
+            assert result["exit_code"] == (0 if outcome == "success" else 7)
+        else:
+            with pytest.raises(ExecutionError):
+                capture(*options)
+            result = read_receipt(tmp_path / "contained.result.json")
+        pid = int((tmp_path / "descendant.pid").read_text())
+        assert not Path(f"/proc/{pid}").exists(), "capture returned before descendant reap"
+        assert result["containment_complete"] is True
+        assert result["group_absent"] is True
+        assert result["pid"] != result["supervisor_pid"]
+        assert result["supervisor_reaped"] is True
+        assert (tmp_path / "contained.log").read_bytes().startswith(b"captured-prefix\n")
+        assert result["output_bytes"] <= 1025
+    finally:
+        _stop_recorded_descendant(tmp_path)
+
+
+def test_capture_parent_death_still_reaps_detached_descendants(tmp_path, adopted_test_children):
+    import signal
+
+    command = (
+        "import os;from pathlib import Path;"
+        "Path('command.pid').write_text(str(os.getpid()));"
+        + _detached_capture_command(True, "timeout")
+    )
+    program = (
+        "import sys,time;from pathlib import Path;"
+        "from anvil.execution_runner import capture;"
+        "directory=Path(sys.argv[1]);"
+        f"capture([sys.executable,'-c',{command!r}],directory,directory,'parent',"
+        "time.monotonic()+30,1024)"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-I", "-c", program, str(tmp_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    supervisor_pid = None
+    try:
+        limit = time.monotonic() + 5
+        while not (tmp_path / "descendant.pid").exists():
+            assert time.monotonic() < limit, "owned command did not start"
+            time.sleep(.01)
+        supervisor_pid = read_receipt(tmp_path / "parent.started.json")["supervisor_pid"]
+        parent.kill()
+        assert parent.wait(timeout=3) == -signal.SIGKILL
+        limit = time.monotonic() + 5
+        while True:
+            waited, status = os.waitpid(supervisor_pid, os.WNOHANG)
+            if waited:
+                assert os.waitstatus_to_exitcode(status) == 0
+                break
+            assert time.monotonic() < limit, "orphaned supervisor did not clean up"
+            time.sleep(.01)
+        for name in ("command.pid", "descendant.pid"):
+            assert not Path("/proc", (tmp_path / name).read_text()).exists()
+        assert not (tmp_path / "parent.result.json").exists()
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+        parent.wait(timeout=3)
+        if supervisor_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(supervisor_pid, signal.SIGTERM)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(supervisor_pid, 0)
+        _stop_recorded_descendant(tmp_path)
+
+
+def test_capture_preserves_actual_signed_command_exit(tmp_path):
+    result = capture(
+        [sys.executable, "-c", "import os,signal;os.kill(os.getpid(),signal.SIGTERM)"],
+        tmp_path, tmp_path, "signal", time.monotonic() + 3, 1024, require_success=False,
+    )
+    assert result["exit_code"] == -signal.SIGTERM
+    assert result["supervisor_exit_code"] == 0
+    assert result["command_reaped"] and result["containment_complete"]
+
+
+def test_capture_refuses_ignored_child_wait_status_before_start(tmp_path):
+    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        with pytest.raises(ExecutionError, match="observable child wait status"):
+            capture(
+                [sys.executable, "-c", "from pathlib import Path;Path('started').touch()"],
+                tmp_path, tmp_path, "ignored", time.monotonic() + 3, 1024,
+            )
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    assert not list(tmp_path.iterdir())
+
+
+def test_capture_group_observation_failure_retains_unknown_custody(tmp_path, monkeypatch):
+    import anvil.execution_runner as runner
+
+    def denied(pid):
+        raise PermissionError("synthetic group observation denial")
+
+    monkeypatch.setattr(runner, "process_group_absent", denied)
+    with pytest.raises(ExecutionError) as error:
+        capture(
+            [sys.executable, "-c", "print('retained-output')"],
+            tmp_path, tmp_path, "unknown", time.monotonic() + 3, 1024,
+        )
+    assert error.value.code == "containment_unknown"
+    result = read_receipt(tmp_path / "unknown.result.json")
+    assert result["group_absent"] is False and result["containment_complete"] is False
+    assert result["supervisor_reaped"] is True
+    assert (tmp_path / "unknown.log").read_bytes() == b"retained-output\n"
+
+
+def test_missing_current_capture_result_cannot_retire_run(execution_project, monkeypatch):
+    import anvil.execution as execution
+
+    backend, repo, _, _ = execution_project
+    original = execution.subprocess.Popen
+    worker_fault = """import sys
+from anvil import execution_runner as runner
+original = runner.write_receipt
+def fail_current_result(path, value):
+    if path.name == 'check-0.result.json':
+        raise OSError('synthetic current custody result write failure')
+    return original(path, value)
+runner.write_receipt = fail_current_result
+raise SystemExit(runner.main())
+"""
+
+    def launch_real_worker_with_storage_fault(argv, *args, **kwargs):
+        if argv[1:4] == ["-I", "-m", "anvil.execution_runner"]:
+            assert kwargs["start_new_session"] is True
+            argv = [argv[0], "-I", "-c", worker_fault, argv[4]]
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(execution.subprocess, "Popen", launch_real_worker_with_storage_fault)
+    preview = preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    admitted = confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    result = _wait(directory)
+    assert result["state"] == "reconciliation_required", result
+    assert result["local_children_stopped"] is False
+    assert not (directory / "check-0.result.json").exists()
+    assert (directory / "check-0.log").read_bytes() == b"native-proof-ok\n"
+    assert not list(directory.glob("proof-*.json"))
+    assert backend.get_latest_evidence("release:T001") is None
+
+
+@pytest.mark.parametrize("changed", [
+    "malformed_result", "foreign_started", "boolean_exit", "duplicate_attempt",
+])
+def test_stopped_capture_requires_matching_complete_receipts(tmp_path, changed):
+    from anvil.execution_runner import captures_stopped
+
+    capture(
+        [sys.executable, "-c", "print('verified')"],
+        tmp_path, tmp_path, "check", time.monotonic() + 3, 1024,
+    )
+    assert captures_stopped(tmp_path, ["check"])
+    if changed == "malformed_result":
+        (tmp_path / "check.result.json").write_text("[false]")
+    elif changed == "foreign_started":
+        path = tmp_path / "check.started.json"
+        value = read_receipt(path)
+        value["supervisor_pid"] += 1
+        path.write_text(json.dumps(value))
+    elif changed == "boolean_exit":
+        path = tmp_path / "check.result.json"
+        value = read_receipt(path)
+        value["supervisor_exit_code"] = False
+        path.write_text(json.dumps(value))
+    else:
+        assert not captures_stopped(tmp_path, ["check", "check"])
+        return
+    assert not captures_stopped(tmp_path, ["check"])
+
+
+@pytest.mark.parametrize("mode", ["detached_child", "lost_supervisor"])
+def test_native_proof_requires_completed_descendant_containment(
+    execution_project, tmp_path, adopted_test_children, mode
+):
+    import shlex
+
+    from anvil.execution import git, reserve_slot
+    from tests.test_bundle_state import _event
+
+    backend, repo, _, _ = execution_project
+    pid_file = tmp_path / "verification-descendant.pid"
+    if mode == "detached_child":
+        child = (
+            "import os,signal,time;from pathlib import Path;os.setsid();"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()));time.sleep(60)"
+        )
+        program = (
+            "import subprocess,sys,time;from pathlib import Path;"
+            f"subprocess.Popen([sys.executable,'-c',{child!r}],"
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            f"while not Path({str(pid_file)!r}).exists():time.sleep(.005)\n"
+            "print('native-proof-ok')"
+        )
+    else:
+        program = (
+            "import os,signal;print('native-proof-ok',flush=True);"
+            "os.kill(os.getppid(),signal.SIGKILL)"
+        )
+    (repo / "containment_check.py").write_text(program)
+    git(repo, "add", "containment_check.py")
+    git(repo, "commit", "-qm", "Synthetic frozen containment check")
+    command = "exec " + shlex.join([sys.executable, "containment_check.py"])
+    task = backend.get_task("release:T001")
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id,
+        "verification": {"commands": [command], "required_proofs": [
+            {"kind": "command", "command": command, "passing_exit_codes": [0],
+             "label": "contained-native-check"},
+        ]},
+    }, target_kind="task", target_id=task.id))
+    preview = preview_run(repo, task.id, "synthetic-owner", RunOptions())
+    admitted = confirm_run(repo, task.id, "synthetic-owner", preview["preview_id"])
+    root = journal_root(repo)
+    directory = root / "runs" / admitted["run_id"]
+    command_pid = None
+    try:
+        result = _wait(directory)
+        captured = read_receipt(directory / "check-0.result.json")
+        command_pid = captured["pid"]
+        if mode == "detached_child":
+            assert result["state"] == "needs_review", result
+            assert captured["containment_complete"] is True
+            assert not Path("/proc", pid_file.read_text()).exists()
+            assert backend.get_latest_evidence(task.id).proofs[0].evidence_core.exit_code == 0
+        else:
+            assert result["state"] == "reconciliation_required", result
+            assert result["local_children_stopped"] is False
+            assert captured["containment_complete"] is False
+            assert captured["exit_code"] is None  # Never substitute supervisor's exit.
+            assert not list(directory.glob("proof-*.json"))
+            assert backend.get_latest_evidence(task.id) is None
+            with pytest.raises(ExecutionError, match="requires inspection"):
+                reserve_slot(root, next((root / "slots").glob("*.json")), {
+                    "run_id": "b" * 32, "task_id": task.id, "preview_id": "c" * 32,
+                })
+    finally:
+        if command_pid is not None:
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(command_pid, 0)
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(int(pid_file.read_text()), 0)
 
 
 def test_integration_checks_all_preimages_before_edit(tmp_path):
@@ -587,7 +906,8 @@ def test_native_cli_uses_bounded_owned_capture(tmp_path, monkeypatch, failure):
     child_pid_file = tmp_path / "child.pid"
     # The synthetic native command owns and reaps its descendant on group TERM.
     program = """import os, pathlib, signal, subprocess, sys, time
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+child = subprocess.Popen([sys.executable, '-c',
+    'import os,signal,time;os.setsid();signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])
 def stop(*args):
     child.wait(timeout=3)
     raise SystemExit(0)
@@ -621,7 +941,8 @@ time.sleep(60)
     (receipt_path,) = (tmp_path / "operations").glob("*/native.result.json")
     receipt = read_receipt(receipt_path)
     assert receipt["group_absent"] is True
-    assert process_group_absent(receipt["pid"])
+    assert process_group_absent(receipt["supervisor_pid"])
+    assert not Path(f"/proc/{receipt['pid']}").exists()
     assert receipt["output_bytes"] <= 4097
     assert receipt_path.with_name("native.log").stat().st_size <= 4097
     assert receipt_path.with_name("native.stdout").stat().st_size <= 4097

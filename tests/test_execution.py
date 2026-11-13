@@ -121,8 +121,8 @@ if __name__ == '__main__': main()
 
 @pytest.fixture
 def execution_project(git_repo, tmp_path, monkeypatch):
-    if os.name != "posix":
-        pytest.skip("Owned Run adapter requires POSIX process-group custody")
+    if sys.platform != "linux":
+        pytest.skip("Owned Run adapter requires Linux descendant custody")
     monkeypatch.delenv("ANVIL_STATE_LAYOUT", raising=False)
     state = _resolve_state_dir(git_repo)
     state.mkdir(parents=True)
@@ -193,13 +193,39 @@ def execution_project(git_repo, tmp_path, monkeypatch):
         backend.close()
 
 
-def test_unsupported_platform_refuses_before_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_unsupported_platform_refuses_before_state(tmp_path, monkeypatch, platform):
     import anvil.execution as execution
 
     with monkeypatch.context() as patch:
-        patch.setattr(execution.os, "name", "nt")
-        with pytest.raises(ExecutionError, match="requires POSIX"):
+        patch.setattr(execution.sys, "platform", platform)
+        with pytest.raises(ExecutionError, match="requires Linux"):
             preview_run(tmp_path, "missing", "synthetic-owner", RunOptions())
+    assert not list(tmp_path.iterdir())
+
+
+def test_unavailable_linux_containment_refuses_before_claim(execution_project, monkeypatch):
+    import anvil.execution_runner as runner
+
+    backend, repo, state, _ = execution_project
+    before = (state / "events.jsonl").read_bytes()
+    monkeypatch.setattr(runner, "_CAPTURE_SUPERVISOR", "raise SystemExit(126)")
+    with pytest.raises(ExecutionError, match="Owned command failed"):
+        preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == before
+    assert not (state / "execution" / "slots").exists()
+
+
+def test_denied_group_observation_refuses_before_state(tmp_path, monkeypatch):
+    import anvil.execution_runner as runner
+
+    def denied(*args):
+        raise PermissionError("synthetic denied process-group observation")
+
+    monkeypatch.setattr(runner.os, "killpg", denied)
+    with pytest.raises(ExecutionError, match="observe owned process groups"):
+        preview_run(tmp_path, "missing", "synthetic-owner", RunOptions())
     assert not list(tmp_path.iterdir())
 
 

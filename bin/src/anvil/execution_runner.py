@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import dataclasses
 import json
 import os
+import re
 import selectors
 import signal
 import stat
@@ -57,6 +59,137 @@ def process_group_absent(pid: int) -> bool:
     return False
 
 
+CAPTURE_CLEANUP_SECONDS = 2.0
+CAPTURE_STATUS_MAXIMUM = 128
+# Product-owned counterpart of the native benchmark subreaper semantics. It
+# uses only stdlib and its own adopted children; installed code imports no tests
+# or benchmarks. The status pipe is never inherited by the actual command.
+_CAPTURE_SUPERVISOR = r"""
+import ctypes
+import os
+import signal
+import subprocess
+import sys
+import time
+
+status_fd, expected_parent = int(sys.argv[1]), int(sys.argv[2])
+os.set_inheritable(status_fd, False)
+stopping = False
+cleanup_requested = False
+def stop(signum, frame):
+    global stopping
+    stopping = True
+def request_cleanup(signum, frame):
+    global cleanup_requested
+    cleanup_requested = True
+def notify(raw):
+    try:
+        os.write(status_fd, raw)
+    except OSError:
+        pass
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGUSR1, request_cleanup)
+signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0 or libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+    raise SystemExit(126)
+if os.getppid() != expected_parent:
+    stopping = True
+children_path = f'/proc/self/task/{os.getpid()}/children'
+def owned_children():
+    with open(children_path, encoding='ascii') as stream:
+        return [int(value) for value in stream.read().split()]
+
+child = None
+exit_notified = False
+complete = False
+try:
+    owned_children()  # Refuse unsupported custody before starting the command.
+    if not stopping:
+        child = subprocess.Popen(sys.argv[3:])
+        notify(f'started:{child.pid}\n'.encode('ascii'))
+        while child.returncode is None and not stopping:
+            try:
+                child.wait(timeout=.02)
+            except subprocess.TimeoutExpired:
+                pass
+        if child.returncode is not None:
+            notify(f'exited:{child.returncode}\n'.encode('ascii'))
+            exit_notified = True
+            for fd in (1, 2):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            # Inherited command pipes must reach the caller's deadline instead
+            # of being silently closed by early descendant cleanup.
+            while not stopping and not cleanup_requested:
+                time.sleep(.01)
+finally:
+    limit = time.monotonic() + 1.5
+    while time.monotonic() < limit:
+        for pid in owned_children():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        no_children = False
+        while True:
+            try:
+                waited, status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                no_children = True
+                break
+            if waited == 0:
+                break
+            if child is not None and waited == child.pid:
+                child.returncode = os.waitstatus_to_exitcode(status)
+        # Killing/waiting an immediate child can adopt further detached
+        # descendants. Require both ECHILD and a fresh empty kernel child list.
+        if no_children and not owned_children():
+            complete = True
+            break
+        time.sleep(.01)
+    if child is not None and child.returncode is not None and not exit_notified:
+        notify(f'exited:{child.returncode}\n'.encode('ascii'))
+    if complete:
+        notify(b'stopped\n')
+    os.close(status_fd)
+if not complete:
+    raise SystemExit(126)
+"""
+
+
+def require_linux_capture() -> None:
+    if sys.platform != "linux" or not Path("/proc/self/task").is_dir():
+        raise ExecutionError(
+            "unsupported_platform", "Owned Run requires Linux subreaper descendant custody"
+        )
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise ExecutionError(
+            "unsupported_wait_status", "Owned capture requires observable child wait status"
+        )
+    try:
+        os.killpg(os.getpgrp(), 0)
+    except OSError as error:
+        raise ExecutionError(
+            "unsupported_custody", "Cannot observe owned process groups for Linux capture"
+        ) from error
+
+
+def capture_status(raw: bytes) -> tuple[int | None, int | None, bool]:
+    match = re.fullmatch(
+        rb"(?:started:([1-9][0-9]{0,19})\n)?(?:exited:(-?[0-9]{1,10})\n)?(stopped\n)?",
+        raw,
+    )
+    if len(raw) > CAPTURE_STATUS_MAXIMUM or match is None:
+        raise ExecutionError("containment_unknown", "Invalid owned capture status")
+    pid, exit_code, stopped = match.groups()
+    if exit_code is not None and (pid is None or not -64 <= int(exit_code) <= 255):
+        raise ExecutionError("containment_unknown", "Invalid owned command completion")
+    return int(pid) if pid else None, int(exit_code) if exit_code else None, stopped is not None
+
+
 def capture(
     argv: list[str],
     cwd: Path,
@@ -69,74 +202,130 @@ def capture(
     separate_stdout: bool = False,
     require_success: bool = True,
 ) -> dict[str, Any]:
-    """Bounded bytes and owned group custody; no shell or PID fallback."""
-    if os.name != "posix":
-        raise ExecutionError(
-            "unsupported_platform", "Owned group execution currently requires POSIX"
-        )
+    """Bounded command bytes and Linux descendant custody, including setsid."""
+    require_linux_capture()
     started = timestamp()
-    child = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE if separate_stdout else subprocess.STDOUT,
-        env=environment,
-        start_new_session=True,
-    )
+    attempt = {
+        "argv": argv, "cwd": str(cwd), "started_at": started,
+        "supervisor_sha256": digest(_CAPTURE_SUPERVISOR.encode()),
+        "capture_protocol": "linux-descendant-capture.v1",
+    }
+    write_receipt(directory / (name + ".attempt.json"), attempt)
     output = bytearray()
     stdout = bytearray()
+    status = bytearray()
     failure = None
+    supervisor = None
+    cleanup_requested = False
+    forced_stop = False
+    status_reader, status_writer = os.pipe()
+    os.set_blocking(status_reader, False)
     selector = selectors.DefaultSelector()
     try:
+        supervisor = subprocess.Popen(
+            [sys.executable, "-I", "-c", _CAPTURE_SUPERVISOR,
+             str(status_writer), str(os.getpid()), *argv],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if separate_stdout else subprocess.STDOUT,
+            env=environment,
+            pass_fds=(status_writer,),
+            start_new_session=True,
+        )
+        os.close(status_writer)
+        status_writer = None
         write_receipt(
             directory / (name + ".started.json"),
-            {"argv": argv, "cwd": str(cwd), "pid": child.pid, "started_at": started},
+            {**attempt, "pid": None, "supervisor_pid": supervisor.pid},
         )
-        selector.register(child.stdout, selectors.EVENT_READ)
+        selector.register(supervisor.stdout, selectors.EVENT_READ, "stdout")
         if separate_stdout:
-            selector.register(child.stderr, selectors.EVENT_READ)
+            selector.register(supervisor.stderr, selectors.EVENT_READ, "stderr")
+        selector.register(status_reader, selectors.EVENT_READ, "status")
         while selector.get_map():
             if time.monotonic() >= deadline:
                 failure = "command_timeout"
                 break
             for key, _ in selector.select(min(0.1, max(0, deadline - time.monotonic()))):
-                chunk = os.read(key.fileobj.fileno(), min(65536, maximum + 1 - len(output)))
+                target = status if key.data == "status" else output
+                limit = CAPTURE_STATUS_MAXIMUM if key.data == "status" else maximum
+                chunk = os.read(key.fd, min(65536, limit + 1 - len(target)))
                 if not chunk:
                     selector.unregister(key.fileobj)
                     continue
-                output.extend(chunk)
-                if separate_stdout and key.fileobj is child.stdout:
+                target.extend(chunk)
+                if separate_stdout and key.data == "stdout":
                     stdout.extend(chunk)
-                if len(output) > maximum:
-                    failure = "output_overflow"
+                if len(target) > limit:
+                    failure = "containment_unknown" if key.data == "status" else "output_overflow"
                     break
             if failure:
                 break
+            output_open = any(key.data != "status" for key in selector.get_map().values())
+            if not output_open and b"\nexited:" in status and status.endswith(b"\n"):
+                capture_status(status)
+                if not cleanup_requested:
+                    with contextlib.suppress(ProcessLookupError):
+                        supervisor.send_signal(signal.SIGUSR1)
+                    cleanup_requested = True
+                    deadline = time.monotonic() + CAPTURE_CLEANUP_SECONDS
         if failure is None:
-            child.wait(timeout=max(0.01, deadline - time.monotonic()))
+            supervisor.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        failure = "command_timeout"
     except BaseException:
         failure = "capture_interrupted"
         raise
     finally:
         selector.close()
-        if not process_group_absent(child.pid):
-            if child.poll() is None or failure:
-                os.killpg(child.pid, signal.SIGTERM)
+        if status_writer is not None:
+            os.close(status_writer)
+        if supervisor is not None:
+            if supervisor.poll() is None:
+                with contextlib.suppress(OSError):
+                    supervisor.terminate()
                 try:
-                    child.wait(timeout=2)
+                    supervisor.wait(timeout=CAPTURE_CLEANUP_SECONDS)
                 except subprocess.TimeoutExpired:
-                    os.killpg(child.pid, signal.SIGKILL)
-                    child.wait(timeout=5)
-            if not process_group_absent(child.pid):
-                # A command which leaves descendants has not completed custody.
-                os.killpg(child.pid, signal.SIGKILL)
-                failure = failure or "descendants_remain"
-        child.wait(timeout=5)
-        child.stdout.close()
-        if child.stderr is not None:
-            child.stderr.close()
-        stopped = process_group_absent(child.pid)
+                    forced_stop = True
+                    with contextlib.suppress(OSError):
+                        os.killpg(supervisor.pid, signal.SIGKILL)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        supervisor.wait(timeout=5)
+            while len(status) <= CAPTURE_STATUS_MAXIMUM:
+                try:
+                    chunk = os.read(status_reader, CAPTURE_STATUS_MAXIMUM + 1 - len(status))
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                status.extend(chunk)
+            supervisor.stdout.close()
+            if supervisor.stderr is not None:
+                supervisor.stderr.close()
+        os.close(status_reader)
+        command_pid = exit_code = None
+        contained = False
+        try:
+            command_pid, exit_code, contained = capture_status(status)
+        except ExecutionError:
+            failure = failure or "containment_unknown"
+        reaped = supervisor is not None and supervisor.returncode is not None
+        try:
+            stopped = supervisor is not None and process_group_absent(supervisor.pid)
+        except OSError:
+            stopped = False
+        contained = bool(
+            contained and reaped and stopped and supervisor.returncode == 0
+            and command_pid is not None and exit_code is not None and not forced_stop
+        )
+        if not contained:
+            failure = failure or "containment_unknown"
+        elif command_pid is None or exit_code is None:
+            failure = failure or "command_start_failed"
+        elif not cleanup_requested:
+            failure = failure or "capture_interrupted"
         with (directory / (name + ".log")).open("xb") as stream:
             os.chmod(directory / (name + ".log"), 0o600)
             stream.write(output)
@@ -149,23 +338,64 @@ def capture(
                 stream.flush()
                 os.fsync(stream.fileno())
         result = {
-            "argv": argv,
-            "cwd": str(cwd),
-            "pid": child.pid,
-            "started_at": started,
+            **attempt,
+            "pid": command_pid,
+            "command_reaped": exit_code is not None,
+            "supervisor_pid": supervisor.pid if supervisor is not None else None,
+            "supervisor_exit_code": supervisor.returncode if supervisor is not None else None,
+            "supervisor_reaped": reaped,
+            "containment_complete": contained,
             "ended_at": timestamp(),
-            "exit_code": child.returncode,
+            "exit_code": exit_code,
             "output_sha256": digest(output),
             "output_bytes": len(output),
             "failure": failure,
             "group_absent": stopped,
         }
         write_receipt(directory / (name + ".result.json"), result)
-    if failure or not stopped or (require_success and child.returncode):
+    if failure or not contained or (require_success and exit_code):
         raise ExecutionError(
             failure or "command_failed", "Owned command failed; inspect retained output and custody"
         )
     return result
+
+
+def captures_stopped(directory: Path, expected: list[str]) -> bool:
+    """Missing current custody cannot be replaced by earlier successful captures."""
+    if not expected or len(expected) != len(set(expected)) or {
+        path.name.removesuffix(".started.json") for path in directory.glob("*.started.json")
+    } != set(expected):
+        return False
+    fields = {"argv", "cwd", "started_at", "supervisor_sha256", "capture_protocol"}
+    try:
+        for name in expected:
+            attempt = read_receipt(directory / (name + ".attempt.json"))
+            started = read_receipt(directory / (name + ".started.json"))
+            result = read_receipt(directory / (name + ".result.json"))
+            if any(type(value) is not dict or not fields <= value.keys()
+                   for value in (attempt, started, result)):
+                return False
+            if any(attempt[key] != started[key] or attempt[key] != result[key] for key in fields):
+                return False
+            if (attempt["capture_protocol"] != "linux-descendant-capture.v1"
+                    or attempt["supervisor_sha256"] != digest(_CAPTURE_SUPERVISOR.encode())
+                    or type(result.get("pid")) is not int or result["pid"] <= 1
+                    or type(result.get("supervisor_pid")) is not int
+                    or result["supervisor_pid"] <= 1
+                    or result["supervisor_pid"] != started.get("supervisor_pid")
+                    or result["supervisor_pid"] == result["pid"]
+                    or type(result.get("exit_code")) is not int
+                    or not -64 <= result["exit_code"] <= 255
+                    or type(result.get("supervisor_exit_code")) is not int
+                    or result["supervisor_exit_code"] != 0
+                    or any(result.get(key) is not True for key in (
+                        "command_reaped", "supervisor_reaped", "group_absent",
+                        "containment_complete"))
+                    or not process_group_absent(result["supervisor_pid"])):
+                return False
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
 
 
 def checked_path(root: Path, name: str) -> Path:
@@ -602,6 +832,7 @@ def execute_run(directory: Path) -> dict[str, Any]:
     }
     remote_verified = False
     integration_complete = False
+    attempted_captures: list[str] = []
     try:
         registration = ExecutionAdapter(**request["adapter"])
         adapter = adapter_module(registration)
@@ -625,6 +856,7 @@ def execute_run(directory: Path) -> dict[str, Any]:
         deadline = time.monotonic() + request["wall_seconds"] + 120
         if load_execution_adapter() != registration:
             raise ExecutionError("adapter_changed", "Registration changed before dispatch")
+        attempted_captures.append("adapter")
         capture(
             [
                 registration.interpreter,
@@ -699,6 +931,7 @@ def execute_run(directory: Path) -> dict[str, Any]:
                 ANVIL_CLAIM_ID=claim.id,
                 ANVIL_PRD=claim.attestation_context.prd_id,
             )
+            attempted_captures.append(f"check-{index}")
             result = capture(
                 ["/bin/sh", "-c", command],
                 cwd,
@@ -758,6 +991,8 @@ def execute_run(directory: Path) -> dict[str, Any]:
             changes,
         )
         check_integrated_source(cwd, request["source_sha"], changes, modes)
+        if not captures_stopped(directory, attempted_captures):
+            raise ExecutionError("containment_unknown", "Capture custody changed before submission")
         verify_claim_command_proof_batch(
             proofs,
             claim=claim,
@@ -789,10 +1024,7 @@ def execute_run(directory: Path) -> dict[str, Any]:
         )
         # Only known stopped checks may admit a fresh reviewed request. Partial
         # integration, uncertain submit and unknown remote custody remain held.
-        capture_results = list(directory.glob("*.result.json"))
-        all_stopped = bool(capture_results) and all(
-            read_receipt(path).get("group_absent") is True for path in capture_results
-        )
+        all_stopped = captures_stopped(directory, attempted_captures)
         if (
             remote_verified
             and integration_complete

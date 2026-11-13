@@ -65,7 +65,7 @@ are not currently supported. `anvil continue RUN_ID --preview` explicitly
 refuses until qualified saved-session support is available; it never silently
 starts a fresh conversation.
 
-Initial Run requires POSIX process-group custody and refuses other platforms
+Initial Run requires Linux subreaper custody and `/proc`; other platforms refuse
 before creating a claim. Commands use `/bin/sh -c` in the isolated checkout.
 Keep the frozen command set small enough for the remaining native lease and
 run budget. Existing verification profiles are refused, not silently ignored.
@@ -81,6 +81,12 @@ State lock. Each task has an exclusive State-local operational slot. Duplicate
 confirmation cannot launch again. Receipts distinguish the Anvil run, native
 claim, adapter run and owned processes; adapter model statements are never
 native verification proofs. Logs are bounded; overflow is a failed check.
+Each capture uses an owned supervisor to stop and reap local descendants,
+including processes that start another session. A parent-death signal also
+requests cleanup if the capturing process disappears. Command PID and raw exit
+status remain separate from the supervisor's identity and cleanup status. Missing
+or failed containment evidence blocks proofs and safe slot retirement; process
+group absence alone does not establish descendant custody.
 
 Failure preserves edits, output and custody records. An interrupted admission,
 partial integration or uncertain local/remote stop is `reconciliation_required`.
