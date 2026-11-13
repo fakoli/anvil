@@ -73,14 +73,37 @@ def sync_directory(path: Path) -> None:
             os.close(descriptor)
 
 
+def pending_receipt_path(path: Path) -> Path:
+    return path.with_name("." + path.name + ".pending")
+
+
+def receipt_attempt_exists(path: Path) -> bool:
+    return os.path.lexists(path) or os.path.lexists(pending_receipt_path(path))
+
+
 def write_receipt(path: Path, value: Any) -> None:
-    """Exclusive immutable receipt; a failed write remains evidence, not retry permission."""
+    """Publish complete bytes without replacement; failed staging forbids retry."""
     private_directory(path.parent)
-    with path.open("xb") as stream:
-        os.chmod(path, 0o600)
+    if os.path.lexists(path):
+        raise FileExistsError(str(path))
+    pending = pending_receipt_path(path)
+    descriptor = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        # Keep this exclusive attempt after any failure, including serialization.
+        sync_directory(path.parent)
         stream.write(json_bytes(value))
         stream.flush()
         os.fsync(stream.fileno())
+    try:
+        os.link(pending, path)
+    except FileExistsError:
+        # Another completed publisher can win between the initial check and
+        # staging. This known duplicate must not poison a reusable slot lock.
+        pending.unlink()
+        sync_directory(path.parent)
+        raise
+    sync_directory(path.parent)
+    pending.unlink()
     sync_directory(path.parent)
 
 
@@ -1245,7 +1268,7 @@ def require_fresh_preview(preview: dict[str, Any]) -> None:
 
 def require_unconsumed_preview(root: Path, preview_id: str) -> None:
     consumed = root / "consumed" / (identifier(preview_id) + ".json")
-    if consumed.exists():
+    if receipt_attempt_exists(consumed):
         existing = read_receipt(consumed)
         raise ExecutionError(
             "preview_consumed", "Preview already dispatched as " + existing["run_id"]
@@ -1522,7 +1545,7 @@ def reserve_slot(
     try:
         if consume_preview:
             require_unconsumed_preview(root, value["preview_id"])
-        if slot.exists():
+        if receipt_attempt_exists(slot):
             existing = read_receipt(slot)
             previous = root / "runs" / identifier(existing["run_id"])
             finished = (
@@ -1620,7 +1643,7 @@ def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[st
               "operation": operation, "task_id": preview["task_id"],
               "prior_run_id": prior["prior_run_id"] if prior else None}
     consumed_path = root / "consumed" / (preview_id + ".json")
-    if consumed_path.exists():
+    if receipt_attempt_exists(consumed_path):
         result["state"] = "unknown"
         try:
             consumed = read_receipt(consumed_path)
@@ -1657,7 +1680,7 @@ def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[st
             pass
     else:
         slot = root / "slots" / (digest(preview["task_id"].encode()) + ".json")
-        if slot.exists():
+        if receipt_attempt_exists(slot):
             try:
                 reserved = strict_object(read_receipt(slot), {"run_id", "task_id", "preview_id"})
                 identifier(reserved["run_id"])

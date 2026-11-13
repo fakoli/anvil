@@ -479,6 +479,7 @@ def confirm_execution_adapter_upgrade(preview_id: str) -> dict[str, object]:
         identifier,
         json_bytes,
         now,
+        receipt_attempt_exists,
         validate_adapter_contract,
         write_receipt,
     )
@@ -508,7 +509,7 @@ def confirm_execution_adapter_upgrade(preview_id: str) -> dict[str, object]:
             or (expires - created).total_seconds() != 300
             or not created <= now() < expires):
         raise ValueError("Registration upgrade preview expired or clock moved backwards")
-    if execution_file_bytes(directory / "result.json", 1024 * 1024, missing_ok=True) is not None:
+    if receipt_attempt_exists(directory / "result.json"):
         raise ValueError("Registration upgrade preview was already confirmed")
     original = execution_file_bytes(path, 1024 * 1024)
     previous = execution_adapter_from_config(original)
