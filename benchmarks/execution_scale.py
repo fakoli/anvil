@@ -13,11 +13,14 @@ import json
 import math
 import multiprocessing
 import os
+import re
+import selectors
 import shlex
 import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from benchmarks.harness.engine import (  # noqa: E402
+    _LINUX_SUBREAPER,
+    PROCESS_CLEANUP_ALLOWANCE_SECONDS,
+)
 from tests.conftest import append_exact_approved_prd  # noqa: E402
 
 from anvil.bundles.execution import bundle_execution_scope_digest  # noqa: E402
@@ -39,7 +46,7 @@ from anvil.clock import SystemClock  # noqa: E402
 from anvil.review.gates import evidence_complete  # noqa: E402
 from anvil.roots.registry import RootSetRegistry  # noqa: E402
 from anvil.state.hashing import canonical_json_bytes  # noqa: E402
-from anvil.state.models import EventDraft  # noqa: E402
+from anvil.state.models import Claim, EventDraft, Task  # noqa: E402
 from anvil.state.schema import get_schema_version  # noqa: E402
 from anvil.state.snapshot import serialize_state  # noqa: E402
 from anvil.state.sqlite import SqliteBackend  # noqa: E402
@@ -52,6 +59,7 @@ from anvil.web import (  # noqa: E402
 ACTOR = "scale-coordinator"
 PROJECT_ID = "execution-scale-fixture"
 MAX_STORAGE_BYTES = 256 * 1024 * 1024
+MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 NATIVE_STAGES = ("claim_append", "progress_append", "proof_validation", "evidence_append")
 
 
@@ -240,39 +248,255 @@ def _seed(project, backend, task_count, cohort_size, command_for_task=_native_co
     return task_ids, bundle_ids
 
 
+# Observe the existing helper's sole Popen without another process or rewriting
+# its cleanup code. The command cannot inherit this close-on-exec status pipe.
+# A notification failure must NOT escape Popen/wait and bypass helper cleanup.
+_COMMAND_STATUS_PRELUDE = r"""
+import os
+import subprocess
+
+class ObservedCommand(subprocess.Popen):
+    def notify(self, message):
+        try:
+            os.write(int(os.environ["ANVIL_SUBREAPER_STATUS_FD"]), message)
+        except OSError:
+            pass
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.exit_notified = False
+        self.notify(f"started:{self.pid}\n".encode("ascii"))
+
+    def wait(self, *args, **kwargs):
+        returncode = super().wait(*args, **kwargs)
+        if not self.exit_notified:
+            self.notify(f"exited:{returncode}\n".encode("ascii"))
+            self.exit_notified = True
+        return returncode
+
+subprocess.Popen = ObservedCommand
+"""
+MAX_COMMAND_STATUS_BYTES = 128
+
+
+def _command_status(status):
+    match = re.fullmatch(
+        rb"(?:started:([1-9][0-9]{0,19})\n)?(?:exited:(-?[0-9]{1,10})\n)?(1)?", status
+    )
+    if len(status) > MAX_COMMAND_STATUS_BYTES or match is None:
+        raise ValueError("Invalid fixture command containment status")
+    command_pid, exit_code, completed = match.groups()
+    if (exit_code is not None and command_pid is None
+            or completed is not None and exit_code is None):
+        raise ValueError("Incomplete fixture command containment status")
+    if exit_code is not None and not -64 <= int(exit_code) <= 255:
+        raise ValueError("Invalid fixture command exit status")
+    return (int(command_pid) if command_pid else None,
+            int(exit_code) if exit_code else None, completed is not None)
+
+
+def _require_linux_containment():
+    if sys.platform != "linux" or not Path("/proc/self/stat").is_file():
+        raise ValueError("Fixture command containment requires Linux subreaper and /proc support")
+
+
 def _command(project, task_id, offered_at, command_timeout, command_argv):
+    _require_linux_containment()
     started = datetime.now(UTC)
     began = time.perf_counter()
     environment = {"PATH": os.environ.get("PATH", os.defpath), "PYTHONIOENCODING": "utf-8"}
-    # Native executor CLIs locate their existing configuration through these
-    # paths. Preserve their values without copying credential/environment files.
+    # Preserve native executor configuration paths, never credential files.
     environment.update(
         {key: os.environ[key] for key in ("HOME", "XDG_CONFIG_HOME") if key in os.environ}
     )
-    process = subprocess.run(
-        command_argv,
-        cwd=project,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=command_timeout,
-        env=environment,
-    )
+    output = bytearray()
+    status = bytearray()
+    error = None
+    forced_stop = False
+    status_reader, status_writer = os.pipe()
+    os.set_blocking(status_reader, False)
+    environment["ANVIL_SUBREAPER_STATUS_FD"] = str(status_writer)
+    process = None
+    cleanup_requested = False
+    try:
+        # One extra supervisor per command, in the outer owned group/session.
+        # Its subreaper also owns descendants that detach into another session.
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", _COMMAND_STATUS_PRELUDE + _LINUX_SUBREAPER,
+             *command_argv], cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=environment, pass_fds=(status_writer,),
+        )
+        os.close(status_writer)
+        status_writer = None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "output")
+            selector.register(status_reader, selectors.EVENT_READ, "status")
+            output_closed = False
+            deadline = began + command_timeout
+            while selector.get_map():
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise TimeoutError("Fixture command exceeded timeout or cleanup allowance")
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    target = output if key.data == "output" else status
+                    limit = (MAX_COMMAND_OUTPUT_BYTES if key.data == "output"
+                             else MAX_COMMAND_STATUS_BYTES)
+                    chunk = os.read(key.fd, min(65536, limit + 1 - len(target)))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        if key.data == "output":
+                            output_closed = True
+                        elif not _command_status(status)[2]:
+                            raise ValueError("Missing fixture command completion handshake")
+                        continue
+                    target.extend(chunk)
+                    if len(target) > limit:
+                        del target[limit:]
+                        raise ValueError(
+                            f"Fixture command exceeded {key.data} limit; retained prefix")
+                if output_closed and status.endswith(b"\n1") and not cleanup_requested:
+                    _command_status(status)  # Strictly validate before requesting cleanup.
+                    process.send_signal(signal.SIGUSR1)
+                    cleanup_requested = True
+                    deadline = time.perf_counter() + PROCESS_CLEANUP_ALLOWANCE_SECONDS
+            process.wait(timeout=max(.001, deadline - time.perf_counter()))
+    except Exception as caught:
+        error = repr(caught)
+    finally:
+        if status_writer is not None:
+            os.close(status_writer)
+        if process is not None:
+            if process.poll() is None:
+                # The helper handles TERM by killing/reaping all owned descendants.
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+                try:
+                    process.wait(timeout=PROCESS_CLEANUP_ALLOWANCE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    forced_stop = True
+                    process.kill()
+                    process.wait(timeout=5)
+            # Capture any final ownership notifications after the supervisor join.
+            while len(status) <= MAX_COMMAND_STATUS_BYTES:
+                try:
+                    chunk = os.read(status_reader, MAX_COMMAND_STATUS_BYTES + 1 - len(status))
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                status.extend(chunk)
+            process.stdout.close()
+        os.close(status_reader)
+    command_pid = exit_code = None
+    completed = False
+    try:
+        command_pid, exit_code, completed = _command_status(status)
+    except ValueError as caught:
+        error = error or repr(caught)
+    supervisor_exit = process.returncode if process is not None else None
+    normalized_exit = exit_code if exit_code is None or exit_code >= 0 else 128 - exit_code
+    containment_complete = (not forced_stop and command_pid is not None
+                            and supervisor_exit != 126
+                            and (supervisor_exit == 143 or
+                                 completed and supervisor_exit == normalized_exit))
+    if not (completed and cleanup_requested and containment_complete
+            and supervisor_exit == normalized_exit):
+        error = error or "Fixture command containment did not complete"
+    ended_monotonic = time.perf_counter()
     ended = datetime.now(UTC)
     return {
         "task_id": task_id,
         "started_at": started.isoformat().replace("+00:00", "Z"),
         "ended_at": ended.isoformat().replace("+00:00", "Z"),
-        "exit_code": process.returncode,
-        "output": process.stdout,
+        "exit_code": exit_code,
+        "output": bytes(output),
         "command_argv": command_argv,
         "queue_seconds": began - offered_at,
-        "command_seconds": time.perf_counter() - began,
+        "command_seconds": ended_monotonic - began,
+        "offered_monotonic": offered_at,
         "started_monotonic": began,
-        "ended_monotonic": time.perf_counter(),
+        "ended_monotonic": ended_monotonic,
+        "capture_protocol": "linux-subreaper-status.v1",
+        "command_pid": command_pid,
+        "command_reaped": completed or containment_complete,
+        "command_supervisor_pid": process.pid if process is not None else None,
+        "command_supervisor_exit_code": supervisor_exit,
+        "command_supervisor_reaped": supervisor_exit is not None,
+        "command_containment_complete": containment_complete,
+        "error": error,
     }
 
 
-def _proof(project, task, claim, execution):
+class _ArtifactBudget:
+    """Serialize capture reservations; only the coordinator accounts for State."""
+
+    def __init__(self, work):
+        self.work = work
+        self.lock = threading.Lock()
+        self.capture_bytes = 0
+        self.exhausted = False
+        self.other_bytes = 0
+        self.refresh()
+
+    def refresh(self):
+        with self.lock:
+            self.other_bytes = sum(
+                path.stat().st_size for path in self.work.rglob("*")
+                if path.is_file() and path.parent != self.work / "captures"
+            )
+            total = self.other_bytes + self.capture_bytes
+            if total > MAX_STORAGE_BYTES:
+                self.exhausted = True
+                raise ValueError("Retained fixture exceeded 256 MiB storage budget")
+            return total
+
+    def write(self, path, raw):
+        with self.lock:
+            if (self.exhausted
+                    or self.other_bytes + self.capture_bytes + len(raw) > MAX_STORAGE_BYTES):
+                self.exhausted = True
+                raise ValueError("Retained fixture exceeded 256 MiB storage budget")
+            # Charge before opening; a failed/partial write never returns capacity.
+            self.capture_bytes += len(raw)
+            with path.open("xb") as stream:
+                stream.write(raw)
+
+
+def _prepare_proof(project, task_snapshot, claim_snapshot, execution, budget):
+    execution["proof_started_monotonic"] = time.perf_counter()
+    try:
+        task = Task.model_validate_json(task_snapshot)
+        claim = Claim.model_validate_json(claim_snapshot)
+        raw, proof = _proof(project, task, claim, execution, artifact_writer=budget.write)
+        execution["proof_sha256"] = hashlib.sha256(raw).hexdigest()
+        execution["proof"] = proof
+    except Exception as error:
+        execution["error"] = repr(error)
+    finally:
+        proof_path = project.parent / "captures" / f"{execution['task_id']}.proof.json"
+        try:
+            if proof_path.exists():
+                execution["proof_sha256"] = hashlib.sha256(proof_path.read_bytes()).hexdigest()
+        except OSError as error:
+            execution["error"] = repr(error)
+        execution["proof_finished_monotonic"] = time.perf_counter()
+    if execution["error"] is None:
+        execution["proof_ready_monotonic"] = execution["proof_finished_monotonic"]
+
+
+def _execute_task(project, task_id, offered_at, command_timeout, command_argv,
+                  task_snapshot, claim_snapshot, budget, proof_preparation):
+    execution = _command(project, task_id, offered_at, command_timeout, command_argv)
+    try:
+        budget.write(project.parent / "captures" / f"{task_id}.output", execution["output"])
+        if proof_preparation == "worker" and execution["error"] is None:
+            _prepare_proof(project, task_snapshot, claim_snapshot, execution, budget)
+    except Exception as error:
+        execution["error"] = repr(error)
+    return execution
+
+
+def _proof(project, task, claim, execution, *, artifact_writer=None):
     context = claim.attestation_context
     if context is None:
         raise ValueError("Native bundle member lacks immutable command-proof context")
@@ -280,7 +504,7 @@ def _proof(project, task, claim, execution):
     if shlex.join(execution["command_argv"]) != command:
         raise ValueError("Executed argv differs from the frozen task command")
     output = execution["output"]
-    if len(output) > 128 * 1024:
+    if len(output) > MAX_COMMAND_OUTPUT_BYTES:
         raise ValueError("Fixture command exceeded output limit")
     core = {
         "schema_version": 1,
@@ -304,7 +528,11 @@ def _proof(project, task, claim, execution):
         "output_sha256": hashlib.sha256(output).hexdigest(),
     }
     raw = canonical_json_bytes({"envelope_id": task.id, "payload": core, "issuer": None})
-    (project.parent / "captures" / f"{task.id}.proof.json").write_bytes(raw)
+    proof_path = project.parent / "captures" / f"{task.id}.proof.json"
+    if artifact_writer is None:
+        proof_path.write_bytes(raw)
+    else:
+        artifact_writer(proof_path, raw)
     proof = verify_claim_command_proof_batch(
         (load_claim_command_proof(raw),),
         claim=claim,
@@ -323,6 +551,7 @@ def _source_identity():
     files = [
         *sorted((checkout / "bin/src/anvil").rglob("*.py")),
         checkout / "tests/conftest.py",
+        checkout / "benchmarks/harness/engine.py",
         Path(__file__).resolve(),
     ]
     return {
@@ -388,6 +617,7 @@ def _check_options(
     command_timeout=10,
     durability="relaxed",
     events_storage="local",
+    proof_preparation="coordinator",
 ):
     if not (
         1 <= tasks <= 2000
@@ -396,8 +626,13 @@ def _check_options(
         and 1 <= command_timeout <= 30
         and durability in {"relaxed", "strict"}
         and events_storage in {"local", "git"}
+        and proof_preparation in {"coordinator", "worker"}
     ):
-        raise ValueError("tasks=1..2000, workers=1..min(tasks,128), cohort=1..12, timeout=1..30")
+        raise ValueError(
+            "tasks=1..2000, workers=1..min(tasks,128), cohort=1..12, timeout=1..30; "
+            "durability=relaxed|strict, events_storage=local|git, "
+            "proof_preparation=coordinator|worker"
+        )
 
 
 def run(
@@ -410,11 +645,13 @@ def run(
     durability="relaxed",
     events_storage="local",
     prepare_executor=None,
+    proof_preparation="coordinator",
 ):
     """Run only below a fresh directory; the CLI additionally enforces a wall deadline."""
     _check_options(tasks=tasks, workers=workers, cohort_size=cohort_size,
                    command_timeout=command_timeout, durability=durability,
-                   events_storage=events_storage)
+                   events_storage=events_storage, proof_preparation=proof_preparation)
+    _require_linux_containment()
     work.mkdir(parents=True, exist_ok=False)
     source_identity = _source_identity()
     project = work / "project"
@@ -443,6 +680,7 @@ def run(
     failures = []
     completed = []
     intervals = []
+    raw_timings = []
     began = time.perf_counter()
     backend = _open(project, durability, events_storage)
 
@@ -506,63 +744,105 @@ def run(
                     detail="Awaiting a bounded executor slot",
                 )
         storage_guard()
+        budget = _ArtifactBudget(work)
+        # Serialized snapshots are immutable and independent of live backend objects.
+        task_snapshots = {}
+        for task_id in task_ids:
+            task = backend.get_task(task_id)
+            # Task's public serializer deliberately excludes its internal PRD selector.
+            task_snapshots[task_id] = json.dumps({**task.model_dump(mode="json"),
+                                                  "prd_id": task.prd_id})
+        claim_snapshots = {task_id: claim.model_dump_json() for task_id, claim in claims.items()}
         offered_at = time.perf_counter()
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(
-                    _command,
-                    project,
-                    task_id,
-                    offered_at,
-                    command_timeout,
-                    command_for_task(task_id),
-                ): task_id
-                for task_id in task_ids
+                    _execute_task, project, task_id, offered_at, command_timeout,
+                    command_for_task(task_id), task_snapshots[task_id], claim_snapshots[task_id],
+                    budget, proof_preparation,
+                ): task_id for task_id in task_ids
             }
             for future in as_completed(futures):
                 task_id = futures[future]
+                row = {"task_id": task_id, "claim_id": claims[task_id].id,
+                       "claim_generation": claims[task_id].generation,
+                       "task_revision": claims[task_id].attestation_context.task_revision,
+                       "proof_preparation": proof_preparation,
+                       "offered_monotonic": offered_at, "outcome": "failed"}
+                execution = None
                 try:
                     execution = future.result()
+                    execution["handled_monotonic"] = time.perf_counter()
                     intervals.extend(
                         [(execution["started_monotonic"], 1), (execution["ended_monotonic"], -1)]
                     )
                     for stage in ("queue", "command"):
                         measurements[stage].append(execution[f"{stage}_seconds"])
                     measurements["proof_queue"].append(
-                        time.perf_counter() - execution["ended_monotonic"]
+                        execution["handled_monotonic"] - execution["ended_monotonic"]
                     )
-                    (captures / f"{task_id}.output").write_bytes(execution["output"])
-                    task = backend.get_task(task_id)
-                    _, proof = timed(
-                        "proof_validation", _proof, project, task, claims[task_id], execution
-                    )
+                    if proof_preparation == "coordinator" and execution["error"] is None:
+                        _prepare_proof(project, task_snapshots[task_id], claim_snapshots[task_id],
+                                       execution, budget)
+                    if execution["error"] is not None:
+                        raise ValueError(execution["error"])
+                    if budget.exhausted:
+                        raise ValueError("Retained fixture storage budget exhausted")
+                    task = Task.model_validate_json(task_snapshots[task_id])
+                    execution["writer_started_monotonic"] = time.perf_counter()
                     timed(
-                        "evidence_append",
-                        _append,
-                        backend,
-                        "evidence.submitted",
-                        "task",
-                        task_id,
-                        {
-                            "task_id": task_id,
-                            "claim_id": claims[task_id].id,
-                            "submitted_by": ACTOR,
-                            "evidence_id": f"evidence-{task_id}",
-                            "commands_run": task.verification.commands,
-                            "files_changed": [],
-                            "proofs": [proof.model_dump(mode="json")],
-                        },
+                        "evidence_append", _append, backend, "evidence.submitted", "task", task_id,
+                        {"task_id": task_id, "claim_id": claims[task_id].id,
+                         "submitted_by": ACTOR, "evidence_id": f"evidence-{task_id}",
+                         "commands_run": task.verification.commands, "files_changed": [],
+                         "proofs": [execution["proof"].model_dump(mode="json")]},
                     )
+                    execution["append_returned_monotonic"] = time.perf_counter()
                     completed.append(task_id)
-                    measurements["command_end_to_durable_evidence"].append(
-                        time.perf_counter() - execution["ended_monotonic"]
-                    )
+                    row["outcome"] = "submitted"
+                    for stage, earlier in (
+                        ("command_end_to_durable_evidence", "ended_monotonic"),
+                        ("offered_to_ledger", "offered_monotonic"),
+                    ):
+                        measurements[stage].append(execution["append_returned_monotonic"]
+                                                   - execution[earlier])
                 except Exception as error:
-                    if isinstance(error, subprocess.TimeoutExpired) and error.output:
-                        (captures / f"{task_id}.output").write_bytes(error.output)
+                    row["error"] = repr(error)
                     failures.append({"task_id": task_id, "error": repr(error)})
-                if (len(completed) + len(failures)) % 16 == 0:
-                    storage_guard()
+                finally:
+                    if execution is not None:
+                        for stage, start, end in (
+                            ("proof_validation", "proof_started_monotonic",
+                             "proof_finished_monotonic"),
+                            ("proof_preparation_wait", "ended_monotonic",
+                             "proof_started_monotonic"),
+                            ("proof_ready_to_writer", "proof_ready_monotonic",
+                             "writer_started_monotonic"),
+                        ):
+                            if start in execution and end in execution:
+                                measurements[stage].append(execution[end] - execution[start])
+                        row.update({key: value for key, value in execution.items()
+                                    if key.endswith("_monotonic") or key in (
+                                        "started_at", "ended_at", "exit_code", "proof_sha256",
+                                        "command_pid", "command_reaped", "capture_protocol",
+                                        "command_supervisor_pid", "command_supervisor_exit_code",
+                                        "command_supervisor_reaped",
+                                        "command_containment_complete")})
+                        # Futures may remain until pool exit; retain artifacts, not duplicate bytes.
+                        execution.pop("output", None)
+                        execution.pop("proof", None)
+                    raw_timings.append(row)
+                    try:
+                        budget.write(captures / f"{task_id}.timing.json",
+                                     json.dumps(row, sort_keys=True).encode())
+                    except Exception as error:
+                        failures.append({"task_id": task_id, "stage": "timing_retention",
+                                         "error": repr(error)})
+                if len(raw_timings) % 16 == 0:
+                    try:
+                        budget.refresh()
+                    except ValueError as error:
+                        failures.append({"stage": "storage", "error": repr(error)})
         execution_seconds = time.perf_counter() - offered_at
         for bundle_id in bundle_ids:
             readiness = timed("bundle_readiness", manager.readiness, bundle_id)
@@ -575,8 +855,11 @@ def run(
             assert item.claim_id == claims[item.task_id].id
             assert evidence_complete(backend.get_task(item.task_id), item) == (True, [])
         for task in backend.list_tasks():
-            assert task.status.value == ("needs_review" if task.id in completed else "claimed")
-        assert len(backend.list_active_claims()) == len(failures)
+            if task.id in completed:
+                assert task.status.value == "needs_review"
+            else:
+                assert task.status.value in {"claimed", "ready"}
+        assert len(backend.list_active_claims()) <= len(failures)
         log = project / ".anvil" / "events.jsonl"
         events = [json.loads(line) for line in log.read_text().splitlines()]
         counts = Counter(event["action"] for event in events)
@@ -605,7 +888,11 @@ def run(
         backend.close()
     # Closing the sole writer checkpoints its WAL. Report the retained files,
     # not the small pre-checkpoint main file with most pages still in the WAL.
-    retained_bytes = storage_guard()
+    try:
+        retained_bytes = storage_guard()
+    except ValueError as error:
+        retained_bytes = sum(path.stat().st_size for path in work.rglob("*") if path.is_file())
+        failures.append({"stage": "storage", "error": repr(error)})
     database_bytes = (project / ".anvil/state.db").stat().st_size
     active = peak_overlap = 0
     for _, change in sorted(intervals):
@@ -620,7 +907,15 @@ def run(
         "sqlite": sqlite3.sqlite_version,
         "durability": durability,
         "events_storage": events_storage,
+        "proof_preparation": proof_preparation,
+        "raw_timings": raw_timings,
         "source_sha256": source_identity,
+        "command_containment": {
+            "protocol": "linux-subreaper-status.v1",
+            "supervisors_per_command": 1,
+            "prelude_sha256": hashlib.sha256(_COMMAND_STATUS_PRELUDE.encode()).hexdigest(),
+            "cleanup_allowance_seconds": PROCESS_CLEANUP_ALLOWANCE_SECONDS,
+        },
         "source_unchanged": source_unchanged,
         "tasks": tasks,
         "cohort_size": cohort_size,
@@ -631,9 +926,14 @@ def run(
         "ledger_writers": 1,
         "containers": 0,
         "completed": len(completed),
+        "attempted": len(raw_timings),
+        "failed_tasks": sum(row["outcome"] == "failed" for row in raw_timings),
+        "command_captures": sum(row.get("command_pid") is not None for row in raw_timings),
+        "retained_proof_artifacts": len(list(captures.glob("*.proof.json"))),
         "failures": failures,
         "event_counts": dict(counts),
         "stages": {stage: _summary(samples) for stage, samples in measurements.items()},
+        "raw_stage_seconds": dict(measurements),
         "execution_seconds": round(execution_seconds, 3),
         "completed_per_second": round(len(completed) / execution_seconds, 3),
         "elapsed_seconds": round(time.perf_counter() - began, 3),
@@ -649,9 +949,14 @@ def run(
         "work_directory": str(work),
         "limits": [
             "Active claims, executor slots, ledger writers and containers are separate counts.",
-            "One coordinator owns all mutations; only real command subprocesses fan out.",
-            "Command latency includes process startup and a 20ms fixture wait; "
-            "queue delay is separate.",
+            "One coordinator owns all mutations; the bounded command pool may also prepare proofs.",
+            "Threaded preparation overlaps I/O, not necessarily Python CPU; native append "
+            "still verifies current custody and proof material.",
+            "Capture bytes are reserved under a lock; native State growth is checked every "
+            "16 handled tasks and after close. Any exceeded storage budget fails the run.",
+            "Linux-only command containment adds one supervisor per command. Command latency "
+            "includes supervisor startup, command execution, a 20ms fixture wait and cleanup; "
+            "queue delay is separate. Cleanup allowance is a best-effort bound, not a hard OS cap.",
             "Proofs are actual fixture-command captures, claim-owner self-attested, "
             "not external issuer attestations.",
             "No application correctness, browser, network-fleet, container "
@@ -681,9 +986,17 @@ def _stop_owned_process_group(process):
     try:
         for signum in previous_handlers:
             signal.signal(signum, signal.SIG_IGN)
+        cleanup_deadline = time.monotonic() + PROCESS_CLEANUP_ALLOWANCE_SECONDS
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
         process.join(5)
+        # A leader can exit before its subreapers finish adopted/detached cleanup.
+        while time.monotonic() < cleanup_deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(.01)
         # The leader may exit on TERM while its children ignore it. Always
         # finish the owned group, even after the leader has been reaped.
         with contextlib.suppress(ProcessLookupError):
@@ -700,15 +1013,17 @@ def _stop_owned_process_group(process):
 
 def _supervise(output, options, deadline, *, child_target=_child):
     try:
+        _require_linux_containment()
         # A signal-zero probe changes no process. Refuse before spawning if
         # the environment denies the group control required for bounded cleanup.
         os.killpg(os.getpgrp(), 0)
-    except (AttributeError, OSError) as error:
+    except (AttributeError, OSError, ValueError) as error:
         receipt = {
             "validated": False,
             "error": {
                 "code": "unsupported_environment",
-                "message": "POSIX process-group signaling is required for bounded cleanup.",
+                "message": "Linux subreaper, /proc and process-group signaling are required "
+                           "for cleanup.",
                 "detail": repr(error),
             },
             "child_started": False,
@@ -743,6 +1058,9 @@ def _supervise(output, options, deadline, *, child_target=_child):
             )
             + "\n"
         )
+    # Reap/stop any same-group command descendants even on an ordinary leader exit.
+    if not (timed_out or interrupted):
+        _stop_owned_process_group(process)
     if not output.exists():
         output.write_text(
             json.dumps({"validated": False, "child_exit_code": process.exitcode}) + "\n"
@@ -763,11 +1081,15 @@ def main():
     parser.add_argument("--command-timeout", type=int, default=10)
     parser.add_argument("--durability", choices=("relaxed", "strict"), default="relaxed")
     parser.add_argument("--events-storage", choices=("local", "git"), default="local")
+    parser.add_argument("--proof-preparation", choices=("coordinator", "worker"),
+                        default="coordinator")
     parser.add_argument("--deadline", type=int, default=900)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if os.name != "posix":
-        parser.error("this bounded subprocess harness requires POSIX process-group cleanup")
+    try:
+        _require_linux_containment()
+    except ValueError as error:
+        parser.error(str(error))
     if not 10 <= args.deadline <= 3600:
         parser.error("deadline must be 10..3600 seconds")
     output = args.output.resolve()
@@ -783,6 +1105,7 @@ def main():
             "command_timeout",
             "durability",
             "events_storage",
+            "proof_preparation",
         )
     }
     receipt = _supervise(output, options, args.deadline)
