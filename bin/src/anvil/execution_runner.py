@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import inspect
 import json
 import os
 import re
@@ -24,7 +25,7 @@ from anvil.claims.command_proof_artifact import (
     verify_claim_command_proof_batch,
 )
 from anvil.cli._helpers import _open_backend
-from anvil.config import ExecutionAdapter, load_execution_adapter
+from anvil.config import ExecutionAdapter, execution_file_bytes, load_execution_adapter
 from anvil.execution import (
     AdapterResult,
     ExecutionError,
@@ -42,6 +43,7 @@ from anvil.execution import (
     relative_file,
     request_for,
     require_visible_index,
+    revalidate_continuation,
     save_execution_capabilities,
     sync_directory,
     timestamp,
@@ -430,7 +432,11 @@ def retained_adapter_task(output: Path, receipt: dict[str, Any]) -> dict[str, An
 
 
 def verified_changes(
-    adapter: Any, output: Path, derived: dict[str, Any], registration: ExecutionAdapter
+    adapter: Any,
+    output: Path,
+    derived: dict[str, Any],
+    registration: ExecutionAdapter,
+    request: ExecutionRequest,
 ) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
     receipt = read_receipt(output / "receipt.json")
     for field in (
@@ -444,7 +450,7 @@ def verified_changes(
                 "adapter_failed", "Adapter did not prove delivery and stopped protected custody"
             )
     if (
-        receipt.get("version") != 2
+        receipt.get("version") != (3 if request.schema == "anvil.execution-request.v2" else 2)
         or receipt.get("task_id") != derived["task_id"]
         or receipt.get("acceptance") != "not_granted"
         or receipt.get("outcome") != "returned"
@@ -457,7 +463,6 @@ def verified_changes(
         )
     native_task = retained_adapter_task(output, receipt)
     for field in (
-        "version",
         "task_id",
         "kind",
         "instructions",
@@ -471,9 +476,10 @@ def verified_changes(
             )
     profile = adapter.profile_settings(Path(registration.profile))
     expected_controls = {
-        "operation": "run",
-        "max_tool_calls": 40,
-        "max_turns": 32,
+        "version": 3 if request.schema == "anvil.execution-request.v2" else 2,
+        "operation": request.operation,
+        "max_tool_calls": request.budgets["max_tool_calls"],
+        "max_turns": request.budgets["max_turns"],
         "allowed_tools": sorted(adapter.TOOLS),
         "runtime_defaults": {
             "model": profile["model"],
@@ -484,6 +490,8 @@ def verified_changes(
         raise ExecutionError("result_mismatch", "Adapter changed the budget, tools or defaults")
     if native_task.get("run_id") != receipt.get("run_id") or native_task.get("source") != source:
         raise ExecutionError("result_mismatch", "Adapter run or source identity mismatch")
+    if request.schema == "anvil.execution-request.v2":
+        adapter.validate_native_task(native_task)
     worker = adapter.verify_return(output / "results", native_task, source_files, receipt["run_id"])
     if receipt.get("worker") != worker:
         raise ExecutionError(
@@ -510,6 +518,48 @@ def verified_changes(
     if len(set(names)) != len(names):
         raise ExecutionError("invalid_changes", "Duplicate returned paths")
     return changes, source_files
+
+
+def verified_saved_conversation(
+    adapter: Any, output: Path, request: ExecutionRequest, receipt: dict[str, Any]
+) -> dict[str, Any]:
+    """Project the pinned adapter's verified checkpoint, never parse a transcript."""
+    native_task = retained_adapter_task(output, receipt)
+    if native_task.get("version") != 3 or native_task.get("operation") != request.operation:
+        raise ExecutionError("result_mismatch", "Saved operation differs from the request")
+    checkpoint = adapter.verify_conversation(output / "results", native_task, receipt["worker"])
+    conversation = receipt["worker"]["conversation"]
+    checkpoint_sha256 = digest((output / "results" / "conversation.json").read_bytes())
+    if checkpoint_sha256 != conversation["checkpoint_sha256"]:
+        raise ExecutionError("result_mismatch", "Retained checkpoint bytes differ from receipt")
+    prior = request.continuation
+    if prior is not None and (
+        checkpoint["conversation_id"] != prior["conversation_id"]
+        or checkpoint["prior_run_id"] != prior["prior_adapter_run_id"]
+        or checkpoint["prior_checkpoint_sha256"] != prior["checkpoint_sha256"]
+        or checkpoint["session"]["id"] != prior["official_session_id"]
+        or conversation["session_before"]["sha256"] != prior["session_sha256"]
+    ):
+        raise ExecutionError("result_mismatch", "Saved return differs from prior dispatch lineage")
+
+    def session_identity(value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return (
+            {key: value[key] for key in ("bytes", "sha256", "header_sha256")}
+            if value is not None else None
+        )
+
+    return {
+        "conversation_id": checkpoint["conversation_id"],
+        "official_session_id": checkpoint["session"]["id"],
+        "checkpoint_sha256": checkpoint_sha256,
+        "prior_adapter_run_id": checkpoint["prior_run_id"],
+        "prior_checkpoint_sha256": checkpoint["prior_checkpoint_sha256"],
+        "session_before": session_identity(conversation["session_before"]),
+        "session_after": session_identity(conversation["session_after"]),
+        "prior_prefix_sha256": conversation["prior_prefix_sha256"],
+        "workspace_sha256": digest(json_bytes(checkpoint["workspace"])),
+        "continuable": conversation["continuable"],
+    }
 
 
 def integrate(
@@ -624,7 +674,10 @@ def portable_adapter_result(
     actual = adapter.snapshot(output / "results")
     raw_digest = digest((output / "receipt.json").read_bytes())
     value = {
-        "schema": "anvil.adapter-result.v1",
+        "schema": (
+            "anvil.adapter-result.v2"
+            if request.schema == "anvil.execution-request.v2" else "anvil.adapter-result.v1"
+        ),
         "dispatch_id": request.dispatch_id,
         "request_sha256": request.request_sha256,
         "assignment_sha256": request.assignment_sha256,
@@ -667,10 +720,14 @@ def portable_adapter_result(
             "protected_unchanged": True,
             "receipt_sha256": raw_digest,
         },
-        "saved_conversation": None,
+        "saved_conversation": (
+            verified_saved_conversation(adapter, output, request, receipt)
+            if request.schema == "anvil.execution-request.v2" else None
+        ),
         "error_code": None,
     }
-    if configuration.get("session_file") is not None:
+    if (request.schema == "anvil.execution-request.v1"
+            and configuration.get("session_file") is not None):
         raise ExecutionError(
             "result_mismatch", "Initial Run cannot return an unapproved saved conversation"
         )
@@ -707,17 +764,23 @@ def execute_capability_refresh(directory: Path, request: dict[str, Any]) -> dict
         registration = ExecutionAdapter(**request["adapter"])
         adapter = adapter_module(registration)
         output = directory / "adapter"
+        selected_model = request.get("selected_model")
+        arguments = [
+            registration.interpreter,
+            "-I",
+            registration.script,
+            "capabilities",
+            "--profile",
+            registration.profile,
+            "--output",
+            str(output),
+        ]
+        if selected_model is not None:
+            arguments.extend([
+                "--provider", selected_model["provider"], "--model", selected_model["model"],
+            ])
         capture(
-            [
-                registration.interpreter,
-                "-I",
-                registration.script,
-                "capabilities",
-                "--profile",
-                registration.profile,
-                "--output",
-                str(output),
-            ],
+            arguments,
             directory,
             directory,
             "adapter",
@@ -741,10 +804,10 @@ def execute_capability_refresh(directory: Path, request: dict[str, Any]) -> dict
         profile = adapter.profile_settings(Path(registration.profile))
         verified_stopped_owner(receipt, profile)
         expected = {
-            "version": 2,
+            "version": 3 if selected_model is not None else 2,
             "task_id": "capabilities",
             "kind": "validation",
-            "operation": "capabilities",
+            "operation": "capabilities_selected" if selected_model is not None else "capabilities",
             "writable_paths": [],
             "checks": [],
             "run_options": {},
@@ -754,11 +817,15 @@ def execute_capability_refresh(directory: Path, request: dict[str, Any]) -> dict
                 "thinking": profile.get("thinking", "high"),
             },
         }
+        if selected_model is not None:
+            expected["selected_model"] = selected_model
+            adapter.validate_native_task(native_task)
         if any(native_task.get(key) != value for key, value in expected.items()):
             raise ExecutionError("result_mismatch", "Metadata task changed its no-prompt scope")
         if (
             receipt.get("acceptance") != "not_granted"
             or receipt.get("outcome") != "capabilities"
+            or receipt.get("version") != expected["version"]
             or native_task.get("run_id") != receipt.get("run_id")
         ):
             raise ExecutionError("result_mismatch", "Metadata outcome or identity mismatch")
@@ -832,12 +899,14 @@ def execute_run(directory: Path) -> dict[str, Any]:
     }
     remote_verified = False
     integration_complete = False
+    failed_check: tuple[str, str] | None = None
     attempted_captures: list[str] = []
     try:
         registration = ExecutionAdapter(**request["adapter"])
         adapter = adapter_module(registration)
         live_claim(backend, request, remaining=request["wall_seconds"] + 180)
         clean_source(cwd, request["source_sha"])
+        previous_output = revalidate_continuation(backend, request)
         packet = (directory / "packet.txt").read_bytes()
         if digest(packet) != request["packet_sha256"]:
             raise ExecutionError("packet_changed", "Native packet changed before execution")
@@ -856,19 +925,27 @@ def execute_run(directory: Path) -> dict[str, Any]:
         deadline = time.monotonic() + request["wall_seconds"] + 120
         if load_execution_adapter() != registration:
             raise ExecutionError("adapter_changed", "Registration changed before dispatch")
+        arguments = [
+            registration.interpreter,
+            "-I",
+            registration.script,
+            portable.operation,
+            str(directory / "adapter-task.json"),
+            "--profile",
+            registration.profile,
+            "--output",
+            str(output),
+        ]
+        if portable.schema == "anvil.execution-request.v2":
+            if portable.operation == "continue":
+                if previous_output is None:
+                    raise ExecutionError("invalid_continuation", "Missing verified prior output")
+                arguments.extend(["--from", str(previous_output)])
+            else:
+                arguments.append("--save-session")
         attempted_captures.append("adapter")
         capture(
-            [
-                registration.interpreter,
-                "-I",
-                registration.script,
-                "run",
-                str(directory / "adapter-task.json"),
-                "--profile",
-                registration.profile,
-                "--output",
-                str(output),
-            ],
+            arguments,
             cwd,
             directory,
             "adapter",
@@ -877,9 +954,10 @@ def execute_run(directory: Path) -> dict[str, Any]:
         )
         live_claim(backend, request)
         clean_source(cwd, request["source_sha"])
+        revalidate_continuation(backend, request)
         if load_execution_adapter() != registration:
             raise ExecutionError("adapter_changed", "Registration changed during execution")
-        changes, source_files = verified_changes(adapter, output, derived, registration)
+        changes, source_files = verified_changes(adapter, output, derived, registration, portable)
         returned = portable_adapter_result(adapter, output, registration, portable, changes)
         write_receipt(directory / "adapter-result.json", dataclasses.asdict(returned))
         verify_portable_return(returned, portable, adapter, output, registration, changes)
@@ -903,6 +981,7 @@ def execute_run(directory: Path) -> dict[str, Any]:
             raise ExecutionError("no_changes", "Implementation returned no scoped source changes")
         live_claim(backend, request)
         clean_source(cwd, request["source_sha"])
+        revalidate_continuation(backend, request)
         for preimage in portable.writable_paths:
             path = checked_path(cwd, preimage["path"])
             actual_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
@@ -915,6 +994,7 @@ def execute_run(directory: Path) -> dict[str, Any]:
         proof_paths = []
         for index, command in enumerate(request["commands"]):
             claim = live_claim(backend, request)
+            revalidate_continuation(backend, request)
             verify_portable_return(
                 AdapterResult.from_data(read_receipt(directory / "adapter-result.json"), portable),
                 portable,
@@ -932,15 +1012,22 @@ def execute_run(directory: Path) -> dict[str, Any]:
                 ANVIL_PRD=claim.attestation_context.prd_id,
             )
             attempted_captures.append(f"check-{index}")
-            result = capture(
-                ["/bin/sh", "-c", command],
-                cwd,
-                directory,
-                f"check-{index}",
-                min(deadline, time.monotonic() + portable.verification[index]["timeout_seconds"]),
-                portable.budgets["command_output_bytes"],
-                environment,
-            )
+            try:
+                result = capture(
+                    ["/bin/sh", "-c", command],
+                    cwd,
+                    directory,
+                    f"check-{index}",
+                    min(
+                        deadline, time.monotonic() + portable.verification[index]["timeout_seconds"]
+                    ),
+                    portable.budgets["command_output_bytes"],
+                    environment,
+                )
+            except ExecutionError as error:
+                if error.code in {"command_failed", "command_timeout", "output_overflow"}:
+                    failed_check = (f"check-{index}", error.code)
+                raise
             raw = (directory / f"check-{index}.log").read_bytes()
             context = claim.attestation_context
             core = ClaimCommandEvidenceCore(
@@ -982,6 +1069,7 @@ def execute_run(directory: Path) -> dict[str, Any]:
                 os.fsync(stream.fileno())
             proof_paths.append(path)
         claim = live_claim(backend, request)
+        revalidate_continuation(backend, request)
         verify_portable_return(
             AdapterResult.from_data(read_receipt(directory / "adapter-result.json"), portable),
             portable,
@@ -1028,12 +1116,35 @@ def execute_run(directory: Path) -> dict[str, Any]:
         if (
             remote_verified
             and integration_complete
+            and failed_check is not None
             and all_stopped
             and not (directory / "submission.json").exists()
         ):
-            outcome.update(state="failed_stopped", local_children_stopped=True)
-        else:
-            outcome["state"] = "reconciliation_required"
+            try:
+                name, failure_code = failed_check
+                captured = read_receipt(directory / f"{name}.result.json")
+                if (
+                    failure_code == "command_failed"
+                    and (captured["failure"] is not None or captured["exit_code"] == 0)
+                    or failure_code != "command_failed" and captured["failure"] != failure_code
+                ):
+                    raise ExecutionError("containment_unknown", "Failed check receipt differs")
+                live_claim(backend, request)
+                revalidate_continuation(backend, request)
+                verify_portable_return(
+                    AdapterResult.from_data(
+                        read_receipt(directory / "adapter-result.json"), portable
+                    ),
+                    portable, adapter, output, registration, changes,
+                )
+                check_integrated_source(cwd, request["source_sha"], changes, modes)
+            except Exception as revalidation_error:
+                # A stopped process is not a settled delivery when source or authority drifted.
+                outcome["reconciliation_error_code"] = getattr(
+                    revalidation_error, "code", "revalidation_failed"
+                )
+            else:
+                outcome.update(state="failed_stopped", local_children_stopped=True)
     finally:
         backend.close()
         outcome["ended_at"] = timestamp()
@@ -1041,11 +1152,151 @@ def execute_run(directory: Path) -> dict[str, Any]:
     return outcome
 
 
+def validate_saved_adapter_contract(adapter: Any, parent: Path) -> None:
+    """Probe the declared saved contract locally; never start an owner or a prompt."""
+    for name, arguments, keywords in (
+        ("run_task", (None, None, None, None),
+         {"save_session": True, "previous_directory": None, "selected_model": None}),
+        ("continuation_checkpoint", (None, None), {}),
+        ("verify_conversation", (None, None, None), {}),
+        ("saved_descriptor", (None,), {}),
+        ("validate_native_task", (None,), {}),
+        ("exclusive_owner", (None, None), {}),
+    ):
+        function = getattr(adapter, name, None)
+        if not callable(function):
+            raise ExecutionError("adapter_unavailable", "Missing saved adapter contract operation")
+        try:
+            inspect.signature(function).bind(*arguments, **keywords)
+        except (TypeError, ValueError) as error:
+            raise ExecutionError(
+                "adapter_unavailable", "Saved adapter signature differs"
+            ) from error
+    run_id = "a" * 32
+    root = parent.absolute() / "contract-probe"
+    conversation = root / "conversations" / run_id
+    saved = {
+        "version": 3,
+        "run_id": run_id,
+        "task_id": "contract:probe",
+        "kind": "implementation",
+        "instructions": "Validate a contract without execution.",
+        "workspace": str(conversation / "workspace"),
+        "output_directory": str(root / run_id / "results"),
+        "writable_paths": [],
+        "allowed_tools": [],
+        "max_tool_calls": 1,
+        "max_turns": 1,
+        "source": {"kind": "git", "commit": "1" * 40, "files": {}, "modes": {}},
+        "checks": [],
+        "operation": "run",
+        "run_options": {},
+        "runtime_defaults": {"model": "synthetic/model", "thinking": "off"},
+        "session": {
+            "conversation_id": run_id,
+            "directory": str(conversation),
+            "file": str(conversation / "session.jsonl"),
+            "prior": None,
+            "prior_sha256": None,
+        },
+    }
+    selected = {
+        **{key: value for key, value in saved.items() if key != "session"},
+        "operation": "capabilities_selected",
+        "selected_model": {"provider": "synthetic", "model": "model"},
+    }
+    adapter.validate_native_task(saved)
+    adapter.saved_descriptor(saved)
+    adapter.validate_native_task(selected)
+    prior = {"conversation_id": run_id, "run_id": "b" * 32}
+    prior_raw = (json.dumps(prior, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    continued = {
+        **saved,
+        "operation": "continue",
+        "session": {**saved["session"], "prior": prior, "prior_sha256": digest(prior_raw)},
+    }
+    adapter.validate_native_task(continued)
+    adapter.saved_descriptor(continued)
+    # Positive validation alone must not mistake a permissive old stub for v3 support.
+    for invalid in (
+        {**saved, "session": None},
+        {**saved, "session": {**saved["session"], "conversation_id": "b" * 32}},
+        {**continued, "session": {**continued["session"], "prior_sha256": "0" * 64}},
+        {**selected, "selected_model": {"provider": "synthetic"}},
+        {**selected, "run_options": {"thinking": "low"}},
+    ):
+        try:
+            adapter.validate_native_task(invalid)
+        except (TypeError, ValueError, KeyError):
+            continue
+        raise ExecutionError("adapter_unavailable", "Adapter accepts an invalid saved contract")
+
+
+OWNER_READ_TIMEOUT_SECONDS = 30
+
+
+def validated_owner_state(value: Any) -> dict[str, Any]:
+    """Bound the private read-only owner projection, never the full owner payload."""
+    names = {"id", "name", "phase", "main_process_instance_id"}
+    if (type(value) is not dict or set(value) != names | {"restart_count"}
+            or any(type(value[name]) is not str
+                   or not 1 <= len(value[name].encode("utf-8")) <= 1024 for name in names)
+            or type(value["restart_count"]) is not int
+            or not 0 <= value["restart_count"] <= 2**63 - 1
+            or len(json_bytes(value)) > 4096):
+        raise ExecutionError("owner_unavailable", "Invalid stopped owner readback")
+    return value
+
+
+def verify_candidate_owner(registration: ExecutionAdapter, directory: Path) -> dict[str, Any]:
+    """Run the pinned owner's verifier with a bounded, read-only command transport."""
+    adapter = adapter_module(registration, require_registered=False)
+    profile = adapter.profile_settings(Path(registration.profile))
+    owner = adapter.OpenShellOwner(profile)
+    directory.mkdir(mode=0o700)
+    execution_file_bytes(directory / "owner-get.attempt.json", 0, missing_ok=True)
+
+    def bounded_owner_command(*arguments: str, timeout: int = 60) -> subprocess.CompletedProcess:
+        if arguments != ("get", profile["sandbox_name"], "-o", "json") or timeout != 30:
+            raise ExecutionError("owner_unavailable", "Owner verifier requested another operation")
+        argv = [*owner.argv, "sandbox", *arguments]
+        result = capture(
+            argv, directory, directory, "owner-get",
+            time.monotonic() + OWNER_READ_TIMEOUT_SECONDS, 65536, separate_stdout=True,
+        )
+        stdout = execution_file_bytes(directory / "owner-get.stdout", 65536).decode("utf-8")
+        return subprocess.CompletedProcess(argv, result["exit_code"], stdout, "")
+
+    # Preserve the pinned verify/get identity semantics, replacing only its
+    # unbounded subprocess.run(capture_output=True) transport on this instance.
+    owner.command = bounded_owner_command
+    return validated_owner_state(adapter.selected_state(owner.verify()))
+
+
 def main() -> int:
-    if len(sys.argv) in {2, 3} and sys.argv[1] == "--validate-adapter":
-        registration = load_execution_adapter()
-        adapter = adapter_module(registration)
-        if len(sys.argv) == 3:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--verify-owner":
+        if (len(sys.argv) != 6 or sys.argv[2] != "--candidate"
+                or sys.argv[4] != "--output"):
+            raise ExecutionError("invalid_contract", "Invalid owner verification arguments")
+        registration = ExecutionAdapter(**json.loads(
+            execution_file_bytes(Path(sys.argv[3]), 1024 * 1024)
+        ))
+        state = verify_candidate_owner(registration, Path(sys.argv[5]))
+        sys.stdout.buffer.write(json_bytes(state))
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == "--validate-adapter":
+        candidate = len(sys.argv) == 4 and sys.argv[2] == "--candidate"
+        if not candidate and len(sys.argv) not in {2, 3}:
+            raise ExecutionError("invalid_contract", "Invalid adapter validation arguments")
+        if candidate:
+            path = Path(sys.argv[3])
+            registration = ExecutionAdapter(**json.loads(execution_file_bytes(path, 1024 * 1024)))
+        else:
+            registration = load_execution_adapter()
+        adapter = adapter_module(registration, require_registered=not candidate)
+        if registration.registration["capabilities"]["saved_session_continue"]:
+            validate_saved_adapter_contract(adapter, Path(registration.script).parent)
+        if not candidate and len(sys.argv) == 3:
             assignment = read_receipt(Path(sys.argv[2]))
             adapter.validate_task(assignment)
             adapter.frozen_source(assignment)

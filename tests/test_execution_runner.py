@@ -21,6 +21,7 @@ from anvil.execution import (
 )
 from anvil.execution_runner import capture, integrate, process_group_absent
 from tests.test_execution import execution_project as execution_project
+from tests.test_execution import saved_execution_project as saved_execution_project
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Owned Run adapter requires Linux descendant custody"
@@ -239,6 +240,147 @@ def _detached_capture_command(detached, outcome):
            "overflow": "sys.stdout.write('x'*200000);sys.stdout.flush()",
            "inherited_pipe": ""}[outcome]
     )
+
+
+def _owner_probe_candidate(tmp_path, outcome="success"):
+    """Pinned synthetic owner with the real get/command/verify delegation shape."""
+    import dataclasses
+
+    from anvil.config import register_execution_adapter
+    from anvil.execution import write_receipt
+
+    tmp_path.chmod(0o700)
+    script = tmp_path / "scripts" / "coordinate.py"
+    script.parent.mkdir()
+    script.write_text('''import json, subprocess
+def validate_task(task): pass
+def profile_settings(path): return json.loads(path.read_bytes())
+def selected_state(state):
+    return {key: state.get(key) for key in
+            ("id", "name", "phase", "main_process_instance_id", "restart_count")}
+class OpenShellOwner:
+    def __init__(self, profile):
+        self.profile, self.argv, self.main_instance = profile, profile["openshell_argv"], None
+    def command(self, *args, timeout=60):
+        return subprocess.run([*self.argv, "sandbox", *args], capture_output=True,
+                              text=True, timeout=timeout, check=True)
+    def get(self):
+        return json.loads(self.command("get", self.profile["sandbox_name"], "-o", "json",
+                                       timeout=30).stdout)
+    def verify(self):
+        state = self.get()
+        if state["id"] != self.profile["sandbox_id"]:
+            raise ValueError("Synthetic ownership identity changed")
+        return state
+''')
+    extension = tmp_path / "extensions" / "coordination.js"
+    extension.parent.mkdir()
+    extension.write_text("// synthetic owner-only fixture\n")
+    (tmp_path / "package.json").write_text(
+        '{"name":"codex-pi-coordination","version":"0.3.0"}'
+    )
+    selected = {"id": "synthetic-id", "name": "synthetic-owner", "phase": "Stopped",
+                "main_process_instance_id": "synthetic-main", "restart_count": 0}
+    descendant = (
+        "import os,signal,time;from pathlib import Path;"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+        "Path('descendant.pid').write_text(str(os.getpid()));time.sleep(60)"
+    )
+    program = (
+        "import subprocess,sys,time,json;from pathlib import Path;"
+        "assert sys.argv[1:]==['sandbox','get','synthetic-owner','-o','json'];"
+        f"subprocess.Popen([sys.executable,'-I','-c',{descendant!r}],"
+        "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "while not Path('descendant.pid').exists():time.sleep(.005)\n"
+        + {"success": f"print({json.dumps({**selected, 'extra': 'omitted'})!r})",
+           "overflow": "sys.stdout.write('x'*200000);sys.stdout.flush()",
+           "timeout": "time.sleep(60)"}[outcome]
+    )
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "sandbox_id": selected["id"], "sandbox_name": selected["name"],
+        "openshell_argv": [sys.executable, "-I", "-c", program],
+    }))
+    registration = register_execution_adapter(script, Path(sys.executable), profile,
+                                              saved_session_continue=True)
+    candidate = tmp_path / "candidate.json"
+    write_receipt(candidate, dataclasses.asdict(registration))
+    return registration, candidate, selected
+
+
+def test_candidate_owner_worker_uses_pinned_verifier_and_returns_only_selected_state(tmp_path):
+    from anvil.execution import json_bytes
+
+    _, candidate, selected = _owner_probe_candidate(tmp_path)
+    output = tmp_path / "owner-cli"
+    capture(
+        [sys.executable, "-I", "-m", "anvil.execution_runner", "--verify-owner",
+         "--candidate", str(candidate), "--output", str(output)],
+        tmp_path, tmp_path, "owner", time.monotonic() + 10, 4096, separate_stdout=True,
+    )
+    assert (tmp_path / "owner.stdout").read_bytes() == json_bytes(selected)
+    nested = read_receipt(output / "owner-get.result.json")
+    assert nested["containment_complete"] is True
+    assert nested["output_bytes"] < 65536
+    assert not Path("/proc", (output / "descendant.pid").read_text()).exists()
+    assert not list(tmp_path.rglob(".anvil"))
+
+
+@pytest.mark.parametrize("outcome,code", [
+    ("overflow", "output_overflow"), ("timeout", "command_timeout"),
+])
+def test_candidate_owner_inner_capture_bounds_raw_output_and_detached_children(
+    tmp_path, monkeypatch, adopted_test_children, outcome, code
+):
+    from anvil import execution_runner
+
+    registration, _, _ = _owner_probe_candidate(tmp_path, outcome)
+    monkeypatch.setattr(execution_runner, "OWNER_READ_TIMEOUT_SECONDS", .75)
+    output = tmp_path / "owner-cli"
+    try:
+        with pytest.raises(ExecutionError) as error:
+            execution_runner.verify_candidate_owner(registration, output)
+        assert error.value.code == code
+        nested = read_receipt(output / "owner-get.result.json")
+        assert nested["containment_complete"] is True
+        assert nested["group_absent"] is True
+        assert nested["output_bytes"] <= 65537
+        assert not Path("/proc", (output / "descendant.pid").read_text()).exists()
+    finally:
+        _stop_recorded_descendant(output)
+
+
+@pytest.mark.parametrize("mutation", ["foreign_id", "lifecycle_command"])
+def test_candidate_owner_preserves_identity_check_and_refuses_other_commands(
+    tmp_path, adopted_test_children, mutation
+):
+    from anvil.config import register_execution_adapter
+    from anvil.execution_runner import verify_candidate_owner
+
+    registration, _, _ = _owner_probe_candidate(tmp_path)
+    script, profile = Path(registration.script), Path(registration.profile)
+    if mutation == "foreign_id":
+        data = json.loads(profile.read_bytes())
+        data["sandbox_id"] = "different-configured-owner"
+        profile.write_text(json.dumps(data))
+    else:
+        script.write_text(script.read_text().replace(
+            'self.command("get", self.profile["sandbox_name"], "-o", "json",',
+            'self.command("stop", self.profile["sandbox_name"], "-o", "json",',
+        ))
+    changed = register_execution_adapter(script, Path(sys.executable), profile,
+                                         saved_session_continue=True)
+    output = tmp_path / "owner-cli"
+    try:
+        with pytest.raises((ExecutionError, ValueError), match="ownership identity|another operation"):
+            verify_candidate_owner(changed, output)
+        if mutation == "lifecycle_command":
+            assert list(output.iterdir()) == []
+        else:
+            assert read_receipt(output / "owner-get.result.json")["containment_complete"] is True
+            assert not Path("/proc", (output / "descendant.pid").read_text()).exists()
+    finally:
+        _stop_recorded_descendant(output)
 
 
 @pytest.mark.parametrize("detached", [False, True])
@@ -1169,3 +1311,281 @@ def test_run_requires_exact_stopped_owner_before_integration(execution_project, 
     assert finished["error_code"] == "result_mismatch"
     assert not (directory / "integration.json").exists()
     assert backend.get_latest_evidence("release:T001") is None
+
+
+def _saved_projection_inputs(tmp_path):
+    """A verifier result double for the outer join, not a native proof fixture."""
+    import io
+    import tarfile
+    from types import SimpleNamespace
+
+    from anvil.execution import digest
+
+    prior = {
+        "conversation_id": "a" * 32,
+        "prior_adapter_run_id": "b" * 32,
+        "checkpoint_sha256": "c" * 64,
+        "official_session_id": "synthetic-official-session",
+        "session_sha256": "d" * 64,
+    }
+    before = {"bytes": 100, "sha256": prior["session_sha256"], "header_sha256": "e" * 64}
+    after = {**before, "bytes": 140, "sha256": "f" * 64,
+             "id": prior["official_session_id"], "file": "/private/session.jsonl",
+             "cwd": "/private/workspace"}
+    checkpoint = {
+        "conversation_id": prior["conversation_id"],
+        "prior_run_id": prior["prior_adapter_run_id"],
+        "prior_checkpoint_sha256": prior["checkpoint_sha256"],
+        "session": after,
+        "workspace": {"files": {}, "directories": {".": 448}},
+    }
+    results = tmp_path / "results"
+    results.mkdir()
+    checkpoint_raw = (json.dumps(checkpoint, sort_keys=True) + "\n").encode()
+    (results / "conversation.json").write_bytes(checkpoint_raw)
+    native = {"version": 3, "operation": "continue"}
+    with tarfile.open(tmp_path / "inputs.tar", "x") as archive:
+        raw = json.dumps(native).encode()
+        item = tarfile.TarInfo("task.json")
+        item.size = len(raw)
+        archive.addfile(item, io.BytesIO(raw))
+    receipt = {
+        "input_sha256": digest((tmp_path / "inputs.tar").read_bytes()),
+        "worker": {"conversation": {
+            "checkpoint_sha256": digest(checkpoint_raw),
+            "session_before": before,
+            "session_after": after,
+            "prior_prefix_sha256": before["sha256"],
+            "continuable": True,
+        }},
+    }
+    # The trusted Pi verifier is independently exercised by the concrete adapter;
+    # this unit test targets the native prior-dispatch join after that verifier.
+    adapter = SimpleNamespace(verify_conversation=lambda *_: checkpoint)
+    request = SimpleNamespace(operation="continue", continuation=prior)
+    return adapter, request, receipt, checkpoint
+
+
+def test_saved_projection_omits_remote_paths_and_joins_actual_checkpoint(tmp_path):
+    from anvil.execution import digest, json_bytes
+    from anvil.execution_runner import verified_saved_conversation
+
+    adapter, request, receipt, checkpoint = _saved_projection_inputs(tmp_path)
+    result = verified_saved_conversation(adapter, tmp_path, request, receipt)
+    assert result["official_session_id"] == request.continuation["official_session_id"]
+    assert result["checkpoint_sha256"] == digest((tmp_path / "results/conversation.json").read_bytes())
+    assert result["workspace_sha256"] == digest(json_bytes(checkpoint["workspace"]))
+    assert set(result["session_after"]) == {"bytes", "sha256", "header_sha256"}
+    assert "/private" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("mutation", [
+    "checkpoint_bytes", "conversation_id", "prior_adapter_run_id", "checkpoint_sha256",
+    "official_session_id", "session_sha256",
+])
+def test_saved_projection_refuses_prior_lineage_and_byte_drift(tmp_path, mutation):
+    from anvil.execution_runner import verified_saved_conversation
+
+    adapter, request, receipt, _ = _saved_projection_inputs(tmp_path)
+    if mutation == "checkpoint_bytes":
+        with (tmp_path / "results/conversation.json").open("ab") as stream:
+            stream.write(b" ")
+    else:
+        request.continuation[mutation] = "0" * len(request.continuation[mutation])
+    with pytest.raises(ExecutionError, match="checkpoint bytes|prior dispatch lineage"):
+        verified_saved_conversation(adapter, tmp_path, request, receipt)
+
+
+def test_saved_contract_probe_refuses_permissive_function_presence(tmp_path):
+    from types import SimpleNamespace
+
+    from anvil.execution_runner import validate_saved_adapter_contract
+
+    def run_task(task, profile, output, lock, *, save_session=False,
+                 previous_directory=None, selected_model=None):
+        pytest.fail("contract validation must not execute a task")
+
+    adapter = SimpleNamespace(
+        run_task=run_task, continuation_checkpoint=lambda *_: None,
+        verify_conversation=lambda *_: None, saved_descriptor=lambda *_: None,
+        validate_native_task=lambda *_: None, exclusive_owner=lambda *_: None,
+    )
+    with pytest.raises(ExecutionError, match="accepts an invalid saved contract"):
+        validate_saved_adapter_contract(adapter, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_saved_run_and_followup_continue_submit_distinct_native_proofs(saved_execution_project):
+    import shlex
+
+    from anvil.execution import confirm_continue, digest, git, preview_continue
+    from tests.test_bundle_state import _event
+
+    backend, repo, state, _ = saved_execution_project
+    task = backend.get_task("release:T002")
+    command = shlex.join([
+        sys.executable, "-I", "-c",
+        "from pathlib import Path; assert Path('README.md').read_bytes() == b'continued\\n'; "
+        "print('followup-native-proof-ok')",
+    ])
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id,
+        "likely_files": ["README.md"],
+        "verification": {"commands": [command], "required_proofs": [
+            {"kind": "command", "command": command, "passing_exit_codes": [0],
+             "label": "fresh-followup-proof"},
+        ]},
+    }, target_kind="task", target_id=task.id))
+    first_preview = preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    first = confirm_run(repo, "release:T001", "synthetic-owner", first_preview["preview_id"])
+    first_directory = journal_root(repo) / "runs" / first["run_id"]
+    assert _wait(first_directory)["state"] == "needs_review"
+    first_result = read_receipt(first_directory / "adapter-result.json")
+    assert first_result["schema"] == "anvil.adapter-result.v2"
+    assert first_result["saved_conversation"]["session_before"] is None
+    first_source = Path(first["cwd"])
+    git(first_source, "add", "README.md")
+    git(first_source, "commit", "-qm", "Retain first synthetic returned edit")
+    committed = git(first_source, "rev-parse", "HEAD").decode().strip()
+    git(repo, "merge", "--ff-only", committed)
+
+    second_preview = preview_continue(
+        repo, first["run_id"], "synthetic-owner", RunOptions(), task_id="release:T002"
+    )
+    second = confirm_continue(
+        repo, first["run_id"], "synthetic-owner", second_preview["preview_id"]
+    )
+    second_directory = journal_root(repo) / "runs" / second["run_id"]
+    finished = _wait(second_directory)
+    assert finished["state"] == "needs_review", finished
+    returned = read_receipt(second_directory / "adapter-result.json")
+    request = read_receipt(second_directory / "request.json")
+    before, after = first_result["saved_conversation"], returned["saved_conversation"]
+    assert request["operation"] == "continue"
+    assert request["source"]["commit"] == committed
+    assert request["continuation"]["prior_run_id"] == first["run_id"]
+    assert request["continuation"]["prior_request_file_sha256"] == digest(
+        (first_directory / "request.json").read_bytes()
+    )
+    assert after["official_session_id"] == before["official_session_id"]
+    assert after["conversation_id"] == before["conversation_id"]
+    assert after["session_before"] == before["session_after"]
+    assert after["prior_prefix_sha256"] == before["session_after"]["sha256"]
+    assert after["prior_checkpoint_sha256"] == before["checkpoint_sha256"]
+    assert after["checkpoint_sha256"] != before["checkpoint_sha256"]
+    assert after["session_after"]["bytes"] > after["session_before"]["bytes"]
+    assert first["claim_id"] != second["claim_id"] and first["run_id"] != second["run_id"]
+    evidence = [backend.get_latest_evidence(name) for name in ("release:T001", "release:T002")]
+    for current, admitted, task_id in zip(
+        evidence, (first, second), ("release:T001", "release:T002"), strict=True
+    ):
+        proof = current.proofs[0].evidence_core
+        assert proof.claim_id == admitted["claim_id"] and proof.task_id == task_id
+        assert proof.generation == 1  # Independent tasks need not share a generation counter.
+        assert backend.get_claim(admitted["claim_id"]).status.value == "released"
+        assert backend.get_task(task_id).status.value == "needs_review"
+    assert evidence[0].proofs[0] != evidence[1].proofs[0]
+    assert Path(second["cwd"]).joinpath("README.md").read_bytes() == b"continued\n"
+    assert not any(json.loads(line)["action"] == "task.applied"
+                   for line in (state / "events.jsonl").read_bytes().splitlines())
+    assert len(list(journal_root(repo).glob("runs/*/adapter.started.json"))) == 2
+
+
+@pytest.mark.parametrize("failure", ["command_failed", "output_overflow"])
+def test_saved_native_check_failure_retains_conversation_without_submission(
+    saved_execution_project, failure
+):
+    import shlex
+
+    from tests.test_bundle_state import _event
+
+    backend, repo, _, _ = saved_execution_project
+    task = backend.get_task("release:T001")
+    command = (
+        "exit 9" if failure == "command_failed"
+        else shlex.join([sys.executable, "-I", "-c", "print('x' * 200000)"])
+    )
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id,
+        "verification": {"commands": [command], "required_proofs": [
+            {"kind": "command", "command": command, "passing_exit_codes": [0],
+             "label": "deliberately-failing-native-check"},
+        ]},
+    }, target_kind="task", target_id=task.id))
+    preview = preview_run(repo, task.id, "synthetic-owner", RunOptions())
+    admitted = confirm_run(repo, task.id, "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    finished = _wait(directory)
+    assert finished["state"] == "failed_stopped", finished
+    assert finished["error_code"] == failure
+    assert finished["local_children_stopped"] and finished["acceptance"] == "not_granted"
+    assert read_receipt(directory / "adapter-result.json")["saved_conversation"]["continuable"]
+    captured = read_receipt(directory / "check-0.result.json")
+    if failure == "command_failed":
+        assert captured["exit_code"] == 9
+    else:
+        assert captured["failure"] == "output_overflow" and captured["output_bytes"] == 131073
+    assert not (directory / "submission.json").exists()
+    assert backend.get_latest_evidence(task.id) is None
+    assert backend.get_claim(admitted["claim_id"]).status.value == "active"
+
+
+@pytest.mark.parametrize("exit_code", [0, 9])
+def test_post_integration_source_drift_never_becomes_failed_stopped(
+    saved_execution_project, exit_code
+):
+    import shlex
+
+    from tests.test_bundle_state import _event
+
+    backend, repo, _, _ = saved_execution_project
+    task = backend.get_task("release:T001")
+    command = shlex.join([
+        sys.executable, "-I", "-c",
+        "from pathlib import Path; import sys; "
+        "Path('README.md').write_bytes(b'checker changed the integrated source\\n'); "
+        f"sys.exit({exit_code})",
+    ])
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id,
+        "verification": {"commands": [command], "required_proofs": [
+            {"kind": "command", "command": command, "passing_exit_codes": [0],
+             "label": "source-drift-must-remain-held"},
+        ]},
+    }, target_kind="task", target_id=task.id))
+    preview = preview_run(repo, task.id, "synthetic-owner", RunOptions())
+    admitted = confirm_run(repo, task.id, "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    finished = _wait(directory)
+    assert read_receipt(directory / "check-0.result.json")["exit_code"] == exit_code
+    assert finished["error_code"] == ("source_changed" if exit_code == 0 else "command_failed")
+    assert finished["state"] == "reconciliation_required", finished
+    assert finished["local_children_stopped"] is False
+    assert finished["acceptance"] == "not_granted"
+    assert not (directory / "submission.json").exists()
+    assert backend.get_latest_evidence(task.id) is None
+    assert backend.get_claim(admitted["claim_id"]).status.value == "active"
+    assert Path(admitted["cwd"]).joinpath("README.md").read_bytes().startswith(b"checker changed")
+
+
+def test_selected_metadata_reaches_native_variant_without_task_execution(saved_execution_project):
+    from anvil.execution import read_execution_capabilities, refresh_execution_capabilities
+    from anvil.execution_runner import retained_adapter_task
+
+    backend, repo, state, _ = saved_execution_project
+    before = (state / "events.jsonl").read_bytes()
+    dispatched = refresh_execution_capabilities(repo, provider="synthetic", model="model")
+    directory = journal_root(repo) / "runs" / dispatched["run_id"]
+    finished = _wait(directory)
+    assert finished["state"] == "capabilities_ready", finished
+    receipt = read_receipt(directory / "adapter/receipt.json")
+    native = retained_adapter_task(directory / "adapter", receipt)
+    assert native["version"] == 3 and native["operation"] == "capabilities_selected"
+    assert native["selected_model"] == {"provider": "synthetic", "model": "model"}
+    assert receipt["worker"]["configuration"]["prompt_sent"] is False
+    assert not native["checks"] and not native["writable_paths"]
+    capabilities = read_execution_capabilities(repo)
+    assert capabilities["thinking"]["provider"] == "synthetic"
+    assert capabilities["thinking"]["model"] == "model"
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == before

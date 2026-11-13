@@ -6,6 +6,42 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.25] - 2026-11-12
+
+### Added
+
+- Explicitly upgraded saved-session adapters retain an initial Run's official
+  conversation. `anvil continue RUN_ID --preview` binds a new request to the
+  exact prior delivery, current approved task, source, options and native claim.
+  Same-task rework requires native Request changes and renewed readiness; an
+  explicit eligible follow-up task keeps the original task's disposition.
+- `run-configure --upgrade --preview` and exact confirmation replace the trusted
+  adapter registration only after pinned-input checks, a bounded local contract
+  probe and a stopped-owner check. Existing registrations remain ephemeral until
+  this intentional upgrade.
+- `run-status --preview PREVIEW_ID` inspects an exact lost confirmation response
+  without launching another run. Selected-model capability refresh accepts an
+  explicit provider/model pair; Default Run does not depend on cached metadata.
+
+### Changed
+
+- Discovery API 26 records the new options on the existing 99 CLI commands and
+  112 command/group contracts. Frozen 0.6.23 and 0.6.24 snapshots remain unchanged.
+  Provider operation versions, payloads, JSON envelope and State schema 26 are
+  unchanged; discovery-pinned consumers must qualify API 26 before reading State.
+- Saved execution uses strict outer request/result v2 bindings while ephemeral
+  v1 remains supported. Native checks and evidence submission still end at
+  `needs_review`; continuation never grants acceptance or creates a commit.
+
+### Qualification limits
+
+- Actual execution requires Linux, shared workspace State and a trusted adapter
+  implementing the saved contract. Ambiguous stop, partial integration or
+  submission uncertainty requires inspection and prevents another dispatch.
+- Browser execution controls, installed fleet rollout and actual model/session
+  qualification remain separate delivery gates. This release does not qualify
+  the 15 ms ledger target or hundreds or thousands of production agents.
+
 ## [0.6.24] - 2026-11-12
 
 ### Added

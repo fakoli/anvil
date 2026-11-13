@@ -85,7 +85,7 @@ _COMMAND = "describe"
 # Bumped to "24" for guarded bundle withdrawal on the combined schema-26 engine.
 # Bumped to "25" for native harness Run, configuration, capability and status
 # commands, including the explicit unsupported-Continue boundary.
-API_VERSION = "25"
+API_VERSION = "26"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -285,14 +285,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "25",
-          "engine_version": "0.6.24",
-          "display_version": "0.6.24",
+          "api_version": "26",
+          "engine_version": "0.6.25",
+          "display_version": "0.6.25",
           "schema_version": 26,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.24",
+          "tag": "v0.6.25",
           "tag_distance": 0,
           "dirty": false,
           "cli": {

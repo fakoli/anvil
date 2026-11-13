@@ -197,7 +197,7 @@ class ExecutionRequest:
     verification: list[dict[str, Any]]
     budgets: dict[str, Any]
     requested_options: dict[str, str]
-    continuation: None
+    continuation: dict[str, Any] | None
 
     @classmethod
     def from_data(cls, value: Any) -> ExecutionRequest:
@@ -212,12 +212,16 @@ class ExecutionRequest:
         return result
 
     def validate(self) -> None:
-        if (
-            self.schema != "anvil.execution-request.v1"
-            or self.operation != "run"
-            or self.continuation is not None
-        ):
-            raise ExecutionError("unsupported_contract", "Only initial Run request v1 is supported")
+        if self.schema == "anvil.execution-request.v1":
+            if self.operation != "run" or self.continuation is not None:
+                raise ExecutionError("unsupported_contract", "Request v1 is ephemeral Run only")
+        elif self.schema == "anvil.execution-request.v2":
+            if self.operation == "continue":
+                validate_continuation(self.continuation)
+            elif self.operation != "run" or self.continuation is not None:
+                raise ExecutionError("unsupported_contract", "Invalid saved Run operation")
+        else:
+            raise ExecutionError("unsupported_contract", "Unsupported execution request version")
         identifier(self.dispatch_id)
         for value in (self.request_sha256, self.packet_sha256, self.assignment_sha256):
             fingerprint(value)
@@ -337,7 +341,7 @@ class AdapterResult:
     sandbox_checks: list[dict[str, Any]]
     raw_receipt_sha256: str
     custody: dict[str, Any]
-    saved_conversation: None
+    saved_conversation: dict[str, Any] | None
     error_code: str | None
 
     @classmethod
@@ -353,14 +357,16 @@ class AdapterResult:
         return result
 
     def validate(self, request: ExecutionRequest) -> None:
-        if (
-            self.schema != "anvil.adapter-result.v1"
-            or self.acceptance != "not_granted"
-            or self.saved_conversation is not None
-        ):
+        expected_schema = (
+            "anvil.adapter-result.v2" if request.schema == "anvil.execution-request.v2"
+            else "anvil.adapter-result.v1"
+        )
+        if self.schema != expected_schema or self.acceptance != "not_granted":
             raise ExecutionError(
                 "invalid_contract", "Invalid result version or acceptance boundary"
             )
+        if expected_schema.endswith(".v1") and self.saved_conversation is not None:
+            raise ExecutionError("invalid_contract", "Ephemeral result cannot acquire a session")
         if self.outcome not in {"returned", "failed", "reconciliation_required"}:
             raise ExecutionError("invalid_contract", "Invalid adapter outcome")
         for actual, expected in (
@@ -478,6 +484,75 @@ class AdapterResult:
             )
         if self.error_code is not None:
             bounded_text(self.error_code, 128)
+        if expected_schema.endswith(".v2"):
+            if self.saved_conversation is not None:
+                validate_saved_conversation(self.saved_conversation, request, self.adapter_run_id)
+                checkpoint = artifacts.get("results/conversation.json")
+                if checkpoint is None or checkpoint["sha256"] != self.saved_conversation[
+                    "checkpoint_sha256"
+                ]:
+                    raise ExecutionError("result_mismatch", "Saved checkpoint artifact differs")
+            elif self.outcome == "returned":
+                raise ExecutionError(
+                    "result_mismatch", "Saved Run requires a verified conversation"
+                )
+
+
+def validate_continuation(value: Any) -> None:
+    strict_object(value, {
+        "prior_run_id", "prior_request_file_sha256", "prior_result_file_sha256",
+        "prior_adapter_result_file_sha256", "prior_adapter_run_id", "prior_adapter_receipt_sha256",
+        "conversation_id", "official_session_id", "checkpoint_sha256", "session_sha256",
+    })
+    for key in ("prior_run_id", "prior_adapter_run_id", "conversation_id"):
+        identifier(value[key])
+    bounded_text(value["official_session_id"], 128, r"[A-Za-z0-9_.-]{1,128}")
+    for key in value:
+        if key.endswith("sha256"):
+            fingerprint(value[key])
+
+
+def validate_saved_conversation(value: Any, request: ExecutionRequest, adapter_run_id: str) -> None:
+    strict_object(value, {
+        "conversation_id", "official_session_id", "checkpoint_sha256", "prior_adapter_run_id",
+        "prior_checkpoint_sha256", "session_before", "session_after", "prior_prefix_sha256",
+        "workspace_sha256", "continuable",
+    })
+    identifier(adapter_run_id)
+    identifier(value["conversation_id"])
+    bounded_text(value["official_session_id"], 128, r"[A-Za-z0-9_.-]{1,128}")
+    for key in ("checkpoint_sha256", "prior_prefix_sha256", "workspace_sha256"):
+        fingerprint(value[key])
+    for session in (value["session_before"], value["session_after"]):
+        if session is None:
+            continue
+        strict_object(session, {"bytes", "sha256", "header_sha256"})
+        bounded_integer(session["bytes"], 1, 16 * 1024 * 1024)
+        fingerprint(session["sha256"])
+        fingerprint(session["header_sha256"])
+    if value["continuable"] is not True or value["session_after"] is None:
+        raise ExecutionError(
+            "result_mismatch", "Saved return is not a verified terminal checkpoint"
+        )
+    prior = request.continuation
+    if prior is None:
+        if (value["session_before"] is not None or value["prior_adapter_run_id"] is not None
+                or value["prior_checkpoint_sha256"] is not None
+                or value["conversation_id"] != adapter_run_id
+                or value["prior_prefix_sha256"] != digest(b"")):
+            raise ExecutionError("result_mismatch", "Initial saved Run acquired foreign history")
+    else:
+        before, after = value["session_before"], value["session_after"]
+        if (value["conversation_id"] != prior["conversation_id"]
+                or value["official_session_id"] != prior["official_session_id"]
+                or value["prior_adapter_run_id"] != prior["prior_adapter_run_id"]
+                or value["prior_checkpoint_sha256"] != prior["checkpoint_sha256"]
+                or before is None or before["sha256"] != prior["session_sha256"]
+                or value["prior_prefix_sha256"] != before["sha256"]
+                or before["header_sha256"] != after["header_sha256"]
+                or after["bytes"] < before["bytes"]
+                or adapter_run_id == prior["prior_adapter_run_id"]):
+            raise ExecutionError("result_mismatch", "Continued conversation changed prior identity")
 
 
 def assignment_for(context: dict[str, Any], packet: bytes) -> dict[str, Any]:
@@ -502,6 +577,9 @@ def assignment_for(context: dict[str, Any], packet: bytes) -> dict[str, Any]:
         "instructions": (
             "Implement this native Anvil packet. "
             "Return scoped edits; never grant acceptance.\n" + json_bytes(work).decode()
+            + ("\nNative request-changes provenance:\n"
+               + json_bytes(context["continuation_material"]["review"]).decode()
+               if context.get("continuation_material", {}).get("review") is not None else "")
         ),
         "writable_paths": context["writable_paths"],
         "checks": [],
@@ -528,6 +606,19 @@ def writable_preimages(cwd: Path, names: list[str]) -> list[dict[str, Any]]:
     return paths
 
 
+def claim_binding(project_id: str, claim: Claim) -> dict[str, Any]:
+    immutable = claim.attestation_context
+    if immutable is None:
+        raise ExecutionError("claim_changed", "Claim has no immutable execution binding")
+    return {
+        "project_id": project_id, "task_id": claim.task_id,
+        "actor": claim.claimed_by, "claim_id": claim.id, "generation": claim.generation,
+        "prd_id": immutable.prd_id, "prd_revision": immutable.prd_revision,
+        "task_revision": immutable.task_revision, "repository_id": immutable.repository_id,
+        "claim_start_sha": immutable.claim_start_sha,
+    }
+
+
 def request_for(
     context: dict[str, Any], packet: bytes, assignment: dict[str, Any]
 ) -> ExecutionRequest:
@@ -539,27 +630,17 @@ def request_for(
     root = Path(context["cwd"])
     paths = writable_preimages(root, context["writable_paths"])
     value = {
-        "schema": "anvil.execution-request.v1",
+        "schema": ("anvil.execution-request.v2" if registration.registration[
+            "capabilities"]["saved_session_continue"] else "anvil.execution-request.v1"),
         "dispatch_id": context["run_id"],
-        "operation": "run",
+        "operation": context.get("operation", "run"),
         "adapter": {
             "adapter_id": registration.registration["adapter_id"],
             "contract_version": registration.registration["contract_version"],
             "registration_sha256": digest(json_bytes(registration.registration)),
             "profile_sha256": registration.hashes["profile"],
         },
-        "binding": {
-            "project_id": context["project_id"],
-            "task_id": claim.task_id,
-            "actor": claim.claimed_by,
-            "claim_id": claim.id,
-            "generation": claim.generation,
-            "prd_id": immutable.prd_id,
-            "prd_revision": immutable.prd_revision,
-            "task_revision": immutable.task_revision,
-            "repository_id": immutable.repository_id,
-            "claim_start_sha": immutable.claim_start_sha,
-        },
+        "binding": claim_binding(context["project_id"], claim),
         "source": {
             "commit": context["source_sha"],
             "claim_worktree": str(root),
@@ -580,16 +661,19 @@ def request_for(
             "command_output_bytes": 131072,
         },
         "requested_options": context["options"],
-        "continuation": None,
+        "continuation": context.get("continuation"),
     }
     value["request_sha256"] = digest(json_bytes(value))
     return ExecutionRequest.from_data(value)
 
 
-def adapter_module(registration: ExecutionAdapter) -> Any:
+def adapter_module(registration: ExecutionAdapter, *, require_registered: bool = True) -> Any:
     """Import only code explicitly pinned by the owner, not a task-chosen plugin."""
-    if load_execution_adapter() != registration:
+    from anvil.config import validate_execution_adapter_inputs
+
+    if require_registered and load_execution_adapter() != registration:
         raise ExecutionError("adapter_changed", "Execution registration changed")
+    validate_execution_adapter_inputs(registration)
     raw = execution_file_bytes(Path(registration.script))
     if digest(raw) != registration.hashes["script"]:
         raise ExecutionError("adapter_changed", "Adapter code changed before import")
@@ -612,13 +696,24 @@ def adapter_module(registration: ExecutionAdapter) -> Any:
 
 
 def validate_adapter_contract(
-    registration: ExecutionAdapter, cwd: Path, assignment: dict[str, Any] | None = None
+    registration: ExecutionAdapter, cwd: Path, assignment: dict[str, Any] | None = None,
+    *, candidate_path: Path | None = None,
 ) -> None:
     """Local validation in isolated Python, without project import fallback."""
     from anvil.execution_runner import capture
 
-    directory = private_directory(journal_root(cwd) / "operations" / uuid.uuid4().hex)
+    if candidate_path is not None:
+        candidate = ExecutionAdapter(**json.loads(execution_file_bytes(candidate_path)))
+        if candidate != registration:
+            raise ExecutionError(
+                "adapter_changed", "Candidate wrapper differs from validation input"
+            )
+        directory = private_directory(candidate_path.parent / "probes" / uuid.uuid4().hex)
+    else:
+        directory = private_directory(journal_root(cwd) / "operations" / uuid.uuid4().hex)
     arguments = [sys.executable, "-I", "-m", "anvil.execution_runner", "--validate-adapter"]
+    if candidate_path is not None:
+        arguments.extend(["--candidate", str(candidate_path)])
     if assignment is not None:
         path = directory / "assignment.json"
         write_receipt(path, assignment)
@@ -820,7 +915,9 @@ def require_isolated_state_layout() -> None:
         )
 
 
-def require_planned_source(cwd: Path, task: Task, source: str, state: Path) -> None:
+def require_planned_source(
+    cwd: Path, task: Task, source: str, state: Path, *, branch: str | None = None
+) -> None:
     from anvil.cli._helpers import _load_config_optional
     from anvil.git_ops import ClaimPlanError, resolve_claim_plan
 
@@ -828,6 +925,7 @@ def require_planned_source(cwd: Path, task: Task, source: str, state: Path) -> N
     try:
         plan = resolve_claim_plan(
             task.id, task.title, cwd=cwd, worktree=True,
+            branch=branch,
             branch_prefix=config.branch_prefix if config is not None else "agent",
             isolation_required=True,
         )
@@ -838,6 +936,227 @@ def require_planned_source(cwd: Path, task: Task, source: str, state: Path) -> N
             "claim_source_mismatch",
             "Native claim source differs from preview source; use a fresh isolated owner claim",
         )
+
+
+def continuation_material(
+    backend: Any, context: dict[str, Any], prior_run_id: str
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Join retained bytes to native history; the adapter owns session parsing."""
+    from anvil.attempt_view import read_attempt_view
+    from anvil.claims.progress_attestation import inspect_local_repository
+    from anvil.execution_runner import (
+        captures_stopped,
+        portable_adapter_result,
+        verified_changes,
+    )
+
+    cwd = Path(context["cwd"])
+    root = journal_root(cwd)
+    directory = root / "runs" / identifier(prior_run_id)
+    names = ["admission.json", "context.json", "request.json", "adapter-result.json",
+             "result.json", "launched.json", "started.json", "adapter-task.json",
+             "integration.json", "dispatch.json", "packet.txt", "adapter/receipt.json",
+             "adapter/results/conversation.json"]
+    raw = {name: execution_file_bytes(directory / name) for name in names}
+    values = {name: json.loads(value) for name, value in raw.items() if name != "packet.txt"}
+    prior_context = values["context.json"]
+    prior_request = ExecutionRequest.from_data(values["request.json"])
+    if prior_request.schema != "anvil.execution-request.v2":
+        raise ExecutionError(
+            "ephemeral_run", "This Run has no saved conversation; start a saved Run"
+        )
+    prior_result = AdapterResult.from_data(values["adapter-result.json"], prior_request)
+    outcome = values["result.json"]
+    registration = ExecutionAdapter(**context["adapter"])
+    if (not registration.registration["capabilities"]["saved_session_continue"]
+            or prior_context["adapter"] != context["adapter"]):
+        raise ExecutionError(
+            "adapter_changed", "Continue requires the same saved adapter registration"
+        )
+    if (outcome.get("state") not in {"needs_review", "failed_stopped"}
+            or outcome.get("local_children_stopped") is not True
+            or outcome.get("acceptance") != "not_granted"
+            or outcome.get("run_id") != prior_run_id
+            or prior_request.dispatch_id != prior_run_id
+            or prior_context.get("run_id") != prior_run_id):
+        raise ExecutionError("unsettled_run", "Prior native delivery requires owner reconciliation")
+    launched, started = values["launched.json"], values["started.json"]
+    pid = launched.get("pid")
+    if (type(pid) is not int or pid <= 1 or started.get("pid") != pid
+            or launched.get("run_id") != prior_run_id or started.get("run_id") != prior_run_id
+            or prior_result.custody["local_coordinator"] != f"pid:{pid}/pgid:{pid}"):
+        raise ExecutionError("unsettled_run", "Prior coordinator identity is incomplete")
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise ExecutionError("run_busy", "Prior coordinator has not stopped")
+    capture_names = ["adapter"] + [
+        f"check-{index}" for index in range(len(prior_context["commands"]))
+        if (directory / f"check-{index}.attempt.json").exists()
+    ]
+    if not captures_stopped(directory, capture_names):
+        raise ExecutionError("unsettled_run", "Prior command custody is incomplete")
+    if outcome["state"] == "needs_review" and len(capture_names) != 1 + len(
+        prior_context["commands"]
+    ):
+        raise ExecutionError("unsettled_run", "Prior native checks are incomplete")
+    if outcome["state"] == "failed_stopped" and (
+        (directory / "submission.json").exists()
+        or outcome.get("error_code") not in {"command_failed", "command_timeout", "output_overflow"}
+    ):
+        raise ExecutionError("unsettled_run", "Uncertain native failure cannot Continue")
+    for index, change in enumerate(values["integration.json"]["changes"]):
+        name = f"integrated-{index}.json"
+        raw[name] = execution_file_bytes(directory / name)
+        if json.loads(raw[name]) != change:
+            raise ExecutionError("unsettled_run", "Prior integration did not settle")
+    task = backend.get_task(context["task_id"])
+    project = backend.get_project()
+    original_claim = backend.get_claim(prior_request.binding["claim_id"])
+    identity = inspect_local_repository(cwd, project_id=project.id)
+    if (project.id != prior_request.binding["project_id"]
+            or task.prd_id != prior_request.binding["prd_id"]
+            or identity.repository_id != prior_request.binding["repository_id"]
+            or journal_root(Path(prior_context["cwd"])) != root
+            or original_claim is None or str(original_claim.status) != "released"
+            or original_claim.generation != prior_request.binding["generation"]
+            or original_claim.task_id != prior_request.binding["task_id"]):
+        raise ExecutionError("continuation_lineage", "Continue requires the same native lineage")
+    retained_claim = Claim.model_validate(prior_context["claim"])
+    immutable = original_claim.attestation_context
+    if (immutable is None or any(
+        getattr(original_claim, key) != getattr(retained_claim, key)
+        for key in ("id", "task_id", "claimed_by", "generation", "attestation_context",
+                    "worktree_path", "branch")
+    ) or prior_request.binding != claim_binding(project.id, original_claim)
+        or prior_request.source["commit"] != prior_context["source_sha"]
+        or prior_request.source["claim_worktree"] != prior_context["cwd"]
+        or prior_context["cwd"] != original_claim.worktree_path
+        or prior_request.packet_sha256 != digest(raw["packet.txt"])
+        or prior_request.assignment_sha256 != digest(json_bytes(values["adapter-task.json"]))
+        or values["dispatch.json"].get("run_id") != prior_run_id
+        or values["dispatch.json"].get("request_file_sha256") != digest(raw["request.json"])
+        or values["dispatch.json"].get("context_sha256") != digest(raw["context.json"])):
+        raise ExecutionError(
+            "continuation_lineage", "Prior dispatch differs from its immutable claim"
+        )
+    git(cwd, "merge-base", "--is-ancestor", prior_request.source["commit"], context["source_sha"])
+    current_claim = context.get("claim")
+    if current_claim and (current_claim["id"] == original_claim.id or (
+        task.id == original_claim.task_id
+        and current_claim["generation"] <= original_claim.generation
+    )):
+        raise ExecutionError("claim_changed", "Continue requires a fresh native claim generation")
+    attempt = None
+    if task.id == original_claim.task_id:
+        from anvil.project_snapshot import ProjectSnapshotError
+
+        try:
+            attempt = read_attempt_view(root.parent, original_claim.task_id)
+        except ProjectSnapshotError as error:
+            raise ExecutionError(
+                "incomplete_history", "Prior native attempt is incomplete"
+            ) from error
+        if attempt["history"]["overflow"] is not False:
+            raise ExecutionError("incomplete_history", "Prior native attempt is incomplete")
+        candidates = [*attempt["history"]["evidence"]]
+        if attempt["current"]["evidence"] is not None:
+            candidates.append(attempt["current"]["evidence"])
+        evidence = [item for item in candidates if item["claim_id"] == original_claim.id]
+    else:
+        # An explicit follow-up can retain a closed original task. Use the
+        # existing single-task latest reader; an older delivery never substitutes
+        # for a superseding native attempt, and no project-wide proof scan occurs.
+        latest = backend.get_latest_evidence(original_claim.task_id)
+        if latest is not None and latest.claim_id != original_claim.id:
+            raise ExecutionError(
+                "continuation_lineage", "A newer native delivery superseded this Run"
+            )
+        evidence = [latest.model_dump(mode="json")] if latest is not None else []
+    if (outcome["state"] == "needs_review" and len(evidence) != 1
+            or outcome["state"] == "failed_stopped" and evidence):
+        raise ExecutionError("unsettled_run", "Native evidence differs from prior delivery")
+    if evidence:
+        for name in ("submission.json", "submitted.json"):
+            raw[name] = execution_file_bytes(directory / name)
+        submitted = json.loads(raw["submitted.json"])
+        data = submitted.get("data", {})
+        if (submitted.get("ok") is not True or submitted.get("command") != "submit"
+                or data.get("evidence_id") != evidence[0]["id"]
+                or data.get("claim_id") != original_claim.id
+                or data.get("submitted_by") != original_claim.claimed_by
+                or data.get("commands_run") != prior_context["commands"]
+                or evidence[0]["commands_run"] != prior_context["commands"]
+                or evidence[0]["task_id"] != original_claim.task_id
+                or evidence[0]["submitted_by"] != original_claim.claimed_by):
+            raise ExecutionError(
+                "unsettled_run", "Prior submitted receipt differs from native evidence"
+            )
+    review = None
+    if task.id == original_claim.task_id and evidence:
+        reviews = [*attempt["current"]["reviews"], *attempt["history"]["reviews"]]
+        rejected = [item for item in reviews if item.get("binding_status") == "exact"
+                    and item.get("evidence_id") == evidence[0]["id"]
+                    and item.get("claim_id") == original_claim.id
+                    and item.get("generation") == original_claim.generation
+                    and item.get("decision") == "rejected"]
+        if not rejected:
+            raise ExecutionError(
+                "rework_not_requested", "Request changes on the exact prior evidence first"
+            )
+        review = max(rejected, key=lambda item: item["causal_order"])
+    adapter = adapter_module(registration)
+    output = directory / "adapter"
+    changes, _ = verified_changes(
+        adapter, output, values["adapter-task.json"], registration, prior_request)
+    if values["integration.json"]["changes"] != changes:
+        raise ExecutionError("unsettled_run", "Prior integration differs from verified edits")
+    expected = dataclasses.asdict(portable_adapter_result(
+        adapter, output, registration, prior_request, changes))
+    expected["custody"]["local_coordinator"] = prior_result.custody["local_coordinator"]
+    if expected != dataclasses.asdict(prior_result):
+        raise ExecutionError(
+            "result_mismatch", "Prior portable result differs from verified artifacts"
+        )
+    checkpoint = adapter.continuation_checkpoint(
+        output, adapter.profile_settings(Path(registration.profile)))
+    if checkpoint != values["adapter/results/conversation.json"]:
+        raise ExecutionError("result_mismatch", "Prior saved checkpoint is no longer terminal")
+    saved = prior_result.saved_conversation
+    continuation = {
+        "prior_run_id": prior_run_id,
+        "prior_request_file_sha256": digest(raw["request.json"]),
+        "prior_result_file_sha256": digest(raw["result.json"]),
+        "prior_adapter_result_file_sha256": digest(raw["adapter-result.json"]),
+        "prior_adapter_run_id": prior_result.adapter_run_id,
+        "prior_adapter_receipt_sha256": digest(raw["adapter/receipt.json"]),
+        "conversation_id": saved["conversation_id"],
+        "official_session_id": saved["official_session_id"],
+        "checkpoint_sha256": saved["checkpoint_sha256"],
+        "session_sha256": saved["session_after"]["sha256"],
+    }
+    validate_continuation(continuation)
+    material = {"files": {name: digest(value) for name, value in raw.items()}, "review": review,
+                "evidence_id": evidence[0]["id"] if evidence else None,
+                "prior_claim_id": original_claim.id, "prior_generation": original_claim.generation,
+                "prior_task_id": original_claim.task_id, "prior_branch": original_claim.branch}
+    return continuation, material, output
+
+
+def revalidate_continuation(backend: Any, context: dict[str, Any]) -> Path | None:
+    prior = context.get("continuation")
+    if prior is None:
+        if context.get("operation") == "continue":
+            raise ExecutionError("invalid_continuation", "Continue is missing its saved lineage")
+        return None
+    current, material, output = continuation_material(backend, context, prior["prior_run_id"])
+    if current != prior or material != context.get("continuation_material"):
+        raise ExecutionError(
+            "continuation_changed", "Prior native or conversation material changed"
+        )
+    return output
 
 
 def preflight_assignment(context: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -869,15 +1188,58 @@ def revalidate_admission(backend: Any, context: dict[str, Any], state: Path) -> 
     elif str(task.status) != "ready":
         raise ExecutionError("task_not_ready", "Task is no longer ready")
     else:
-        require_planned_source(Path(context["cwd"]), task, context["source_sha"], state)
+        require_planned_source(Path(context["cwd"]), task, context["source_sha"], state,
+                               branch=context.get("claim_branch"))
+    revalidate_continuation(backend, context)
+
+
+def read_execution_preview(root: Path, preview_id: str) -> dict[str, Any]:
+    """Validate retained routing fields without granting freshness or admission."""
+    try:
+        identifier(bounded_text(preview_id, 32))
+        preview = read_receipt(root / "previews" / (preview_id + ".json"))
+        if (type(preview) is not dict or type(preview["version"]) is not int
+                or preview["version"] != 1):
+            raise ValueError("Invalid preview version")
+        if identifier(bounded_text(preview["preview_id"], 32)) != preview_id:
+            raise ValueError("Preview identity differs")
+        for name, maximum in (
+            ("task_id", 255), ("project_id", 255), ("actor", 4096), ("cwd", 4096)
+        ):
+            bounded_text(preview[name], maximum)
+        if not Path(preview["cwd"]).is_absolute():
+            raise ValueError("Preview checkout is not absolute")
+        retained_claim = preview["claim"]
+        if retained_claim is not None:
+            claim = Claim.model_validate(retained_claim)
+            if (claim.task_id != preview["task_id"] or claim.claimed_by != preview["actor"]
+                    or str(Path(bounded_text(claim.worktree_path, 4096)).resolve())
+                    != preview["cwd"]):
+                raise ValueError("Claim differs from the retained route")
+        operation = bounded_text(preview.get("operation", "run"), 8)
+        if operation not in {"run", "continue"}:
+            raise ValueError("Unsupported preview route")
+        continuation = preview.get("continuation")
+        if operation == "continue":
+            validate_continuation(continuation)
+        elif continuation is not None:
+            raise ValueError("Run acquired continuation authority")
+    except (KeyError, TypeError, ValueError):
+        raise ExecutionError(
+            "preview_mismatch", "Invalid preview object or routing fields"
+        ) from None
+    return preview
 
 
 def require_fresh_preview(preview: dict[str, Any]) -> None:
-    if not (
-        datetime.fromisoformat(preview["created_at"])
-        <= now()
-        < datetime.fromisoformat(preview["expires_at"])
-    ):
+    try:
+        created = datetime.fromisoformat(bounded_text(preview["created_at"], 64))
+        expires = datetime.fromisoformat(bounded_text(preview["expires_at"], 64))
+        if created.tzinfo is None or expires.tzinfo is None:
+            raise ValueError("Preview times require time zones")
+    except (KeyError, TypeError, ValueError):
+        raise ExecutionError("preview_mismatch", "Invalid preview validity window") from None
+    if not created <= now() < expires:
         raise ExecutionError("preview_expired", "Preview expired or the clock moved backwards")
 
 
@@ -892,6 +1254,32 @@ def require_unconsumed_preview(root: Path, preview_id: str) -> None:
 
 def preview_run(
     cwd: Path, task_id: str, actor: str, options: RunOptions, wall_seconds: int = 600
+) -> dict[str, Any]:
+    return _preview_execution(cwd, task_id, actor, options, wall_seconds)
+
+
+def preview_continue(
+    cwd: Path, prior_run_id: str, actor: str, options: RunOptions,
+    wall_seconds: int = 600, task_id: str | None = None,
+) -> dict[str, Any]:
+    if not load_execution_adapter().registration["capabilities"]["saved_session_continue"]:
+        raise ExecutionError(
+            "continuation_unsupported", "Registered adapter does not support Continue"
+        )
+    prior = read_receipt(journal_root(cwd) / "runs" / identifier(prior_run_id) / "request.json")
+    request = ExecutionRequest.from_data(prior)
+    if request.schema != "anvil.execution-request.v2":
+        raise ExecutionError(
+            "ephemeral_run", "This Run has no saved conversation; start a saved Run"
+        )
+    return _preview_execution(
+        cwd, task_id or request.binding["task_id"], actor, options, wall_seconds,
+        prior_run_id=prior_run_id)
+
+
+def _preview_execution(
+    cwd: Path, task_id: str, actor: str, options: RunOptions, wall_seconds: int,
+    *, prior_run_id: str | None = None,
 ) -> dict[str, Any]:
     from anvil.cli._helpers import _open_backend, _require_state_dir, _resolve_state_dir
     from anvil.execution_runner import require_linux_capture
@@ -938,11 +1326,10 @@ def preview_run(
             # lookup above deliberately preserves the exact supplied spelling.
             actor = canonicalize_new_actor(actor)
         source = clean_source(cwd)
-        if not claims:
-            require_planned_source(cwd, task, source, state)
         created = now()
         value = {
             "version": 1,
+            "operation": "continue" if prior_run_id is not None else "run",
             "preview_id": uuid.uuid4().hex,
             "task_id": task_id,
             "project_id": scope["project_id"],
@@ -959,6 +1346,17 @@ def preview_run(
             "created_at": timestamp(created),
             "expires_at": timestamp(created + timedelta(seconds=300)),
         }
+        if prior_run_id is not None:
+            continuation, material, _ = continuation_material(backend, value, prior_run_id)
+            value.update(continuation=continuation, continuation_material=material)
+            if not claims and task_id == material["prior_task_id"]:
+                if not material["prior_branch"]:
+                    raise ExecutionError(
+                        "continuation_lineage", "Prior claim has no retained branch"
+                    )
+                value["claim_branch"] = material["prior_branch"]
+        if not claims:
+            require_planned_source(cwd, task, source, state, branch=value.get("claim_branch"))
         assignment, preimages = preflight_assignment(value)
         revalidate_admission(backend, value, state)
         value.update(assignment=assignment, preimages=preimages)
@@ -970,17 +1368,36 @@ def preview_run(
 
 
 def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[str, Any]:
+    return _confirm_execution(cwd, task_id, actor, preview_id)
+
+
+def confirm_continue(
+    cwd: Path, prior_run_id: str, actor: str, preview_id: str
+) -> dict[str, Any]:
+    identifier(prior_run_id)
+    preview = read_execution_preview(journal_root(cwd), preview_id)
+    continuation = preview.get("continuation")
+    if not isinstance(continuation, dict) or continuation.get("prior_run_id") != prior_run_id:
+        raise ExecutionError("preview_mismatch", "Preview belongs to another prior Run")
+    return _confirm_execution(
+        cwd, preview["task_id"], actor, preview_id, operation="continue")
+
+
+def _confirm_execution(
+    cwd: Path, task_id: str, actor: str, preview_id: str, *, operation: str = "run"
+) -> dict[str, Any]:
     from anvil.cli._helpers import _open_backend
     from anvil.execution_runner import require_linux_capture
 
     require_linux_capture()
     require_isolated_state_layout()
     root = journal_root(cwd)
-    preview = read_receipt(root / "previews" / (identifier(preview_id) + ".json"))
+    preview = read_execution_preview(root, preview_id)
     if preview["claim"] is None:
         actor = canonicalize_new_actor(actor)
     if (
         preview["task_id"] != task_id
+        or preview.get("operation", "run") != operation
         or preview["actor"] != actor
         or preview["cwd"] != str(cwd.resolve())
     ):
@@ -1023,6 +1440,7 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
             "--actor",
             actor,
             "--worktree",
+            *(["--branch", preview["claim_branch"]] if preview.get("claim_branch") else []),
             "--execution-scope",
             preview["scope_sha256"],
             "--execution-source",
@@ -1050,6 +1468,7 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
     backend = _open_backend(root.parent, project_root=cwd)
     try:
         live_claim(backend, request, remaining=preview["wall_seconds"] + 180)
+        revalidate_continuation(backend, request)
         clean_source(cwd, preview["source_sha"])
     finally:
         backend.close()
@@ -1157,6 +1576,98 @@ def inspect_run(cwd: Path, run_id: str) -> dict[str, Any]:
         result.update(read_receipt(directory / "result.json"))
     elif (directory / "started.json").exists():
         result["state"] = "running_or_interrupted"
+    result["continuation"] = {"state": "unavailable", "reason": "No verified saved return"}
+    if (directory / "adapter-result.json").exists():
+        try:
+            request = ExecutionRequest.from_data(read_receipt(directory / "request.json"))
+            returned = AdapterResult.from_data(
+                read_receipt(directory / "adapter-result.json"), request)
+            saved = returned.saved_conversation
+            if (saved is not None and result["state"] in {"needs_review", "failed_stopped"}
+                    and result.get("local_children_stopped") is True):
+                result["continuation"] = {
+                    "state": "requires_preview", "prior_run_id": run_id,
+                    "conversation_id": saved["conversation_id"],
+                    "official_session_id": saved["official_session_id"],
+                    "reason": "Fresh native authority, source and checkpoint checks required",
+                }
+            if request.continuation is not None:
+                result["prior_run_id"] = request.continuation["prior_run_id"]
+        except (ExecutionError, OSError, ValueError, TypeError, KeyError):
+            result["continuation"] = {"state": "unknown", "reason": "Incomplete saved return"}
+    return result
+
+
+def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[str, Any]:
+    """Read one exact route after a lost response; inspection never dispatches."""
+    from anvil.cli._helpers import _open_backend
+
+    root = journal_root(cwd)
+    preview = read_execution_preview(root, preview_id)
+    if preview.get("claim") is None:
+        actor = canonicalize_new_actor(actor)
+    if preview.get("actor") != actor or preview.get("cwd") != str(cwd.resolve()):
+        raise ExecutionError("preview_mismatch", "Preview belongs to another actor or checkout")
+    backend = _open_backend(root.parent, project_root=cwd)
+    try:
+        if backend.get_project().id != preview.get("project_id"):
+            raise ExecutionError("preview_mismatch", "Preview belongs to another project")
+    finally:
+        backend.close()
+    operation = preview.get("operation", "run")
+    prior = preview.get("continuation")
+    result = {"preview_id": preview_id, "state": "unconsumed", "run_id": None,
+              "operation": operation, "task_id": preview["task_id"],
+              "prior_run_id": prior["prior_run_id"] if prior else None}
+    consumed_path = root / "consumed" / (preview_id + ".json")
+    if consumed_path.exists():
+        result["state"] = "unknown"
+        try:
+            consumed = read_receipt(consumed_path)
+            run_id = identifier(consumed["run_id"])
+            directory = root / "runs" / run_id
+            admission = read_receipt(directory / "admission.json")
+            dispatch = strict_object(read_receipt(directory / "dispatch.json"), {
+                "run_id", "at", "request_sha256", "request_file_sha256", "context_sha256",
+            })
+            request_raw = execution_file_bytes(directory / "request.json")
+            context_raw = execution_file_bytes(directory / "context.json")
+            request = ExecutionRequest.from_data(json.loads(request_raw))
+            context = json.loads(context_raw)
+            claim = Claim.model_validate(context["claim"])
+            packet_sha256 = digest(execution_file_bytes(directory / "packet.txt"))
+            if (set(consumed) != {"run_id"} or admission != preview
+                    or dispatch.get("run_id") != run_id
+                    or digest(request_raw) != dispatch.get("request_file_sha256")
+                    or digest(context_raw) != dispatch.get("context_sha256")
+                    or dispatch.get("request_sha256") != request.request_sha256
+                    or context != {**preview, "run_id": run_id, "cwd": claim.worktree_path,
+                                   "claim": context["claim"], "packet_sha256": packet_sha256}
+                    or preview["claim"] is not None and context["claim"] != preview["claim"]
+                    or request.dispatch_id != run_id or request.operation != operation
+                    or request.continuation != prior or request.packet_sha256 != packet_sha256
+                    or request.binding != claim_binding(preview["project_id"], claim)
+                    or claim.task_id != preview["task_id"] or claim.claimed_by != preview["actor"]
+                    or request.source["claim_worktree"] != context["cwd"]
+                    or request.source["commit"] != preview["source_sha"]
+                    or request.requested_options != preview["options"]):
+                raise ExecutionError("preview_mismatch", "Consumed preview route is incomplete")
+            result.update(state="consumed", run_id=run_id)
+        except (ExecutionError, OSError, ValueError, TypeError, KeyError):
+            pass
+    else:
+        slot = root / "slots" / (digest(preview["task_id"].encode()) + ".json")
+        if slot.exists():
+            try:
+                reserved = strict_object(read_receipt(slot), {"run_id", "task_id", "preview_id"})
+                identifier(reserved["run_id"])
+                reserved_preview_id = identifier(reserved["preview_id"])
+                if reserved["task_id"] != preview["task_id"]:
+                    raise ExecutionError("preview_mismatch", "Slot belongs to another task")
+                if reserved_preview_id == preview_id:
+                    result["state"] = "unknown"
+            except (ExecutionError, OSError, ValueError, TypeError, KeyError):
+                result["state"] = "unknown"
     return result
 
 
@@ -1238,12 +1749,24 @@ def read_execution_capabilities(cwd: Path) -> dict[str, Any]:
     return {**value, "status": "fresh"}
 
 
-def refresh_execution_capabilities(cwd: Path) -> dict[str, Any]:
+def refresh_execution_capabilities(
+    cwd: Path, provider: str | None = None, model: str | None = None,
+    expected_registration_sha256: str | None = None,
+) -> dict[str, Any]:
     """An explicit bounded metadata action; Default Run never calls this."""
     from anvil.execution_runner import require_linux_capture
 
     require_linux_capture()
     registration = load_execution_adapter()
+    if expected_registration_sha256 is not None:
+        fingerprint(expected_registration_sha256)
+        if digest(json_bytes(dataclasses.asdict(registration))) != expected_registration_sha256:
+            raise ExecutionError("adapter_changed", "Metadata registration changed after preview")
+    selected = RunOptions(provider=provider, model=model).data()
+    if selected and not registration.registration["capabilities"]["saved_session_continue"]:
+        raise ExecutionError(
+            "unsupported_metadata", "Upgrade registration for selected-model metadata"
+        )
     validate_adapter_contract(registration, cwd)
     root = journal_root(cwd)
     # A local unresolved Run must be reconciled, never adopted for metadata.
@@ -1285,6 +1808,7 @@ def refresh_execution_capabilities(cwd: Path) -> dict[str, Any]:
         "task_id": task_id,
         "operation": "capabilities",
         "adapter": dataclasses.asdict(registration),
+        "selected_model": selected or None,
     }
     write_receipt(directory / "admission.json", request)
     write_receipt(directory / "request.json", request)
