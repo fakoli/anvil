@@ -43,7 +43,9 @@ def _request(server, path, payload=None, *, token=None, headers=None):
         connection.request("GET" if payload is None else "POST", path,
                            None if payload is None else json.dumps(payload), request_headers)
         response = connection.getresponse()
-        return response.status, json.loads(response.read())
+        raw = response.read()
+        data = json.loads(raw) if response.getheader("Content-Type") == "application/json" else raw
+        return response.status, data
     finally:
         connection.close()
 
