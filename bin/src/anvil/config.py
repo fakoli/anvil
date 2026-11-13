@@ -14,7 +14,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, overload
 
 import yaml
 
@@ -22,6 +22,279 @@ from anvil.jev import JevConfig
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class ExecutionAdapter:
+    """Private owner wrapper around the exact portable adapter registration."""
+
+    registration: dict[str, object]
+    interpreter_sha256: str
+
+    def __post_init__(self) -> None:
+        import re
+
+        value = self.registration
+        fields = {
+            "schema",
+            "adapter_id",
+            "contract_version",
+            "interpreter",
+            "script",
+            "version",
+            "code_sha256",
+            "profile",
+            "profile_sha256",
+            "capabilities",
+        }
+        if type(value) is not dict or set(value) != fields:
+            raise ValueError("Invalid portable execution registration fields")
+        if (
+            value["schema"] != "anvil.execution-adapter.v1"
+            or value["adapter_id"] != "codex-pi-coordination"
+            or type(value["contract_version"]) is not int
+            or value["contract_version"] != 2
+        ):
+            raise ValueError("Unsupported portable execution registration")
+        for name in ("interpreter", "script", "profile"):
+            if (
+                type(value[name]) is not str
+                or not 1 <= len(value[name]) <= 4096
+                or not Path(value[name]).is_absolute()
+                or "\0" in value[name]
+            ):
+                raise ValueError("Registered execution paths must be bounded absolute paths")
+        if type(value["version"]) is not str or not 1 <= len(value["version"]) <= 64:
+            raise ValueError("Missing installed adapter package version")
+        code = value["code_sha256"]
+        if type(code) is not dict or set(code) != {"script", "extension"}:
+            raise ValueError("Invalid adapter code digests")
+        for fingerprint in (*code.values(), value["profile_sha256"], self.interpreter_sha256):
+            if type(fingerprint) is not str or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+                raise ValueError("Invalid execution input digest")
+        capabilities = value["capabilities"]
+        if (
+            type(capabilities) is not dict
+            or set(capabilities) != {"run", "saved_session_continue"}
+            or capabilities["run"] is not True
+            or capabilities["saved_session_continue"] is not False
+        ):
+            raise ValueError("Unsupported adapter capabilities")
+
+    @property
+    def interpreter(self) -> str:
+        return self.registration["interpreter"]
+
+    @property
+    def script(self) -> str:
+        return self.registration["script"]
+
+    @property
+    def profile(self) -> str:
+        return self.registration["profile"]
+
+    @property
+    def extension(self) -> str:
+        return str(Path(self.script).parent.parent / "extensions" / "coordination.js")
+
+    @property
+    def hashes(self) -> dict[str, str]:
+        return {
+            **self.registration["code_sha256"],
+            "profile": self.registration["profile_sha256"],
+            "interpreter": self.interpreter_sha256,
+        }
+
+
+def register_execution_adapter(script: Path, interpreter: Path, profile: Path) -> ExecutionAdapter:
+    """Derive portable identity from installed bytes; never accept caller version claims."""
+    import hashlib
+    import json
+
+    paths = {
+        "script": script.absolute(),
+        "interpreter": interpreter.resolve(strict=True),
+        "profile": profile.absolute(),
+        "extension": script.absolute().parent.parent / "extensions" / "coordination.js",
+    }
+    hashes = {
+        name: hashlib.sha256(execution_file_bytes(path)).hexdigest() for name, path in paths.items()
+    }
+    package = json.loads(
+        execution_file_bytes(script.absolute().parent.parent / "package.json", 65536)
+    )
+    if type(package) is not dict or package.get("name") != "codex-pi-coordination":
+        raise ValueError("Expected the installed coordination package identity")
+    return ExecutionAdapter(
+        {
+            "schema": "anvil.execution-adapter.v1",
+            "adapter_id": "codex-pi-coordination",
+            "contract_version": 2,
+            "interpreter": str(paths["interpreter"]),
+            "script": str(paths["script"]),
+            "version": package.get("version"),
+            "code_sha256": {name: hashes[name] for name in ("script", "extension")},
+            "profile": str(paths["profile"]),
+            "profile_sha256": hashes["profile"],
+            "capabilities": {"run": True, "saved_session_continue": False},
+        },
+        hashes["interpreter"],
+    )
+
+
+@overload
+def execution_file_bytes(
+    path: Path, maximum: int = 128 * 1024 * 1024, *, missing_ok: Literal[False] = False
+) -> bytes: ...
+
+
+@overload
+def execution_file_bytes(
+    path: Path, maximum: int = 128 * 1024 * 1024, *, missing_ok: Literal[True]
+) -> bytes | None: ...
+
+
+def execution_file_bytes(
+    path: Path, maximum: int = 128 * 1024 * 1024, *, missing_ok: bool = False
+) -> bytes | None:
+    """Read bounded registered bytes through protected, no-follow ancestry.
+
+    POSIX trust is root/current effective UID, not group membership. A protected
+    private directory can shield writable installed files; a deeper private
+    directory cannot repair an already replaceable ancestor. Missing paths grant
+    no sticky-directory exception. This does not attest privileged/same-UID writers.
+    """
+    import os
+    import stat
+    from contextlib import ExitStack
+
+    path = path.absolute()
+    if ".." in path.parts or maximum < 0:
+        raise ValueError("Invalid execution registration path or byte limit")
+    private_ancestor = False
+    parent_metadata = None
+    descriptor = None
+    current = Path(path.anchor)
+    with ExitStack() as stack:
+        for index, component in enumerate((path.anchor, *path.parts[1:])):
+            if index:
+                current /= component
+            directory = index < len(path.parts) - 1
+            try:
+                if os.name == "nt":
+                    # Reuse the native reparse-point-safe open; actual execution
+                    # remains Linux-only, without a Windows ACL trust claim.
+                    from anvil.verification_profiles import _windows_open
+
+                    current.lstat()  # Preserve FileNotFoundError for missing_ok.
+                    descriptor = _windows_open(current, directory=directory)
+                else:
+                    flags = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                    flags |= (
+                        getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
+                        if directory else os.O_RDONLY | os.O_NONBLOCK
+                    )
+                    descriptor = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if missing_ok:
+                    if (
+                        os.name == "posix" and not private_ancestor
+                        and parent_metadata is not None and parent_metadata.st_mode & 0o022
+                    ):
+                        raise ValueError("Missing execution input has an unsafe parent") from None
+                    return None
+                raise
+            stack.callback(os.close, descriptor)
+            metadata = os.fstat(descriptor)
+            path_metadata = current.lstat()
+            if (
+                stat.S_ISLNK(path_metadata.st_mode)
+                or getattr(path_metadata, "st_file_attributes", 0) & 0x400
+                or not os.path.samestat(metadata, path_metadata)
+                or not (
+                    stat.S_ISDIR(metadata.st_mode) if directory
+                    else stat.S_ISREG(metadata.st_mode)
+                )
+            ):
+                raise ValueError("Execution input must have regular, non-symlink ancestry")
+            if os.name == "posix":
+                if metadata.st_uid not in {0, os.geteuid()}:
+                    raise ValueError("Execution input has an untrusted owner")
+                if not private_ancestor:
+                    # Sticky protects an existing trusted-owned child's entry,
+                    # never its writable contents or a yet-to-be-created name.
+                    parent = parent_metadata if parent_metadata is not None else metadata
+                    if parent.st_mode & 0o022 and not parent.st_mode & stat.S_ISVTX:
+                        raise ValueError("Execution input has a replaceable ancestor")
+                if directory:
+                    private_ancestor |= metadata.st_mode & 0o077 == 0
+                elif metadata.st_mode & 0o022 and (
+                    not private_ancestor or metadata.st_nlink != 1
+                ):
+                    raise ValueError("Execution input is writable through an unprotected path")
+            parent_metadata = metadata
+        assert descriptor is not None
+        if metadata.st_size > maximum:
+            raise ValueError("Execution input exceeds its byte limit")
+        chunks = []
+        size = 0
+        while chunk := os.read(descriptor, min(65536, maximum + 1 - size)):
+            size += len(chunk)
+            if size > maximum:
+                raise ValueError("Execution input exceeds its byte limit")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        attributes = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                      "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            any(getattr(metadata, name) != getattr(after, name) for name in attributes)
+            or size != after.st_size
+            or not os.path.samestat(after, path.lstat())
+        ):
+            raise ValueError("Execution input changed while reading")
+        return b"".join(chunks)
+
+
+def execution_config_mapping(raw: bytes) -> dict[str, object]:
+    """Parse owner configuration without exposing private YAML in an error."""
+    try:
+        value = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        raise ValueError("Global execution configuration contains invalid YAML") from None
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Global execution configuration must be a mapping")
+    return value
+
+
+def load_execution_adapter() -> ExecutionAdapter:
+    """Only the global owner file may authorize adapter code or a profile."""
+    import hashlib
+
+    path = global_config_path()
+    raw = execution_file_bytes(path, 1024 * 1024, missing_ok=True)
+    if raw is None:
+        raise ValueError("Run is not configured; use anvil run-configure")
+    value = execution_config_mapping(raw)
+    registration = value.get("execution_adapter")
+    if type(registration) is not dict or set(registration) != {
+        "registration",
+        "interpreter_sha256",
+    }:
+        raise ValueError("Missing or invalid global execution_adapter registration")
+    adapter = ExecutionAdapter(**registration)
+    for name, fingerprint in adapter.hashes.items():
+        actual_digest = hashlib.sha256(
+            execution_file_bytes(Path(getattr(adapter, name)))
+        ).hexdigest()
+        if actual_digest != fingerprint:
+            raise ValueError("Registered execution input changed; review registration")
+    installed = register_execution_adapter(
+        Path(adapter.script), Path(adapter.interpreter), Path(adapter.profile)
+    )
+    if installed != adapter:
+        raise ValueError("Installed execution package identity changed")
+    return adapter
 # v1.21.0 — complexity score at/above which a task is queued for sub-task
 # expansion. Single source of truth: the Config dataclass default, the
 # scoring engine's expansion-queue builder, and every CLI/MCP call site that

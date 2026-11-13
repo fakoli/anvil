@@ -83,7 +83,9 @@ _COMMAND = "describe"
 # Bumped to "19" for advisory preflight/attempt reads and timing ingestion.
 # Bumped to "22" for guarded task-action, web writes and typed task closure.
 # Bumped to "24" for guarded bundle withdrawal on the combined schema-26 engine.
-API_VERSION = "24"
+# Bumped to "25" for native harness Run, configuration, capability and status
+# commands, including the explicit unsupported-Continue boundary.
+API_VERSION = "25"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -283,14 +285,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "24",
-          "engine_version": "0.6.23",
-          "display_version": "0.6.23",
+          "api_version": "25",
+          "engine_version": "0.6.24",
+          "display_version": "0.6.24",
           "schema_version": 26,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.23",
+          "tag": "v0.6.24",
           "tag_distance": 0,
           "dirty": false,
           "cli": {
@@ -300,8 +302,8 @@ def build_manifest() -> dict[str, Any]:
               {"path": [], "kind": "group", "flags": ["--version"]},
               ...
             ],
-            "contract_count": 90,
-            "count": 79
+            "contract_count": 112,
+            "count": 99
           },
           "mcp": {"tools": ["claim_task", ...], "count": 39},
           "operation_catalog": {

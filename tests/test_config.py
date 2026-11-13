@@ -1206,3 +1206,269 @@ class TestGlobalConfigLeasePrecedence:
         from anvil.cli._helpers import _lease_manager_kwargs
 
         assert _lease_manager_kwargs(None, lease_override=None) == {}
+
+
+def test_execution_registration_ignores_project_config(tmp_path, monkeypatch):
+    """Project settings cannot turn source-controlled data into trusted argv."""
+    import yaml
+
+    from anvil.config import load_execution_adapter
+
+    global_path = tmp_path / "global.yaml"
+    global_path.write_text("project_name: owner\nproject_id: owner\n")
+    global_path.chmod(0o600)
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "execution_adapter": {"script": "/attacker/chosen.py"},
+    }))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="global execution_adapter"):
+        load_execution_adapter()
+
+
+def test_execution_registration_hash_drift_refuses(tmp_path, monkeypatch):
+    import dataclasses
+
+    import yaml
+
+    from anvil.config import load_execution_adapter, register_execution_adapter
+
+    script = tmp_path / "scripts" / "coordinate.py"
+    extension = tmp_path / "extensions" / "coordination.js"
+    profile = tmp_path / "profile.json"
+    package = tmp_path / "package.json"
+    for path in (script, extension, profile, package):
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("{}")
+        path.chmod(0o600)
+    package.write_text('{"name":"codex-pi-coordination","version":"0.2.0"}')
+    registration = register_execution_adapter(script, script, profile)
+    config = tmp_path / "global.yaml"
+    config.write_text(yaml.safe_dump({"execution_adapter": dataclasses.asdict(registration)}))
+    config.chmod(0o600)
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(config))
+    assert load_execution_adapter().registration["contract_version"] == 2
+    script.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="input changed"):
+        load_execution_adapter()
+
+
+@pytest.fixture
+def execution_permission_root():
+    """Use reachable disposable ancestry; pytest's private temp root masks exposure."""
+    import os
+    import tempfile
+
+    if os.name != "posix":
+        pytest.skip("POSIX owner and directory permission policy")
+    with tempfile.TemporaryDirectory(prefix="anvil-registration-", dir=Path("/tmp").resolve()) as raw:
+        root = Path(raw)
+        root.chmod(0o755)
+        yield root
+
+
+@pytest.mark.parametrize(
+    "ancestor_mode, parent_mode, file_mode, accepted",
+    [
+        (0o700, 0o775, 0o664, True),
+        (0o700, 0o775, 0o775, True),
+        (0o755, 0o755, 0o644, True),
+        (0o755, 0o755, 0o755, True),
+        (0o755, 0o777, 0o644, False),
+        (0o777, 0o700, 0o644, False),
+        (0o775, 0o700, 0o644, False),
+        (0o1777, 0o700, 0o664, True),
+        (0o1777, 0o755, 0o664, False),
+        (0o1777, 0o777, 0o644, False),
+        (0o750, 0o755, 0o664, False),
+        (0o701, 0o755, 0o664, False),
+    ],
+)
+def test_execution_file_ancestry_permissions(
+    execution_permission_root, ancestor_mode, parent_mode, file_mode, accepted
+):
+    from anvil.config import execution_file_bytes
+
+    ancestor = execution_permission_root / "ancestor"
+    parent = ancestor / "parent"
+    parent.mkdir(parents=True)
+    ancestor.chmod(ancestor_mode)
+    parent.chmod(parent_mode)
+    path = parent / "input"
+    path.write_bytes(b"trusted bytes")
+    path.chmod(file_mode)
+    if accepted:
+        assert execution_file_bytes(path) == b"trusted bytes"
+    else:
+        with pytest.raises(ValueError):
+            execution_file_bytes(path)
+    assert ancestor.stat().st_mode & 0o7777 == ancestor_mode
+    assert parent.stat().st_mode & 0o7777 == parent_mode
+    assert path.stat().st_mode & 0o7777 == file_mode
+
+
+def test_execution_file_private_writable_hardlink_refuses(execution_permission_root):
+    import os
+
+    from anvil.config import execution_file_bytes
+
+    private = execution_permission_root / "private"
+    private.mkdir(mode=0o700)
+    path = private / "input"
+    path.write_bytes(b"externally writable alias")
+    path.chmod(0o664)
+    os.link(path, execution_permission_root / "outside")
+    with pytest.raises(ValueError):
+        execution_file_bytes(path)
+
+
+@pytest.mark.parametrize("kind", ["leaf_link", "ancestor_link", "parent_reference", "directory", "fifo"])
+def test_execution_file_alias_and_type_refusal(execution_permission_root, kind):
+    import os
+
+    from anvil.config import execution_file_bytes
+
+    private = execution_permission_root / "private"
+    private.mkdir(mode=0o700)
+    target = private / "input"
+    target.write_bytes(b"bounded")
+    target.chmod(0o600)
+    candidate = execution_permission_root / "candidate"
+    if kind == "leaf_link":
+        candidate.symlink_to(target)
+    elif kind == "ancestor_link":
+        candidate.symlink_to(private, target_is_directory=True)
+        candidate /= "input"
+    elif kind == "parent_reference":
+        candidate = private / ".." / "private" / "input"
+    elif kind == "directory":
+        candidate.mkdir()
+    else:
+        os.mkfifo(candidate)
+    with pytest.raises((ValueError, OSError)):
+        execution_file_bytes(candidate)
+
+
+@pytest.mark.parametrize("parent_mode, accepted", [(0o700, True), (0o755, True), (0o777, False), (0o1777, False)])
+def test_execution_file_missing_prefix_custody(execution_permission_root, parent_mode, accepted):
+    from anvil.config import execution_file_bytes
+
+    parent = execution_permission_root / "parent"
+    parent.mkdir()
+    parent.chmod(parent_mode)
+    target = parent / "missing" / "config.yaml"
+    if accepted:
+        assert execution_file_bytes(target, missing_ok=True) is None
+    else:
+        with pytest.raises(ValueError):
+            execution_file_bytes(target, missing_ok=True)
+    assert not (parent / "missing").exists()
+
+
+@pytest.mark.parametrize("foreign_component", ["parent", "leaf"])
+def test_execution_file_foreign_owner_refuses(execution_permission_root, monkeypatch, foreign_component):
+    import os
+
+    from anvil.config import execution_file_bytes
+
+    parent = execution_permission_root / "private"
+    parent.mkdir(mode=0o700)
+    path = parent / "input"
+    path.write_bytes(b"trusted bytes")
+    path.chmod(0o600)
+    target = (parent if foreign_component == "parent" else path).stat()
+    original = os.fstat
+
+    def foreign_metadata(descriptor):
+        metadata = original(descriptor)
+        if os.path.samestat(metadata, target):
+            fields = list(metadata)
+            fields[4] = max(0, os.geteuid()) + 10000
+            return os.stat_result(fields)
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", foreign_metadata)
+    with pytest.raises(ValueError, match="untrusted owner"):
+        execution_file_bytes(path)
+
+
+def test_execution_file_bounded_bytes(execution_permission_root):
+    from anvil.config import execution_file_bytes
+
+    path = execution_permission_root / "input"
+    path.write_bytes(b"12345678")
+    path.chmod(0o600)
+    assert execution_file_bytes(path, 8) == b"12345678"
+    with pytest.raises(ValueError, match="byte limit"):
+        execution_file_bytes(path, 7)
+
+
+@pytest.mark.parametrize("change", ["grow", "replace", "permissions"])
+def test_execution_file_changes_during_read_refuse(execution_permission_root, monkeypatch, change):
+    import os
+
+    from anvil.config import execution_file_bytes
+
+    path = execution_permission_root / "input"
+    path.write_bytes(b"1234")
+    path.chmod(0o600)
+    original = os.read
+    changed = False
+
+    def read_then_change(descriptor, size):
+        nonlocal changed
+        raw = original(descriptor, size)
+        if raw and not changed:
+            changed = True
+            if change == "grow":
+                with path.open("ab") as stream:
+                    stream.write(b"extra bytes beyond limit")
+            elif change == "replace":
+                replacement = path.with_name("replacement")
+                replacement.write_bytes(b"1234")
+                replacement.chmod(0o600)
+                replacement.replace(path)
+            else:
+                path.chmod(0o666)
+        return raw
+
+    monkeypatch.setattr(os, "read", read_then_change)
+    with pytest.raises(ValueError, match="byte limit|changed while reading"):
+        execution_file_bytes(path, 8)
+
+
+def test_execution_registration_private_install_and_custody_drift(execution_permission_root, monkeypatch):
+    import dataclasses
+
+    from anvil.config import load_execution_adapter, register_execution_adapter
+
+    private = execution_permission_root / "private"
+    private.mkdir(mode=0o700)
+    script = private / "cache" / "scripts" / "coordinate.py"
+    extension = private / "cache" / "extensions" / "coordination.js"
+    package = private / "cache" / "package.json"
+    profile = private / "profile.json"
+    interpreter = private / "python"
+    for path in (script, extension, package, profile, interpreter):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{}")
+        path.chmod(0o664)
+    for path in (script.parent, extension.parent, package.parent):
+        path.chmod(0o775)
+    interpreter.chmod(0o775)
+    package.write_text('{"name":"codex-pi-coordination","version":"0.3.0"}')
+    interpreter_selector = private / "python-selector"
+    interpreter_selector.symlink_to(interpreter)
+    registration = register_execution_adapter(script, interpreter_selector, profile)
+    assert registration.interpreter == str(interpreter)
+    config = private / "config.yaml"
+    config.write_text(yaml.safe_dump({"execution_adapter": dataclasses.asdict(registration)}))
+    config.chmod(0o600)
+    config_selector = private / "config-selector.yaml"
+    config_selector.symlink_to(config)
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(config_selector))
+    assert global_config_path() == config
+    assert load_execution_adapter() == registration
+    private.chmod(0o755)
+    with pytest.raises(ValueError):
+        load_execution_adapter()

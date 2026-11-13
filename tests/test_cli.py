@@ -1491,7 +1491,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "24"
+        assert API_VERSION == "25"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -6146,6 +6146,8 @@ class TestClaimCommand:
         normalized = " ".join(result.output.split())
         assert "built-in 240" in normalized
         assert "built-in 60" not in normalized
+        assert "--execution-scope" not in normalized
+        assert "--execution-source" not in normalized
 
     def test_new_claim_refuses_canonical_source_drift_before_state_or_git(
         self, tmp_path: Path

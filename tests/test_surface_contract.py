@@ -27,12 +27,13 @@ def test_discovery_matches_registered_commands_and_both_wire_surfaces(tmp_path, 
     manifest = json.loads(result.output)["data"]
     contracts = _expected_cli_contracts()
     options = _expected_cli_command_options()
-    assert manifest["api_version"] == "24"
+    assert manifest["api_version"] == "25"
     assert manifest["cli"]["contracts"] == contracts
     assert manifest["cli"]["options"] == options
     assert manifest["cli"]["commands"] == sorted(options)
-    assert manifest["cli"]["count"] == len(options) == 94
-    assert manifest["cli"]["contract_count"] == len(contracts) == 107
+    assert manifest["cli"]["count"] == len(options) == 99
+    assert manifest["cli"]["contract_count"] == len(contracts) == 112
+    assert {"run", "run-configure", "run-status", "run-capabilities", "continue"} <= set(options)
     assert {"--attempt", "--bundle", "--observation-at", "--format"} <= set(options["packet"])
     assert {"--json", "--observation-at"} <= set(options["evidence-preflight"])
     assert "--timing-file" in options["progress"]

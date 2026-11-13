@@ -6,6 +6,38 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.24] - 2026-11-12
+
+### Added
+
+- Native `run-configure`, `run`, `run-status` and `run-capabilities` commands
+  support an initial harness execution journey: preview the task and options,
+  confirm an isolated claim, integrate verified edits, run the frozen checks
+  and submit native evidence to `needs_review` without automatic acceptance.
+- Linux execution captures retain bounded output and distinguish the command
+  from its owned supervisor. Detached descendants must be stopped and reaped
+  before command evidence or a safely stopped run can be reported.
+
+### Changed
+
+- Discovery API 25 identifies the five new CLI commands, including an explicit
+  unsupported `continue` command. The 0.6.24 release snapshot covers 99 commands
+  and 112 command/group contracts; the 0.6.23 snapshot remains unchanged.
+- Current provider fixtures and the Workbench discovery pin use API 25.
+  Provider operation versions, payloads, digests, JSON envelope and State
+  schema 26 are unchanged. Consumers pinned to an older discovery API must
+  qualify the new version before reading State.
+
+### Qualification limits
+
+- Actual Run requires Linux, shared workspace State and an explicitly
+  registered trusted adapter. Local in-repository State, saved-session
+  continuation and web execution controls are not supported by this slice.
+- Source checks do not establish an installed default-model journey, live
+  deployment, immutable approval or bulk final acceptance. Those delivery
+  gates remain separate. The 15 ms latency target and hundreds or thousands
+  of concurrent production container executions remain unqualified.
+
 ## [0.6.23] - 2026-11-12
 
 ### Added
