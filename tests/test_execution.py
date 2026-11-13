@@ -756,7 +756,8 @@ def test_capability_view_is_sanitized_scoped_and_expires(execution_project, monk
     assert not backend.list_active_claims()
 
 
-def test_capability_profile_change_and_busy_owner_are_closed(execution_project):
+@pytest.mark.parametrize("pending", [False, True])
+def test_capability_profile_change_and_busy_owner_are_closed(execution_project, pending):
     import anvil.execution as execution
     from anvil.config import global_config_path
 
@@ -778,9 +779,12 @@ def test_capability_profile_change_and_busy_owner_are_closed(execution_project):
     assert execution.read_execution_capabilities(repo)["status"] == "unknown"
     root = journal_root(repo)
     unknown_id = "a" * 32
-    execution.write_receipt(
-        root / "slots" / "held.json", {"run_id": unknown_id, "task_id": "release:T001"}
-    )
+    slot = root / "slots" / "held.json"
+    if pending:
+        execution.private_directory(slot.parent)
+        execution.pending_receipt_path(slot).touch(mode=0o600)
+    else:
+        execution.write_receipt(slot, {"run_id": unknown_id, "task_id": "release:T001"})
     with pytest.raises(ExecutionError, match="existing execution"):
         execution.refresh_execution_capabilities(repo)
     assert not (root / "runs").exists()

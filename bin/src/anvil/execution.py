@@ -1793,6 +1793,10 @@ def refresh_execution_capabilities(
     validate_adapter_contract(registration, cwd)
     root = journal_root(cwd)
     # A local unresolved Run must be reconciled, never adopted for metadata.
+    if any((root / "slots").glob(".*.pending")):
+        raise ExecutionError(
+            "adapter_busy", "An existing execution needs to stop or be reconciled"
+        )
     for slot in (root / "slots").glob("*.json"):
         previous = read_receipt(slot)
         directory = root / "runs" / identifier(previous["run_id"])
