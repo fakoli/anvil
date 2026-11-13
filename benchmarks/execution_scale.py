@@ -13,6 +13,7 @@ import json
 import math
 import multiprocessing
 import os
+import queue
 import re
 import selectors
 import shlex
@@ -78,6 +79,176 @@ def _summary(samples):
                 ("max_ms", 1),
             )
         },
+    }
+
+
+@contextlib.contextmanager
+def _paced_results(task_ids, submit, workers, arrival_rate, epoch, arrival):
+    """Offer independently of the sole consumer; slots include durable handling."""
+    completions = queue.Queue(maxsize=len(task_ids))
+    slots = threading.BoundedSemaphore(workers)
+    stop = threading.Event()
+    futures = []
+    records = arrival["records"] = [
+        {"task_id": task_id, "scheduled_offer_monotonic": epoch + index / arrival_rate,
+         "admission": "not_offered"}
+        for index, task_id in enumerate(task_ids)
+    ]
+
+    def produce():
+        next_index = 0
+        try:
+            for index, record in enumerate(records):
+                delay = max(0, record["scheduled_offer_monotonic"] - time.perf_counter())
+                if stop.wait(delay):
+                    break
+                record["offered_monotonic"] = time.perf_counter()
+                if not slots.acquire(blocking=False):
+                    record["admission"] = "capacity_refused"
+                    completions.put_nowait((None, record))
+                    next_index = index + 1
+                    continue
+                record["reserved_monotonic"] = time.perf_counter()
+                record["submitted_monotonic"] = time.perf_counter()
+                try:
+                    future = submit(record["task_id"], record["offered_monotonic"])
+                except BaseException as error:
+                    record.update(admission="submission_failed", error=repr(error))
+                    completions.put_nowait((None, record))
+                    next_index = index + 1
+                    raise
+                record["admission"] = "admitted"
+                futures.append(future)
+                future.add_done_callback(
+                    lambda completed, record=record: completions.put_nowait((completed, record))
+                )
+                next_index = index + 1
+        except BaseException as error:
+            arrival["producer_error"] = repr(error)
+            stop.set()
+        finally:
+            for record in records[next_index:]:
+                if "offered_monotonic" in record:
+                    record["admission"] = "producer_failed"
+                record["error"] = arrival.get(
+                    "producer_error", "Producer stopped before this scheduled offer")
+                completions.put_nowait((None, record))
+            arrival["producer_finished_monotonic"] = time.perf_counter()
+
+    def results():
+        for _ in task_ids:
+            future, record = completions.get()
+            try:
+                yield future, record
+            finally:
+                # The caller has finished native append/failure and timing retention.
+                record["terminal_monotonic"] = time.perf_counter()
+                if "reserved_monotonic" in record:
+                    slots.release()
+
+    producer = threading.Thread(target=produce, name="scale-arrival-producer", daemon=False)
+    iterator = results()
+    producer.start()
+    try:
+        yield iterator
+    finally:
+        stop.set()
+        iterator.close()
+        producer.join(PROCESS_CLEANUP_ALLOWANCE_SECONDS)
+        arrival["producer_stopped"] = not producer.is_alive()
+        if producer.is_alive():
+            raise ValueError("Arrival producer stop is unknown")
+        for future in futures:
+            future.cancel()  # Running commands remain owned by the enclosing executor/supervisor.
+
+
+def _arrival_receipt(arrival, raw_timings):
+    """Reconstruct finite backlog from raw events, never from a timing percentile."""
+    records = arrival["records"]
+    epoch = arrival["epoch_monotonic"]
+    rows = {row["task_id"]: row for row in raw_timings}
+    if (not arrival["producer_stopped"] or len(rows) != len(records)
+            or len(raw_timings) != len(records)):
+        raise ValueError("Incomplete arrival accounting or unknown producer custody")
+    # Equal timestamps follow this causal order, then task ID for stable replay.
+    event_order = ("offered", "reserved", "started", "proof_ready", "ledger", "terminal")
+    events = []
+    for record in records:
+        row = rows[record["task_id"]]
+        for name, timestamp in (
+            ("offered", record.get("offered_monotonic")),
+            ("reserved", record.get("reserved_monotonic")),
+            ("started", row.get("started_monotonic")),
+            ("proof_ready", row.get("proof_ready_monotonic")),
+            ("ledger", row.get("append_returned_monotonic")),
+            ("terminal", record["terminal_monotonic"]),
+        ):
+            if timestamp is not None:
+                events.append((timestamp, event_order.index(name), record["task_id"], name))
+    events.sort()
+    terminal = max(record["terminal_monotonic"] for record in records)
+    duration = max(terminal, arrival["producer_finished_monotonic"]) - epoch
+    # The public supervisor's maximum deadline plus cleanup bounds this series.
+    if not 0 <= duration <= 3600 + PROCESS_CLEANUP_ALLOWANCE_SECONDS:
+        raise ValueError("Arrival receipt exceeds the supervised time bound")
+    by_task = {record["task_id"]: record for record in records}
+    counts = Counter()
+    in_flight, waiting, proof_ready = set(), set(), set()
+    peaks = {"in_flight": 0, "waiting_to_start": 0, "proof_ready": 0}
+    series = []
+    index = 0
+    for second in range(math.ceil(duration) + 1):
+        while index < len(events) and events[index][0] <= epoch + second:
+            _, _, task_id, event = events[index]
+            counts[event] += 1
+            if event == "reserved":
+                in_flight.add(task_id)
+                waiting.add(task_id)
+            elif event == "started":
+                waiting.discard(task_id)
+            elif event == "proof_ready":
+                proof_ready.add(task_id)
+            elif event == "ledger":
+                proof_ready.discard(task_id)
+            elif event == "terminal":
+                in_flight.discard(task_id)
+                waiting.discard(task_id)
+                proof_ready.discard(task_id)
+                counts["failed"] += by_task[task_id]["terminal_outcome"] != "submitted"
+            for name, values in (("in_flight", in_flight), ("waiting_to_start", waiting),
+                                 ("proof_ready", proof_ready)):
+                peaks[name] = max(peaks[name], len(values))
+            index += 1
+        series.append({"second": second, **{name: counts[name] for name in
+                       ("offered", "started", "proof_ready", "ledger", "terminal", "failed")},
+                       "in_flight": len(in_flight), "waiting_to_start": len(waiting),
+                       "proof_ready_backlog": len(proof_ready)})
+    offers = [record["offered_monotonic"] for record in records if "offered_monotonic" in record]
+    gaps = [later - earlier for earlier, later in zip(offers, offers[1:], strict=False)]
+    admissions = Counter(record["admission"] for record in records)
+    return {
+        **arrival,
+        "event_tie_order": list(event_order),
+        "scheduled": len(records), "actual_offered": len(offers),
+        **{name: admissions[name] for name in
+           ("admitted", "capacity_refused", "submission_failed", "producer_failed", "not_offered")},
+        "handled": counts["terminal"], "failed": counts["failed"],
+        "lateness_seconds": [record["offered_monotonic"] - record["scheduled_offer_monotonic"]
+                             for record in records if "offered_monotonic" in record],
+        "inter_offer_seconds": gaps,
+        "observed_offers_per_second": ((len(offers) - 1) / (offers[-1] - offers[0])
+                                       if len(offers) > 1 and offers[-1] > offers[0] else None),
+        "peak_backlog": peaks, "one_second_series": series,
+        "final_backlog": {"in_flight": len(in_flight), "waiting_to_start": len(waiting),
+                          "proof_ready": len(proof_ready)},
+        "final_terminal_monotonic": terminal,
+        "drain_seconds": max(0, terminal - arrival["producer_finished_monotonic"]),
+        "limits": [
+            "The accepted 15ms p95 objective concerns ledger operations; historical fixture "
+            "gates remain unchanged. proof_validation includes full preparation and retention.",
+            "Arrival, admission, preparation wait, queue, completion and drain have no numeric "
+            "workflow SLO. This finite host condition does not replace prior failed observations.",
+        ],
     }
 
 
@@ -672,6 +843,7 @@ def _check_options(
     durability="relaxed",
     events_storage="local",
     proof_preparation="coordinator",
+    arrival_rate=None,
 ):
     if not (
         1 <= tasks <= 2000
@@ -681,11 +853,12 @@ def _check_options(
         and durability in {"relaxed", "strict"}
         and events_storage in {"local", "git"}
         and proof_preparation in {"coordinator", "worker"}
+        and (arrival_rate is None or type(arrival_rate) is int and 1 <= arrival_rate <= 1000)
     ):
         raise ValueError(
             "tasks=1..2000, workers=1..min(tasks,128), cohort=1..12, timeout=1..30; "
             "durability=relaxed|strict, events_storage=local|git, "
-            "proof_preparation=coordinator|worker"
+            "proof_preparation=coordinator|worker, arrival_rate=1..1000 or omitted"
         )
 
 
@@ -700,11 +873,15 @@ def run(
     events_storage="local",
     prepare_executor=None,
     proof_preparation="coordinator",
+    arrival_rate=None,
 ):
     """Run only below a fresh directory; the CLI additionally enforces a wall deadline."""
     _check_options(tasks=tasks, workers=workers, cohort_size=cohort_size,
                    command_timeout=command_timeout, durability=durability,
-                   events_storage=events_storage, proof_preparation=proof_preparation)
+                   events_storage=events_storage, proof_preparation=proof_preparation,
+                   arrival_rate=arrival_rate)
+    if arrival_rate is not None and prepare_executor is not None:
+        raise ValueError("arrival_rate is supported only by the native host executor")
     _require_linux_containment()
     work.mkdir(parents=True, exist_ok=False)
     source_identity = _source_identity()
@@ -735,6 +912,7 @@ def run(
     completed = []
     intervals = []
     raw_timings = []
+    arrival = None
     began = time.perf_counter()
     backend = _open(project, durability, events_storage)
 
@@ -809,95 +987,121 @@ def run(
         claim_snapshots = {task_id: claim.model_dump_json() for task_id, claim in claims.items()}
         offered_at = time.perf_counter()
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    _execute_task, project, task_id, offered_at, command_timeout,
+            def submit(task_id, actual_offer):
+                return executor.submit(
+                    _execute_task, project, task_id, actual_offer, command_timeout,
                     command_for_task(task_id), task_snapshots[task_id], claim_snapshots[task_id],
                     budget, proof_preparation,
-                ): task_id for task_id in task_ids
-            }
-            for future in as_completed(futures):
-                task_id = futures[future]
-                row = {"task_id": task_id, "claim_id": claims[task_id].id,
-                       "claim_generation": claims[task_id].generation,
-                       "task_revision": claims[task_id].attestation_context.task_revision,
-                       "proof_preparation": proof_preparation,
-                       "offered_monotonic": offered_at, "outcome": "failed"}
-                execution = None
-                try:
-                    execution = future.result()
-                    execution["handled_monotonic"] = time.perf_counter()
-                    intervals.extend(
-                        [(execution["started_monotonic"], 1), (execution["ended_monotonic"], -1)]
-                    )
-                    for stage in ("queue", "command"):
-                        measurements[stage].append(execution[f"{stage}_seconds"])
-                    measurements["proof_queue"].append(
-                        execution["handled_monotonic"] - execution["ended_monotonic"]
-                    )
-                    if proof_preparation == "coordinator" and execution["error"] is None:
-                        _prepare_proof(project, task_snapshots[task_id], claim_snapshots[task_id],
-                                       execution, budget)
-                    if execution["error"] is not None:
-                        raise ValueError(execution["error"])
-                    if budget.exhausted:
-                        raise ValueError("Retained fixture storage budget exhausted")
-                    task = Task.model_validate_json(task_snapshots[task_id])
-                    execution["writer_started_monotonic"] = time.perf_counter()
-                    timed(
-                        "evidence_append", _append, backend, "evidence.submitted", "task", task_id,
-                        {"task_id": task_id, "claim_id": claims[task_id].id,
-                         "submitted_by": ACTOR, "evidence_id": f"evidence-{task_id}",
-                         "commands_run": task.verification.commands, "files_changed": [],
-                         "proofs": [execution["proof"].model_dump(mode="json")]},
-                    )
-                    execution["append_returned_monotonic"] = time.perf_counter()
-                    completed.append(task_id)
-                    row["outcome"] = "submitted"
-                    for stage, earlier in (
-                        ("command_end_to_durable_evidence", "ended_monotonic"),
-                        ("offered_to_ledger", "offered_monotonic"),
-                    ):
-                        measurements[stage].append(execution["append_returned_monotonic"]
-                                                   - execution[earlier])
-                except Exception as error:
-                    row["error"] = repr(error)
-                    failures.append({"task_id": task_id, "error": repr(error)})
-                finally:
-                    if execution is not None:
-                        for stage, start, end in (
-                            ("proof_validation", "proof_started_monotonic",
-                             "proof_finished_monotonic"),
-                            ("proof_preparation_wait", "ended_monotonic",
-                             "proof_started_monotonic"),
-                            ("proof_ready_to_writer", "proof_ready_monotonic",
-                             "writer_started_monotonic"),
+                )
+
+            if arrival_rate is None:
+                futures = {submit(task_id, offered_at): task_id for task_id in task_ids}
+                results = contextlib.nullcontext(
+                    (future, {"task_id": futures[future], "offered_monotonic": offered_at})
+                    for future in as_completed(futures)
+                )
+            else:
+                arrival = {"schema": "anvil.execution-arrivals.v1", "configured_rate": arrival_rate,
+                           "epoch_monotonic": offered_at, "in_flight_limit": workers}
+                results = _paced_results(
+                    task_ids, submit, workers, arrival_rate, offered_at, arrival)
+            with results as completed_results:
+                for future, arrival_record in completed_results:
+                    task_id = arrival_record["task_id"]
+                    row = {"task_id": task_id, "claim_id": claims[task_id].id,
+                           "claim_generation": claims[task_id].generation,
+                           "task_revision": claims[task_id].attestation_context.task_revision,
+                           "proof_preparation": proof_preparation,
+                           **arrival_record, "outcome": "failed"}
+                    execution = None
+                    try:
+                        if future is None:
+                            raise ValueError(arrival_record.get(
+                                "error", arrival_record["admission"]))
+                        execution = future.result()
+                        execution["handled_monotonic"] = time.perf_counter()
+                        intervals.extend(
+                            [(execution["started_monotonic"], 1),
+                             (execution["ended_monotonic"], -1)]
+                        )
+                        for stage in ("queue", "command"):
+                            measurements[stage].append(execution[f"{stage}_seconds"])
+                        measurements["proof_queue"].append(
+                            execution["handled_monotonic"] - execution["ended_monotonic"]
+                        )
+                        if proof_preparation == "coordinator" and execution["error"] is None:
+                            _prepare_proof(project, task_snapshots[task_id],
+                                           claim_snapshots[task_id], execution, budget)
+                        if execution["error"] is not None:
+                            raise ValueError(execution["error"])
+                        if budget.exhausted:
+                            raise ValueError("Retained fixture storage budget exhausted")
+                        task = Task.model_validate_json(task_snapshots[task_id])
+                        execution["writer_started_monotonic"] = time.perf_counter()
+                        timed(
+                            "evidence_append", _append, backend, "evidence.submitted",
+                            "task", task_id,
+                            {"task_id": task_id, "claim_id": claims[task_id].id,
+                             "submitted_by": ACTOR, "evidence_id": f"evidence-{task_id}",
+                             "commands_run": task.verification.commands, "files_changed": [],
+                             "proofs": [execution["proof"].model_dump(mode="json")]},
+                        )
+                        execution["append_returned_monotonic"] = time.perf_counter()
+                        completed.append(task_id)
+                        row["outcome"] = "submitted"
+                        for stage, earlier in (
+                            ("command_end_to_durable_evidence", "ended_monotonic"),
+                            ("offered_to_ledger", "offered_monotonic"),
                         ):
-                            if start in execution and end in execution:
-                                measurements[stage].append(execution[end] - execution[start])
-                        row.update({key: value for key, value in execution.items()
-                                    if key.endswith("_monotonic") or key in (
-                                        "started_at", "ended_at", "exit_code", "proof_sha256",
-                                        "command_pid", "command_reaped", "capture_protocol",
-                                        "command_supervisor_pid", "command_supervisor_exit_code",
-                                        "command_supervisor_reaped",
-                                        "command_containment_complete")})
-                        # Futures may remain until pool exit; retain artifacts, not duplicate bytes.
-                        execution.pop("output", None)
-                        execution.pop("proof", None)
-                    raw_timings.append(row)
-                    try:
-                        budget.write(captures / f"{task_id}.timing.json",
-                                     json.dumps(row, sort_keys=True).encode())
+                            measurements[stage].append(execution["append_returned_monotonic"]
+                                                       - execution[earlier])
                     except Exception as error:
-                        failures.append({"task_id": task_id, "stage": "timing_retention",
-                                         "error": repr(error)})
-                if len(raw_timings) % 16 == 0:
-                    try:
-                        budget.refresh()
-                    except ValueError as error:
-                        failures.append({"stage": "storage", "error": repr(error)})
+                        row["error"] = repr(error)
+                        failures.append({"task_id": task_id, "error": repr(error)})
+                    finally:
+                        if execution is not None:
+                            for stage, start, end in (
+                                ("proof_validation", "proof_started_monotonic",
+                                 "proof_finished_monotonic"),
+                                ("proof_preparation_wait", "ended_monotonic",
+                                 "proof_started_monotonic"),
+                                ("proof_ready_to_writer", "proof_ready_monotonic",
+                                 "writer_started_monotonic"),
+                            ):
+                                if start in execution and end in execution:
+                                    measurements[stage].append(execution[end] - execution[start])
+                            row.update({key: value for key, value in execution.items()
+                                        if key.endswith("_monotonic") or key in (
+                                            "started_at", "ended_at", "exit_code", "proof_sha256",
+                                            "command_pid", "command_reaped", "capture_protocol",
+                                            "command_supervisor_pid",
+                                            "command_supervisor_exit_code",
+                                            "command_supervisor_reaped",
+                                            "command_containment_complete")})
+                            # Futures may remain until pool exit; discard duplicate artifact bytes.
+                            execution.pop("output", None)
+                            execution.pop("proof", None)
+                        raw_timings.append(row)
+                        try:
+                            budget.write(captures / f"{task_id}.timing.json",
+                                         json.dumps(row, sort_keys=True).encode())
+                        except Exception as error:
+                            failures.append({"task_id": task_id, "stage": "timing_retention",
+                                             "error": repr(error)})
+                            arrival_record["retention_error"] = repr(error)
+                        arrival_record["terminal_outcome"] = (
+                            "retention_failed" if "retention_error" in arrival_record
+                            else row["outcome"])
+                    if len(raw_timings) % 16 == 0:
+                        try:
+                            budget.refresh()
+                        except ValueError as error:
+                            failures.append({"stage": "storage", "error": repr(error)})
         execution_seconds = time.perf_counter() - offered_at
+        if arrival is not None:
+            arrival = _arrival_receipt(arrival, raw_timings)
+            if arrival.get("producer_error"):
+                failures.append({"stage": "arrival_producer", "error": arrival["producer_error"]})
         for bundle_id in bundle_ids:
             readiness = timed("bundle_readiness", manager.readiness, bundle_id)
             if not failures:
@@ -963,6 +1167,7 @@ def run(
         "events_storage": events_storage,
         "proof_preparation": proof_preparation,
         "raw_timings": raw_timings,
+        **({"arrival": arrival} if arrival is not None else {}),
         "source_sha256": source_identity,
         "command_containment": {
             "protocol": "linux-subreaper-status.v1",
@@ -1137,6 +1342,7 @@ def main():
     parser.add_argument("--events-storage", choices=("local", "git"), default="local")
     parser.add_argument("--proof-preparation", choices=("coordinator", "worker"),
                         default="coordinator")
+    parser.add_argument("--arrival-rate", type=int, help="Host-only offers per second (1..1000)")
     parser.add_argument("--deadline", type=int, default=900)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -1149,7 +1355,6 @@ def main():
     output = args.output.resolve()
     if output.exists() or output.with_suffix(".work").exists():
         parser.error("output and work directory must be new; prior evidence is preserved")
-    output.parent.mkdir(parents=True, exist_ok=True)
     options = {
         name: getattr(args, name)
         for name in (
@@ -1162,6 +1367,13 @@ def main():
             "proof_preparation",
         )
     }
+    if args.arrival_rate is not None:
+        options["arrival_rate"] = args.arrival_rate
+        try:
+            _check_options(**options)
+        except ValueError as error:
+            parser.error(str(error))
+    output.parent.mkdir(parents=True, exist_ok=True)
     receipt = _supervise(output, options, args.deadline)
     print(
         json.dumps(

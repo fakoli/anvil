@@ -10,10 +10,11 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from benchmarks import execution_scale
@@ -904,3 +905,329 @@ def test_partial_artifact_failure_cannot_validate_fixture(tmp_path, monkeypatch,
     else:
         assert result["completed"] == result["event_counts"].get("evidence.submitted", 0) == 0
         assert row["outcome"] == "failed" and "append_returned_monotonic" not in row
+
+
+@pytest.mark.parametrize("arrival_rate", [0, -1, 1001, True, 1.5, "80"])
+def test_arrival_rate_refuses_before_fixture_creation(tmp_path, arrival_rate):
+    with pytest.raises(ValueError, match="arrival_rate"):
+        execution_scale.run(tmp_path / "absent", tasks=1, workers=1, arrival_rate=arrival_rate)
+    assert not (tmp_path / "absent").exists()
+
+
+def test_arrival_rate_refuses_adapter_before_preparation(tmp_path):
+    with pytest.raises(ValueError, match="native host"):
+        execution_scale.run(tmp_path / "absent", tasks=1, workers=1, arrival_rate=1,
+                            prepare_executor=lambda *_: pytest.fail("adapter must not start"))
+    assert not (tmp_path / "absent").exists()
+
+
+def _gate_offers(monkeypatch, before_offer):
+    class GatedStop(threading.Event):
+        def __init__(self):
+            super().__init__()
+            self.offer_index = 0
+
+        def wait(self, timeout=None):
+            before_offer(self.offer_index)
+            self.offer_index += 1
+            return super().wait(timeout)
+
+    monkeypatch.setattr(execution_scale, "threading", SimpleNamespace(
+        Event=GatedStop, BoundedSemaphore=threading.BoundedSemaphore,
+        Thread=threading.Thread, Lock=threading.Lock,
+    ))
+
+
+@pytest.mark.parametrize("mode", ["coordinator", "worker"])
+def test_paced_native_append_precedes_later_offer_and_state_stays_in_coordinator(
+    tmp_path, monkeypatch, mode
+):
+    first_appended = threading.Event()
+    coordinator = threading.get_ident()
+    original_open = execution_scale._open
+    original_append = execution_scale._append
+
+    def gate(index):
+        if index == 1:
+            assert first_appended.wait(10), "consumer waited for all offers before appending"
+
+    def checked_open(*args, **kwargs):
+        backend = original_open(*args, **kwargs)
+        for name in ("append", "get_task", "list_active_claims", "get_claim"):
+            original = getattr(backend, name)
+
+            def checked(*args, _original=original, **kwargs):
+                assert threading.get_ident() == coordinator
+                return _original(*args, **kwargs)
+
+            setattr(backend, name, checked)
+        return backend
+
+    def append_then_release(backend, action, *args, **kwargs):
+        result = original_append(backend, action, *args, **kwargs)
+        if action == "evidence.submitted":
+            first_appended.set()
+        return result
+
+    _gate_offers(monkeypatch, gate)
+    monkeypatch.setattr(execution_scale, "_open", checked_open)
+    monkeypatch.setattr(execution_scale, "_append", append_then_release)
+    result = execution_scale.run(tmp_path / "paced", tasks=2, workers=2,
+                                 arrival_rate=1000, proof_preparation=mode)
+    assert result["validated"] and result["completed"] == 2
+    arrival = result["arrival"]
+    first, second = arrival["records"]
+    rows = {row["task_id"]: row for row in result["raw_timings"]}
+    assert rows[first["task_id"]]["append_returned_monotonic"] < second["offered_monotonic"]
+    assert arrival["producer_stopped"] and arrival["handled"] == 2
+    assert arrival["lateness_seconds"][1] > 0  # The barrier delay is retained, not subtracted.
+    assert arrival["actual_offered"] == arrival["admitted"] == 2
+    assert arrival["final_backlog"] == dict(in_flight=0, waiting_to_start=0, proof_ready=0)
+    for row in result["raw_timings"]:
+        assert row["scheduled_offer_monotonic"] <= row["offered_monotonic"]
+        assert row["offered_monotonic"] <= row["submitted_monotonic"] <= row["started_monotonic"]
+    assert result["replay_equal"] and result["web_snapshot"]["tasks"] == 2
+
+
+def test_paced_slots_remain_reserved_until_handled_and_can_be_reused(monkeypatch):
+    handling = threading.Event()
+    refusals_recorded = threading.Event()
+    allow_last_offer = threading.Event()
+
+    def gate(index):
+        if index == 1:
+            assert handling.wait(5)
+        if index == 3:
+            refusals_recorded.set()
+            assert allow_last_offer.wait(5)
+
+    def submit(task_id, offered_at):
+        future = Future()
+        future.set_result(task_id)  # Completion alone must not refund the slot.
+        return future
+
+    _gate_offers(monkeypatch, gate)
+    arrival = {}
+    with execution_scale._paced_results(["a", "b", "c", "d"], submit, 1, 1000,
+                                        time.perf_counter(), arrival) as results:
+        future, first = next(results)
+        assert future.result() == "a"
+        handling.set()
+        assert refusals_recorded.wait(5)
+        assert [row["admission"] for row in arrival["records"][:3]] == [
+            "admitted", "capacity_refused", "capacity_refused"]
+        # Resuming the consumer is the first point at which 'a' becomes terminal.
+        future, refused = next(results)
+        assert future is None and refused["task_id"] == "b"
+        allow_last_offer.set()
+        remaining = list(results)
+        assert [(row["task_id"], row["admission"]) for _, row in remaining] == [
+            ("c", "capacity_refused"), ("d", "admitted")]
+    assert arrival["producer_stopped"]
+    assert all("terminal_monotonic" in record for record in arrival["records"])
+
+
+def test_paced_writer_block_exposes_capacity_refusal_without_false_proof(tmp_path, monkeypatch):
+    writer_entered = threading.Event()
+    second_refused = threading.Event()
+    original_append = execution_scale._append
+
+    def gate(index):
+        if index == 1:
+            assert writer_entered.wait(10)
+        if index == 2:
+            second_refused.set()
+
+    def blocked_append(backend, action, *args, **kwargs):
+        if action == "evidence.submitted" and not writer_entered.is_set():
+            writer_entered.set()
+            assert second_refused.wait(10), "producer stopped offering while writer was blocked"
+        return original_append(backend, action, *args, **kwargs)
+
+    _gate_offers(monkeypatch, gate)
+    monkeypatch.setattr(execution_scale, "_append", blocked_append)
+    result = execution_scale.run(tmp_path / "refused", tasks=3, workers=1,
+                                 arrival_rate=1000, proof_preparation="worker")
+    assert not result["validated"] and result["replay_equal"] and result["no_false_acceptance"]
+    arrival = result["arrival"]
+    assert arrival["capacity_refused"] >= 1 and arrival["handled"] == 3
+    assert arrival["peak_backlog"]["in_flight"] == 1
+    for record in arrival["records"]:
+        if record["admission"] == "capacity_refused":
+            row = next(row for row in result["raw_timings"] if row["task_id"] == record["task_id"])
+            assert row["outcome"] == "failed" and "command_pid" not in row
+            assert "proof_sha256" not in row
+            assert not (tmp_path / "refused/captures" / f"{row['task_id']}.proof.json").exists()
+    assert result["event_counts"]["evidence.submitted"] == arrival["admitted"]
+    assert result["command_captures"] == arrival["admitted"]
+
+
+def test_paced_submission_failure_accounts_for_unoffered_tasks_and_joins(tmp_path, monkeypatch):
+    class RefusedExecutor(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("synthetic executor submission failure")
+
+    monkeypatch.setattr(execution_scale, "ThreadPoolExecutor", RefusedExecutor)
+    result = execution_scale.run(tmp_path / "failed-producer", tasks=3, workers=1, arrival_rate=1)
+    assert not result["validated"] and result["replay_equal"]
+    arrival = result["arrival"]
+    assert arrival["actual_offered"] == arrival["submission_failed"] == 1
+    assert arrival["not_offered"] == 2 and arrival["handled"] == arrival["failed"] == 3
+    assert arrival["producer_stopped"] and "synthetic" in arrival["producer_error"]
+    assert result["command_captures"] == result["retained_proof_artifacts"] == 0
+    assert all(row["outcome"] == "failed" for row in result["raw_timings"])
+
+
+def test_paced_consumer_exception_cancels_waiting_producer_and_joins(monkeypatch):
+    producer_waiting = threading.Event()
+
+    class WaitingStop(threading.Event):
+        def __init__(self):
+            super().__init__()
+            self.wait_count = 0
+
+        def wait(self, timeout=None):
+            self.wait_count += 1
+            if self.wait_count > 1:
+                producer_waiting.set()
+                return super().wait(60)  # Cancellation, not elapsed time, releases this wait.
+            return super().wait(timeout)
+
+    monkeypatch.setattr(execution_scale, "threading", SimpleNamespace(
+        Event=WaitingStop, BoundedSemaphore=threading.BoundedSemaphore, Thread=threading.Thread,
+    ))
+    def submit(*args):
+        future = Future()
+        future.set_result(None)
+        return future
+
+    arrival = {}
+    with pytest.raises(RuntimeError, match="consumer"):
+        with execution_scale._paced_results(["a", "b", "c"], submit, 1, 1,
+                                            time.perf_counter(), arrival) as results:
+            next(results)
+            assert producer_waiting.wait(5)
+            raise RuntimeError("synthetic consumer failure")
+    assert arrival["producer_stopped"]
+    assert [row["admission"] for row in arrival["records"]] == [
+        "admitted", "not_offered", "not_offered"]
+    assert not any(thread.name == "scale-arrival-producer" for thread in threading.enumerate())
+
+
+def test_arrival_summary_preserves_ties_lateness_failed_backlog_and_drain():
+    arrival = dict(schema="anvil.execution-arrivals.v1", epoch_monotonic=10., configured_rate=2,
+                   producer_stopped=True, producer_finished_monotonic=10.6, in_flight_limit=2,
+                   records=[
+                       dict(task_id="a", scheduled_offer_monotonic=10., offered_monotonic=10.1,
+                            reserved_monotonic=10.1, submitted_monotonic=10.1,
+                            admission="admitted", terminal_monotonic=11.5,
+                            terminal_outcome="submitted"),
+                       dict(task_id="b", scheduled_offer_monotonic=10.5, offered_monotonic=10.6,
+                            reserved_monotonic=10.6, submitted_monotonic=10.6,
+                            admission="admitted", terminal_monotonic=11.5,
+                            terminal_outcome="failed"),
+                   ])
+    rows = [dict(task_id="a", started_monotonic=10.2, proof_ready_monotonic=11.,
+                 append_returned_monotonic=11.5),
+            dict(task_id="b", started_monotonic=10.8, proof_ready_monotonic=11.)]
+    result = execution_scale._arrival_receipt(arrival, rows)
+    assert result["lateness_seconds"] == pytest.approx([.1, .1])
+    assert result["inter_offer_seconds"] == [.5]
+    assert result["observed_offers_per_second"] == 2
+    assert result["peak_backlog"] == dict(in_flight=2, waiting_to_start=1, proof_ready=2)
+    assert result["drain_seconds"] == pytest.approx(.9)
+    assert result["one_second_series"][-1] == dict(
+        second=2, offered=2, started=2, proof_ready=2, ledger=1, terminal=2, failed=1,
+        in_flight=0, waiting_to_start=0, proof_ready_backlog=0)
+    with pytest.raises(ValueError, match="Incomplete"):
+        execution_scale._arrival_receipt(arrival, rows[:1])
+
+
+def test_paced_cli_preserves_native_captures_replay_and_web(tmp_path, monkeypatch):
+    _require_process_group_control()
+    output = tmp_path / "paced-cli.json"
+    monkeypatch.setattr(sys, "argv", ["execution_scale", "--tasks", "3", "--workers", "3",
+                                     "--arrival-rate", "1000", "--proof-preparation", "worker",
+                                     "--output", str(output)])
+    assert execution_scale.main() == 0
+    receipt = json.loads(output.read_text())
+    assert receipt["validated"] and receipt["child_stopped"] and receipt["child_exit_code"] == 0
+    assert receipt["arrival"]["producer_stopped"] and receipt["arrival"]["admitted"] == 3
+    assert receipt["replay_equal"] and receipt["no_false_acceptance"]
+    assert receipt["web_snapshot"]["tasks"] == receipt["retained_proof_artifacts"] == 3
+    for row in receipt["raw_timings"]:
+        proof = output.with_suffix(".work") / "captures" / f"{row['task_id']}.proof.json"
+        assert row["proof_sha256"] == hashlib.sha256(proof.read_bytes()).hexdigest()
+        assert row["command_reaped"] and row["command_containment_complete"]
+    assert set(execution_scale.NATIVE_STAGES) <= receipt["stages"].keys()
+
+
+def test_paced_concurrent_callbacks_keep_each_completion_once():
+    barrier = threading.Barrier(3)
+
+    def execute(task_id):
+        barrier.wait(timeout=5)
+        return task_id
+
+    arrival = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        with execution_scale._paced_results(
+            ["a", "b", "c"], lambda task_id, _: executor.submit(execute, task_id),
+            3, 1000, time.perf_counter(), arrival,
+        ) as results:
+            completed = [(future.result(), record["task_id"]) for future, record in results]
+    assert sorted(completed) == [("a", "a"), ("b", "b"), ("c", "c")]
+    assert arrival["producer_stopped"]
+    assert all("terminal_monotonic" in record for record in arrival["records"])
+
+
+def test_paced_retention_failure_stays_failed_after_native_append(tmp_path, monkeypatch):
+    original = execution_scale._ArtifactBudget.write
+
+    def fail_timing(self, path, raw):
+        if path.name.endswith(".timing.json"):
+            raise OSError("synthetic timing retention failure")
+        return original(self, path, raw)
+
+    monkeypatch.setattr(execution_scale._ArtifactBudget, "write", fail_timing)
+    result = execution_scale.run(tmp_path / "retention", tasks=2, workers=2, arrival_rate=1000)
+    assert not result["validated"] and result["replay_equal"]
+    assert result["completed"] == result["event_counts"]["evidence.submitted"] == 2
+    assert result["arrival"]["failed"] == 2
+    assert all(record["terminal_outcome"] == "retention_failed"
+               for record in result["arrival"]["records"])
+    assert result["arrival"]["final_backlog"]["in_flight"] == 0
+
+
+def test_invalid_arrival_cli_starts_no_child_or_output_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(execution_scale, "_supervise", lambda *_: pytest.fail("unexpected child"))
+    monkeypatch.setattr(sys, "argv", ["execution_scale", "--arrival-rate", "0",
+                                     "--output", str(tmp_path / "new" / "refused.json")])
+    with pytest.raises(SystemExit) as failure:
+        execution_scale.main()
+    assert failure.value.code == 2
+    assert not (tmp_path / "new").exists()
+
+
+
+def test_unexpected_arrival_admission_failure_cannot_lose_a_completion(monkeypatch):
+    class FailedSlots:
+        def __init__(self, count):
+            pass
+
+        def acquire(self, *, blocking):
+            raise RuntimeError("synthetic admission failure")
+
+    monkeypatch.setattr(execution_scale, "threading", SimpleNamespace(
+        Event=threading.Event, BoundedSemaphore=FailedSlots, Thread=threading.Thread,
+    ))
+    arrival = {}
+    with execution_scale._paced_results(
+        ["a", "b", "c"], lambda *_: pytest.fail("unexpected submission"),
+        1, 1000, time.perf_counter(), arrival,
+    ) as results:
+        rows = list(results)
+    assert len(rows) == 3 and all(future is None for future, _ in rows)
+    assert [row["admission"] for _, row in rows] == [
+        "producer_failed", "not_offered", "not_offered"]
+    assert arrival["producer_stopped"] and "synthetic admission" in arrival["producer_error"]
