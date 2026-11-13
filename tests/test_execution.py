@@ -31,6 +31,125 @@ from anvil.execution import (
 from anvil.state.sqlite import SqliteBackend
 from tests.test_bundle_state import _event, _seed
 
+
+def test_receipt_is_invisible_until_complete_and_excludes_other_writers(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import anvil.execution as execution
+
+    path = tmp_path / "result.json"
+    entered, release = threading.Event(), threading.Event()
+    serialize = execution.json_bytes
+
+    def pause_serialization(value):
+        entered.set()
+        assert release.wait(5)
+        return serialize(value)
+
+    monkeypatch.setattr(execution, "json_bytes", pause_serialization)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(execution.write_receipt, path, {"complete": True})
+        try:
+            assert entered.wait(5)
+            assert not path.exists()
+            assert execution.receipt_attempt_exists(path)
+            with pytest.raises(FileExistsError):
+                execution.write_receipt(path, {"complete": False})
+        finally:
+            release.set()
+        writer.result(timeout=5)
+    assert read_receipt(path) == {"complete": True}
+    assert not execution.pending_receipt_path(path).exists()
+    with pytest.raises(FileExistsError):
+        execution.write_receipt(path, {"complete": False})
+    assert read_receipt(path) == {"complete": True}
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("failure", ["serialization", "directory_fsync", "file_fsync", "publication"])
+def test_failed_receipt_attempt_is_retained_and_cannot_retry(tmp_path, monkeypatch, failure):
+    import stat
+
+    import anvil.execution as execution
+
+    path = tmp_path / "result.json"
+
+    def fail(*_args, **_kwargs):
+        raise OSError("injected receipt failure")
+
+    fsync = execution.os.fsync
+
+    def fail_file_sync(descriptor):
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            fail()
+        return fsync(descriptor)
+
+    with monkeypatch.context() as patch:
+        if failure == "serialization":
+            patch.setattr(execution, "json_bytes", fail)
+        elif failure == "directory_fsync":
+            patch.setattr(execution.os, "fsync", fail)
+        elif failure == "file_fsync":
+            patch.setattr(execution.os, "fsync", fail_file_sync)
+        else:
+            patch.setattr(execution.os, "link", fail)
+        with pytest.raises(OSError, match="injected receipt failure"):
+            execution.write_receipt(path, {"complete": True})
+    pending = execution.pending_receipt_path(path)
+    assert pending.is_file() and not path.exists()
+    retained = pending.read_bytes()
+    with pytest.raises(FileExistsError):
+        execution.write_receipt(path, {"retry": True})
+    assert pending.read_bytes() == retained and not path.exists()
+
+
+def test_receipt_publication_collision_does_not_poison_reusable_lock(tmp_path, monkeypatch):
+    import anvil.execution as execution
+
+    path = tmp_path / "slot.lock"
+    link = execution.os.link
+
+    def completed_other_writer(source, destination):
+        destination.write_text('{"winner": "other"}')
+        return link(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution.os, "link", completed_other_writer)
+        with pytest.raises(FileExistsError):
+            execution.write_receipt(path, {"winner": "this"})
+    assert read_receipt(path) == {"winner": "other"}
+    assert not execution.pending_receipt_path(path).exists()
+    path.unlink()
+    execution.write_receipt(path, {"next": True})
+    assert read_receipt(path) == {"next": True}
+
+
+@pytest.mark.parametrize("marker", ["consumed", "slot"])
+def test_pending_receipt_never_reports_unconsumed_preview(execution_project, marker):
+    import anvil.execution as execution
+
+    _, repo, _, _ = execution_project
+    preview = preview_run(repo, "release:T001", "agent", RunOptions())
+    root = journal_root(repo)
+    path = (root / "consumed" / (preview["preview_id"] + ".json") if marker == "consumed"
+            else root / "slots" / (digest(b"release:T001") + ".json"))
+    execution.private_directory(path.parent)
+    execution.pending_receipt_path(path).touch(mode=0o600)
+    inspected = execution.inspect_execution_preview(repo, preview["preview_id"], "agent")
+    assert inspected["state"] == "unknown" and inspected["run_id"] is None
+    if marker == "consumed":
+        with pytest.raises(ExecutionError, match="bounded regular execution receipt"):
+            execution.require_unconsumed_preview(root, preview["preview_id"])
+    else:
+        with pytest.raises(ExecutionError, match="bounded regular execution receipt"):
+            execution.reserve_slot(root, path, {
+                "run_id": "a" * 32, "task_id": "release:T001",
+                "preview_id": preview["preview_id"],
+            }, consume_preview=True)
+        assert not execution.receipt_attempt_exists(root / "consumed" / (preview["preview_id"] + ".json"))
+
 # A real executable contract double. It edits returned bytes, never fabricates
 # native proof or native state. The Run worker must run and submit real checks.
 _ADAPTER = r"""
@@ -637,7 +756,8 @@ def test_capability_view_is_sanitized_scoped_and_expires(execution_project, monk
     assert not backend.list_active_claims()
 
 
-def test_capability_profile_change_and_busy_owner_are_closed(execution_project):
+@pytest.mark.parametrize("pending", [False, True])
+def test_capability_profile_change_and_busy_owner_are_closed(execution_project, pending):
     import anvil.execution as execution
     from anvil.config import global_config_path
 
@@ -659,9 +779,12 @@ def test_capability_profile_change_and_busy_owner_are_closed(execution_project):
     assert execution.read_execution_capabilities(repo)["status"] == "unknown"
     root = journal_root(repo)
     unknown_id = "a" * 32
-    execution.write_receipt(
-        root / "slots" / "held.json", {"run_id": unknown_id, "task_id": "release:T001"}
-    )
+    slot = root / "slots" / "held.json"
+    if pending:
+        execution.private_directory(slot.parent)
+        execution.pending_receipt_path(slot).touch(mode=0o600)
+    else:
+        execution.write_receipt(slot, {"run_id": unknown_id, "task_id": "release:T001"})
     with pytest.raises(ExecutionError, match="existing execution"):
         execution.refresh_execution_capabilities(repo)
     assert not (root / "runs").exists()

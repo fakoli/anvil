@@ -1414,6 +1414,25 @@ def test_registration_upgrade_preserves_backup_profile_journal_and_other_setting
     assert len(list(owner.config.parent.glob("*.before-execution-*"))) == 1
 
 
+def test_pending_registration_result_refuses_before_owner_read(execution_upgrade_owner):
+    from anvil.config import confirm_execution_adapter_upgrade, preview_execution_adapter_upgrade
+    from anvil.execution import pending_receipt_path
+
+    owner = execution_upgrade_owner
+    confirmed = preview_execution_adapter_upgrade()
+    confirm_execution_adapter_upgrade(confirmed["preview_id"])
+    preview = preview_execution_adapter_upgrade()
+    assert not preview["changed"]
+    directory = (owner.config.parent / (owner.config.name + ".execution-upgrades")
+                 / preview["preview_id"])
+    pending_receipt_path(directory / "result.json").touch(mode=0o600)
+    reads = owner.owner_reads
+    probes = len(owner.probe_calls)
+    with pytest.raises(ValueError, match="already confirmed"):
+        confirm_execution_adapter_upgrade(preview["preview_id"])
+    assert owner.owner_reads == reads and len(owner.probe_calls) == probes
+
+
 @pytest.mark.parametrize("changed", ["config", "script", "extension", "interpreter", "profile", "candidate"])
 def test_registration_upgrade_preimage_drift_refuses(execution_upgrade_owner, changed):
     from anvil.config import confirm_execution_adapter_upgrade, preview_execution_adapter_upgrade

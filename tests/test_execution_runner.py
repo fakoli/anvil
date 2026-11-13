@@ -31,20 +31,33 @@ pytestmark = pytest.mark.skipif(
 def _wait(directory):
     deadline = time.monotonic() + 40
     while time.monotonic() < deadline:
-        if (directory / "result.json").exists():
-            result = read_receipt(directory / "result.json")
+        if (directory / "launched.json").exists():
             launched = read_receipt(directory / "launched.json")
             try:
-                os.waitpid(launched["pid"], 0)
+                os.waitpid(launched["pid"], os.WNOHANG)
             except ChildProcessError:
                 pass
-            stopped_deadline = time.monotonic() + 5
-            while not process_group_absent(launched["pid"]) and time.monotonic() < stopped_deadline:
-                time.sleep(0.02)
-            assert process_group_absent(launched["pid"])
-            return result
+            if process_group_absent(launched["pid"]):
+                return read_receipt(directory / "result.json")
         time.sleep(0.02)
-    pytest.fail("owned execution worker did not return")
+    pytest.fail("owned execution worker did not stop")
+
+
+@pytest.mark.parametrize("terminal", ["malformed", "pending"])
+def test_wait_reaps_exact_writer_before_rejecting_invalid_result(tmp_path, terminal):
+    worker = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.1)"], start_new_session=True
+    )
+    try:
+        (tmp_path / "launched.json").write_text(json.dumps({"pid": worker.pid}))
+        (tmp_path / ("result.json" if terminal == "malformed" else ".result.json.pending")).touch()
+        with pytest.raises(json.JSONDecodeError if terminal == "malformed" else ExecutionError):
+            _wait(tmp_path)
+        assert process_group_absent(worker.pid)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(worker.pid, os.WNOHANG)
+    finally:
+        worker.wait(timeout=5)
 
 
 @pytest.mark.parametrize("preclaimed", [False, True])

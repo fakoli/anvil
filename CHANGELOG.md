@@ -6,6 +6,24 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.26] - 2026-11-13
+
+### Fixed
+
+- Execution receipts now become visible only after complete, durable JSON has
+  been staged. Publication never replaces another receipt; interrupted attempts
+  retain an exclusive marker and cannot silently reuse approval authority.
+- Lost-response inspection and adapter upgrade confirmation recognize incomplete
+  receipt attempts. Native execution tests reap their exact writer before
+  decoding terminal data, so malformed results cannot skip custody checks.
+
+### Release status
+
+- Supersedes the held 0.6.25 candidate, whose post-merge CI exposed the receipt
+  race. Its publisher was cancelled before artifact publication. API 26 and
+  State schema 26 are unchanged; performance and large-model-concurrency
+  qualifications remain deferred.
+
 ## [0.6.25] - 2026-11-12
 
 ### Added
