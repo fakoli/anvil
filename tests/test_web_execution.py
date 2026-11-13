@@ -9,7 +9,6 @@ import shlex
 import subprocess
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -21,9 +20,53 @@ from anvil.execution import git, journal_root, native_cli
 from tests.test_bundle_state import _event
 from tests.test_execution import execution_project as execution_project
 from tests.test_execution import saved_execution_project as saved_execution_project
-from tests.test_execution_runner import _wait
-from tests.test_web_actions import _request, _running_server
+from tests.test_execution_runner import _wait, _wait_adapter
+from tests.test_web_actions import _running_server
 from tests.test_web_actions import action_catalog as action_catalog
+
+
+def _request(server, path, payload=None, *, token=None, headers=None):
+    # Native admission has a 20-second server bound plus bounded cleanup. The
+    # client must allow that response; async behavior is checked with a held adapter.
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=30)
+    request_headers = {} if payload is None else {
+        "Content-Type": "application/json",
+        "Origin": f"http://127.0.0.1:{server.server_port}",
+        "X-Anvil-CSRF": token or "",
+    }
+    for name, value in (headers or {}).items():
+        if value is None:
+            request_headers.pop(name, None)
+        else:
+            request_headers[name] = value
+    try:
+        connection.request("GET" if payload is None else "POST", path,
+                           None if payload is None else json.dumps(payload), request_headers)
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
+
+
+@pytest.fixture
+def execution_custody(execution_project, tmp_path, monkeypatch):
+    _, repo, _, _ = execution_project
+    # server_close joins all handlers before fixture teardown inspects launches,
+    # including admissions whose response never supplied a run ID to the test.
+    monkeypatch.setattr(web.WebHTTPServer, "daemon_threads", False)
+    release = tmp_path / "release-adapter"
+    try:
+        yield release
+    finally:
+        release.touch(exist_ok=True)
+        failures = []
+        for launched in sorted(journal_root(repo).glob("runs/*/launched.json")):
+            try:
+                _wait(launched.parent)
+            except BaseException as error:
+                failures.append(error)
+        if failures:
+            raise BaseExceptionGroup("Fixture execution cleanup failed", failures)
 
 
 def _selection(server, repository, task_id="T001", **extra):
@@ -61,7 +104,9 @@ def _confirm(server, repository, token, preview, route="execution-confirm"):
     }, token=token)
 
 
-def test_real_saved_run_lost_response_and_continue(saved_execution_project, tmp_path, monkeypatch):
+def test_real_saved_run_lost_response_and_continue(
+    saved_execution_project, tmp_path, monkeypatch, execution_custody,
+):
     backend, repo, state, _ = saved_execution_project
     config_path = tmp_path / "web.json"
     repository = web.enroll_repository(config_path, repo)
@@ -71,9 +116,11 @@ def test_real_saved_run_lost_response_and_continue(saved_execution_project, tmp_
         assert preview["options"] == {}
         assert backend.list_active_claims() == []
         original_send = server.RequestHandlerClass._send
+        response_dropped = threading.Event()
 
         def lose_dispatch_response(handler, body, content_type="application/json", status=200):
             if status == 202:
+                response_dropped.set()
                 handler.close_connection = True
                 return
             original_send(handler, body, content_type, status)
@@ -81,6 +128,7 @@ def test_real_saved_run_lost_response_and_continue(saved_execution_project, tmp_
         monkeypatch.setattr(server.RequestHandlerClass, "_send", lose_dispatch_response)
         with pytest.raises(http.client.RemoteDisconnected):
             _confirm(server, repository, token, preview)
+        assert response_dropped.is_set()
         monkeypatch.setattr(server.RequestHandlerClass, "_send", original_send)
         recovered = _status(server, repository, preview)
         assert recovered["dispatch_state"] == "consumed"
@@ -145,7 +193,9 @@ def test_real_saved_run_lost_response_and_continue(saved_execution_project, tmp_
                 _wait(directory)
 
 
-def test_metadata_cas_verified_options_and_unknown_fields(saved_execution_project, tmp_path):
+def test_metadata_cas_verified_options_and_unknown_fields(
+    saved_execution_project, tmp_path, execution_custody,
+):
     _, repo, _, _ = saved_execution_project
     config_path = tmp_path / "web.json"
     repository = web.enroll_repository(config_path, repo)
@@ -198,7 +248,9 @@ def test_metadata_cas_verified_options_and_unknown_fields(saved_execution_projec
         assert len(list(journal_root(repo).glob("runs/*/dispatch.json"))) == 1
 
 
-def test_running_http_returns_before_work_and_other_task_remains_usable(execution_project, tmp_path):
+def test_running_http_returns_before_work_and_other_task_remains_usable(
+    execution_project, tmp_path, execution_custody,
+):
     backend, repo, _, registration = execution_project
     independent_task = backend.get_task("release:T002")
     independent_command = shlex.join([
@@ -213,7 +265,7 @@ def test_running_http_returns_before_work_and_other_task_remains_usable(executio
              "passing_exit_codes": [0], "label": "independent edit"},
         ]},
     }, target_kind="task", target_id=independent_task.id))
-    release = tmp_path / "release-adapter"
+    release = execution_custody
     Path(registration.profile).write_text(json.dumps({"wait_file": str(release)}))
     # Registration pins the profile; refresh the synthetic owner registration
     # before preview, exactly as an explicit native setup would.
@@ -234,21 +286,22 @@ def test_running_http_returns_before_work_and_other_task_remains_usable(executio
         with _running_server(config_path, allow_writes=True, actor="synthetic-owner") as server:
             token = _request(server, "/api/catalog")[1]["csrf_token"]
             preview = _preview(server, repository, token)
-            start = time.monotonic()
             with ThreadPoolExecutor(max_workers=2) as pool:
                 responses = list(pool.map(
                     lambda _: _confirm(server, repository, token, preview), range(2),
                 ))
             assert sorted(status for status, _ in responses) == [202, 409], responses
             admitted = next(value for status, value in responses if status == 202)
-            assert time.monotonic() - start < 10
             directory = journal_root(repo) / "runs" / admitted["run_id"]
+            _wait_adapter(directory)
+            assert not release.exists()
             assert not (directory / "result.json").exists()
             assert _request(server, f"/api/repositories/{repository.id}/snapshot")[0] == 200
             independent = json.loads(native_cli(repo, "claim", "release:T002", "--worktree",
                                                 "--actor", "independent", "--json"))
             assert independent["ok"] is True
             assert backend.get_task("release:T002").status.value == "claimed"
+            assert not (directory / "result.json").exists()
         # Closing the HTTP server leaves the native run alive and able to submit.
         release.touch()
         assert _wait(directory)["state"] == "needs_review"
@@ -376,7 +429,7 @@ def test_writer_preserves_temporary_directory_beyond_http_request(action_catalog
 
 
 def test_concurrent_known_run_inspection_has_independent_handles(
-    saved_execution_project, tmp_path, monkeypatch,
+    saved_execution_project, tmp_path, monkeypatch, execution_custody,
 ):
     from tests.test_execution import _completed_saved_run
 
