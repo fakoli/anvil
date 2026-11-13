@@ -8,14 +8,17 @@ from typer.testing import CliRunner
 
 from anvil.cli import app
 from tests.test_config import execution_permission_root as execution_permission_root
+from tests.test_config import execution_upgrade_owner as execution_upgrade_owner
 from tests.test_execution import execution_project as execution_project
 
 
-def test_continue_refuses_before_state_access(tmp_path):
-    result = CliRunner().invoke(app, ["continue", "unknown", "--preview", "--json"])
+def test_continue_refuses_ephemeral_registration(execution_project):
+    _, repo, state, _ = execution_project
+    original = (state / "events.jsonl").read_bytes()
+    result = CliRunner().invoke(app, ["continue", "a" * 32, "--preview", "--cwd", str(repo), "--json"])
     assert result.exit_code == 1
     assert json.loads(result.output)["error"]["code"] == "continuation_unsupported"
-    assert not list(tmp_path.iterdir())
+    assert (state / "events.jsonl").read_bytes() == original
 
 
 def test_run_preview_json_and_confirmation_options(execution_project):
@@ -123,7 +126,7 @@ def test_run_configure_preserves_owner_config_and_refuses_replacement(
 
 @pytest.mark.parametrize("failure_stage", [None, "before", "after"])
 def test_run_configure_missing_config_checks_ancestry(execution_permission_root, monkeypatch, failure_stage):
-    import anvil.cli.execute as execute_cli
+    import anvil.execution as execution
     from anvil.config import load_execution_adapter
 
     plugin = execution_permission_root / "plugin"
@@ -142,14 +145,14 @@ def test_run_configure_missing_config_checks_ancestry(execution_permission_root,
     outer.chmod(0o777 if failure_stage == "before" else 0o755 if failure_stage else 0o700)
     config = outer / "new" / "private" / "config.yaml"
     if failure_stage == "after":
-        original_directory = execute_cli.private_directory
+        original_directory = execution.private_directory
 
         def create_unsafe_intermediate(path):
             result = original_directory(path)
             (outer / "new").chmod(0o777)
             return result
 
-        monkeypatch.setattr(execute_cli, "private_directory", create_unsafe_intermediate)
+        monkeypatch.setattr(execution, "private_directory", create_unsafe_intermediate)
     monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(config))
     arguments = ["run-configure", "--script", str(script), "--interpreter", str(script),
                  "--profile", str(profile), "--json"]
@@ -248,3 +251,139 @@ def test_admission_repair_malformed_owner_yaml_is_structured(execution_project, 
     assert config.read_bytes() == original
     assert not backend.list_active_claims()
     assert (state / "events.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("selected", [[], ["--task", "synthetic:T002", "--provider", "synthetic", "--model", "model", "--thinking", "off", "--wall-seconds", "120"]])
+def test_continue_cli_preview_and_confirmation_bind_saved_route(tmp_path, monkeypatch, selected):
+    import anvil.cli.execute as execute_cli
+
+    prior_run = "a" * 32
+    preview_id = "b" * 32
+    dispatched = "c" * 32
+    calls = []
+
+    def preview(cwd, run_id, actor, options, wall_seconds=600, task_id=None):
+        calls.append((cwd, run_id, actor, options.data(), wall_seconds, task_id))
+        return {"preview_id": preview_id, "expires_at": "synthetic-expiry",
+                "task_id": task_id or "synthetic:T001", "actor": actor,
+                "source_sha": "d" * 40, "wall_seconds": wall_seconds,
+                "options": options.data(), "writable_paths": ["task_labels.py"],
+                "commands": ["python verify.py"]}
+
+    def confirm(cwd, run_id, actor, saved_preview):
+        assert (cwd, run_id, actor, saved_preview) == (tmp_path, prior_run, "synthetic-owner", preview_id)
+        return {"run_id": dispatched}
+
+    monkeypatch.setattr(execute_cli, "preview_continue", preview)
+    monkeypatch.setattr(execute_cli, "confirm_continue", confirm)
+    runner = CliRunner()
+    result = runner.invoke(app, ["continue", prior_run, "--preview", "--cwd", str(tmp_path),
+                                 "--actor", "synthetic-owner", *selected])
+    assert result.exit_code == 0, result.output
+    assert f"Continue from: {prior_run}" in result.output
+    assert f"anvil continue {prior_run} --confirm {preview_id}" in result.output
+    assert "task_labels.py" in result.output and "python verify.py" in result.output
+    assert calls == [(tmp_path, prior_run, "synthetic-owner",
+                      {"provider": "synthetic", "model": "model", "thinking": "off"} if selected else {},
+                      120 if selected else 600, "synthetic:T002" if selected else None)]
+    confirmed = runner.invoke(app, ["continue", prior_run, "--confirm", preview_id,
+                                    "--cwd", str(tmp_path), "--actor", "synthetic-owner", "--json"])
+    assert confirmed.exit_code == 0, confirmed.output
+    assert json.loads(confirmed.output)["data"]["run_id"] == dispatched
+
+
+@pytest.mark.parametrize("extra", [["--task", "synthetic:T002"], ["--thinking", "low"], ["--provider", "synthetic"], ["--model", "model"], ["--wall-seconds", "120"], ["--preview"]])
+def test_continue_confirmation_rejects_new_options_before_admission(monkeypatch, extra):
+    import anvil.cli.execute as execute_cli
+
+    monkeypatch.setattr(execute_cli, "_resolve_project_dir", lambda *_: pytest.fail("No admission"))
+    result = CliRunner().invoke(app, ["continue", "a" * 32, "--confirm", "b" * 32, *extra, "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"]["code"] == "bad_request"
+
+
+@pytest.mark.parametrize("arguments", [[], ["a" * 32, "--preview", "b" * 32], ["a" * 32, "--actor", "synthetic"]])
+def test_run_status_route_ambiguity_refuses_before_read(monkeypatch, arguments):
+    import anvil.cli.execute as execute_cli
+
+    monkeypatch.setattr(execute_cli, "_resolve_project_dir", lambda *_: pytest.fail("No read"))
+    result = CliRunner().invoke(app, ["run-status", *arguments, "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"]["code"] == "bad_request"
+
+
+def test_run_status_exact_preview_readback_is_an_existing_short_command(tmp_path, monkeypatch):
+    import anvil.cli.execute as execute_cli
+
+    preview_id, run_id = "a" * 32, "b" * 32
+
+    def inspect(cwd, preview, actor):
+        assert (cwd, preview, actor) == (tmp_path, preview_id, "synthetic-owner")
+        return {"state": "consumed", "run_id": run_id}
+
+    monkeypatch.setattr(execute_cli, "inspect_execution_preview", inspect)
+    result = CliRunner().invoke(app, ["run-status", "--preview", preview_id,
+                                     "--actor", "synthetic-owner", "--cwd", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "consumed" in result.output and f"anvil run-status {run_id}" in result.output
+
+
+@pytest.mark.parametrize("extra", [["--provider", "synthetic"], ["--model", "model"], ["--provider", "synthetic", "--model", "model"]])
+def test_capability_model_selection_requires_pair_and_refresh(monkeypatch, extra):
+    import anvil.cli.execute as execute_cli
+
+    monkeypatch.setattr(execute_cli, "_resolve_project_dir", lambda *_: pytest.fail("No metadata launch"))
+    result = CliRunner().invoke(app, ["run-capabilities", *extra, "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"]["code"] in {"unsupported_options", "bad_request"}
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_capability_refresh_forwards_only_exact_optional_pair(tmp_path, monkeypatch, selected):
+    import anvil.cli.execute as execute_cli
+
+    def refresh(cwd, provider=None, model=None):
+        assert cwd == tmp_path
+        assert (provider, model) == (("synthetic", "model") if selected else (None, None))
+        return {"run_id": "a" * 32}
+
+    monkeypatch.setattr(execute_cli, "refresh_execution_capabilities", refresh)
+    result = CliRunner().invoke(app, ["run-capabilities", "--refresh", "--cwd", str(tmp_path),
+                                     *(["--provider", "synthetic", "--model", "model"] if selected else []),
+                                     "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["data"]["run_id"] == "a" * 32
+
+
+def test_short_upgrade_cli_displays_preimages_and_confirms(execution_upgrade_owner):
+    owner = execution_upgrade_owner
+    runner = CliRunner()
+    preview = runner.invoke(app, ["run-configure", "--upgrade", "--preview", "--json"])
+    assert preview.exit_code == 0, preview.output
+    preview_id = json.loads(preview.output)["data"]["preview_id"]
+    assert owner.config.read_bytes() == owner.original
+    confirmation = runner.invoke(app, ["run-configure", "--upgrade", "--confirm", preview_id, "--json"])
+    assert confirmation.exit_code == 0, confirmation.output
+    assert json.loads(confirmation.output)["data"]["written"]
+    text = runner.invoke(app, ["run-configure", "--upgrade", "--preview"])
+    assert text.exit_code == 0, text.output
+    for expected in ("Expected registration:", "Configuration bytes:", "Interpreter:",
+                     "Script:", "Profile:", "Extension sha256:", "anvil run-configure --upgrade --confirm"):
+        assert expected in text.output
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--upgrade", "--write"], ["--upgrade"], ["--preview"],
+    ["--upgrade", "--preview", "--confirm", "a" * 32],
+    ["--upgrade", "--confirm", "a" * 32, "--script", "/synthetic/script"],
+    ["--upgrade", "--confirm", "a" * 32, "--profile", "/synthetic/profile"],
+    ["--upgrade", "--confirm", "a" * 32, "--interpreter", "/synthetic/python"],
+])
+def test_upgrade_cli_cannot_bypass_frozen_candidate(monkeypatch, arguments):
+    import anvil.cli.execute as execute_cli
+
+    monkeypatch.setattr(execute_cli, "preview_execution_adapter_upgrade", lambda *_: pytest.fail("No preview"))
+    monkeypatch.setattr(execute_cli, "confirm_execution_adapter_upgrade", lambda *_: pytest.fail("No confirmation"))
+    result = CliRunner().invoke(app, ["run-configure", *arguments, "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"]["code"] == "invalid_registration"

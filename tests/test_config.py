@@ -1254,6 +1254,352 @@ def test_execution_registration_hash_drift_refuses(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def execution_upgrade_owner(tmp_path, monkeypatch):
+    """Disposable owner/config; no OpenShell, model, canonical State or subprocess."""
+    import contextlib
+    import dataclasses
+    import hashlib
+    import json
+    import os
+    from types import SimpleNamespace
+
+    import anvil.config as config_module
+    import anvil.execution as execution
+    from anvil.config import register_execution_adapter, validate_execution_adapter_inputs
+
+    if os.name != "posix":
+        pytest.skip("The concrete Pi owner uses POSIX flock")
+    import fcntl
+
+    owner_home = tmp_path / "owner-home"
+    owner_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(owner_home))
+    script = owner_home / "plugin/scripts/coordinate.py"
+    extension = owner_home / "plugin/extensions/coordination.js"
+    package = owner_home / "plugin/package.json"
+    interpreter = owner_home / "python"
+    profile = owner_home / "profile.json"
+    for path in (script, extension, package, interpreter, profile):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic trusted bytes")
+        path.chmod(0o600)
+    package.write_text('{"name":"codex-pi-coordination","version":"0.3.0"}')
+    profile.write_text('{"sandbox_id":"synthetic-sandbox","sandbox_name":"synthetic"}')
+    registration = register_execution_adapter(script, interpreter, profile)
+    config = owner_home / "config.yaml"
+    config.write_text("# Original owner comment\n" + yaml.safe_dump({
+        "owner_setting": {"keep": ["one", "two"]},
+        "execution_adapter": dataclasses.asdict(registration),
+    }))
+    config.chmod(0o600)
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(config))
+    control = SimpleNamespace(
+        config=config, script=script, extension=extension, package=package,
+        interpreter=interpreter, profile=profile, registration=registration,
+        original=config.read_bytes(), probe_calls=[], owner_reads=0, probe_error=False,
+        real_owner_reader=config_module._read_execution_adapter_owner,
+        owner_error=False, state={"id": "synthetic-sandbox", "name": "synthetic",
+                                  "phase": "Stopped", "main_process_instance_id": "synthetic-main",
+                                  "restart_count": 1}, change_after_read=None, on_owner_read=None,
+    )
+    lock_root = owner_home / ".local/state/codex-pi-coordination"
+    key = hashlib.sha256(b"synthetic-sandbox").hexdigest()
+    control.lock = lock_root / (key + ".lock")
+    control.journal = lock_root / (key + ".json")
+
+    def validate(registration, cwd, assignment=None, *, candidate_path=None):
+        assert cwd == config.parent and assignment is None
+        assert json.loads(candidate_path.read_bytes()) == dataclasses.asdict(registration)
+        validate_execution_adapter_inputs(registration)
+        control.probe_calls.append(candidate_path)
+        if control.probe_error:
+            raise ValueError("Synthetic adapter lacks the saved contract")
+
+    def read_owner(candidate, candidate_path, cwd):
+        assert cwd == config.parent
+        assert json.loads(candidate_path.read_bytes()) == dataclasses.asdict(candidate)
+        # Even a synthetic read must run while the parent's concrete owner lock is held.
+        with control.lock.open("a") as contender:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        control.owner_reads += 1
+        if control.on_owner_read is not None:
+            control.on_owner_read(control.owner_reads)
+        if control.owner_error:
+            raise OSError("synthetic unavailable owner")
+        if control.change_after_read == control.owner_reads:
+            control.state["main_process_instance_id"] = "changed-main"
+        return dict(control.state)
+
+    @contextlib.contextmanager
+    def exclusive_owner(selected_profile, selected_lock_root):
+        assert selected_profile["sandbox_id"] == "synthetic-sandbox"
+        assert selected_lock_root == lock_root
+        lock_root.mkdir(parents=True, exist_ok=True)
+        with control.lock.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield control.journal
+
+    module = SimpleNamespace(
+        digest=lambda value: hashlib.sha256(value).hexdigest(),
+        profile_settings=lambda path: json.loads(path.read_bytes()),
+        exclusive_owner=exclusive_owner,
+        OpenShellOwner=lambda *_: pytest.fail("Owner reads require bounded capture"),
+    )
+
+    def adapter_module(candidate, *, require_registered=True):
+        assert require_registered is False
+        validate_execution_adapter_inputs(candidate)
+        return module
+
+    monkeypatch.setattr(execution, "validate_adapter_contract", validate)
+    monkeypatch.setattr(execution, "adapter_module", adapter_module)
+    monkeypatch.setattr(config_module, "_read_execution_adapter_owner", read_owner)
+    monkeypatch.setattr(execution, "journal_root", lambda *_: pytest.fail("No project State in upgrade"))
+    return control
+
+
+def test_saved_registration_is_explicit_and_legacy_loader_preserves_capability(execution_upgrade_owner):
+    import dataclasses
+
+    from anvil.config import ExecutionAdapter, load_execution_adapter, register_execution_adapter
+
+    owner = execution_upgrade_owner
+    assert load_execution_adapter().registration["contract_version"] == 2
+    assert load_execution_adapter().registration["capabilities"]["saved_session_continue"] is False
+    saved = register_execution_adapter(owner.script, owner.interpreter, owner.profile,
+                                       saved_session_continue=True)
+    assert saved.registration["contract_version"] == 3
+    assert saved.registration["capabilities"]["saved_session_continue"] is True
+    for version, enabled in ((2, True), (3, False), (3, 1), (2, 0)):
+        data = dataclasses.asdict(saved)
+        data["registration"]["contract_version"] = version
+        data["registration"]["capabilities"]["saved_session_continue"] = enabled
+        with pytest.raises(ValueError, match="capabilities"):
+            ExecutionAdapter(**data)
+
+
+def test_registration_upgrade_preserves_backup_profile_journal_and_other_settings(execution_upgrade_owner):
+    import json
+
+    from anvil.config import (
+        confirm_execution_adapter_upgrade,
+        load_execution_adapter,
+        preview_execution_adapter_upgrade,
+    )
+
+    owner = execution_upgrade_owner
+    owner.journal.parent.mkdir(parents=True)
+    journal = json.dumps({"cleanup_complete": True, "sandbox_after": owner.state}).encode()
+    owner.journal.write_bytes(journal)
+    original_profile = owner.profile.read_bytes()
+    preview = preview_execution_adapter_upgrade()
+    assert owner.config.read_bytes() == owner.original and owner.owner_reads == 0
+    assert preview["previous"]["registration"]["contract_version"] == 2
+    assert preview["candidate"]["registration"]["contract_version"] == 3
+    result = confirm_execution_adapter_upgrade(preview["preview_id"])
+    assert result["changed"] and result["written"] and not result["runtime_qualified"]
+    assert load_execution_adapter().registration["capabilities"]["saved_session_continue"] is True
+    assert yaml.safe_load(owner.config.read_bytes())["owner_setting"] == {"keep": ["one", "two"]}
+    assert [p.read_bytes() for p in owner.config.parent.glob("*.before-execution-*")] == [owner.original]
+    assert owner.journal.read_bytes() == journal and owner.profile.read_bytes() == original_profile
+    assert owner.owner_reads == 3 and len(owner.probe_calls) == 2
+    with pytest.raises(ValueError, match="already confirmed"):
+        confirm_execution_adapter_upgrade(preview["preview_id"])
+    current = owner.config.read_bytes()
+    noop = preview_execution_adapter_upgrade()
+    assert not noop["changed"]
+    assert not confirm_execution_adapter_upgrade(noop["preview_id"])["written"]
+    assert owner.config.read_bytes() == current
+    assert len(list(owner.config.parent.glob("*.before-execution-*"))) == 1
+
+
+@pytest.mark.parametrize("changed", ["config", "script", "extension", "interpreter", "profile", "candidate"])
+def test_registration_upgrade_preimage_drift_refuses(execution_upgrade_owner, changed):
+    from anvil.config import confirm_execution_adapter_upgrade, preview_execution_adapter_upgrade
+
+    owner = execution_upgrade_owner
+    preview = preview_execution_adapter_upgrade()
+    if changed == "candidate":
+        owner.probe_calls[0].write_text("{}")
+    else:
+        path = getattr(owner, changed)
+        path.write_bytes(path.read_bytes() + (b"\n# drift\n" if changed == "config" else b" changed"))
+    current = owner.config.read_bytes()
+    with pytest.raises((ValueError, OSError)):
+        confirm_execution_adapter_upgrade(preview["preview_id"])
+    assert owner.config.read_bytes() == current and owner.owner_reads == 0
+    assert not list(owner.config.parent.glob("*.before-execution-*"))
+
+
+@pytest.mark.parametrize("seconds", [-1, 300, 301])
+def test_registration_upgrade_expiry_and_clock_refuse(execution_upgrade_owner, monkeypatch, seconds):
+    from datetime import datetime, timedelta
+
+    import anvil.execution as execution
+    from anvil.config import confirm_execution_adapter_upgrade, preview_execution_adapter_upgrade
+
+    owner = execution_upgrade_owner
+    preview = preview_execution_adapter_upgrade()
+    monkeypatch.setattr(execution, "now", lambda: datetime.fromisoformat(preview["created_at"]) + timedelta(seconds=seconds))
+    with pytest.raises(ValueError, match="expired|clock"):
+        confirm_execution_adapter_upgrade(preview["preview_id"])
+    assert owner.config.read_bytes() == owner.original and owner.owner_reads == 0
+
+
+@pytest.mark.parametrize("failure", ["busy", "config_busy", "unresolved", "foreign_main", "foreign_id", "ready", "unavailable", "changed_main"])
+def test_registration_upgrade_owner_refusals_preserve_config(execution_upgrade_owner, failure):
+    import contextlib
+    import fcntl
+    import json
+
+    from anvil.config import confirm_execution_adapter_upgrade, preview_execution_adapter_upgrade
+
+    owner = execution_upgrade_owner
+    preview = preview_execution_adapter_upgrade()
+    owner.journal.parent.mkdir(parents=True, exist_ok=True)
+    journal = {"cleanup_complete": True, "sandbox_after": dict(owner.state)}
+    if failure == "unresolved":
+        journal["cleanup_complete"] = False
+    if failure == "foreign_main":
+        journal["sandbox_after"]["main_process_instance_id"] = "foreign"
+    if failure == "foreign_id":
+        journal["sandbox_after"]["id"] = "foreign"
+    if failure == "ready":
+        owner.state["phase"] = "Ready"
+    owner.owner_error = failure == "unavailable"
+    owner.change_after_read = 2 if failure == "changed_main" else None
+    owner.journal.write_text(json.dumps(journal))
+    journal_bytes = owner.journal.read_bytes()
+    if failure == "config_busy":
+        owner.config.with_name(owner.config.name + ".execution-registration.lock").write_bytes(b"other")
+    with contextlib.ExitStack() as stack:
+        if failure == "busy":
+            lock = stack.enter_context(owner.lock.open("a"))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises((ValueError, OSError)):
+            confirm_execution_adapter_upgrade(preview["preview_id"])
+    assert owner.config.read_bytes() == owner.original
+    assert owner.journal.read_bytes() == journal_bytes
+
+
+@pytest.mark.parametrize("failure", [
+    None, "command_timeout", "output_overflow", "containment_unknown",
+    "malformed", "duplicate_key", "empty_main", "extra_field", "bool_restart", "oversized",
+])
+def test_registration_upgrade_uses_bounded_owner_capture(execution_upgrade_owner, monkeypatch, failure):
+    import fcntl
+    import json
+    import sys
+    import time
+
+    import anvil.config as config_module
+    import anvil.execution_runner as runner
+    from anvil.execution import ExecutionError, json_bytes
+
+    owner = execution_upgrade_owner
+    preview = config_module.preview_execution_adapter_upgrade()
+    monkeypatch.setattr(config_module, "_read_execution_adapter_owner", owner.real_owner_reader)
+    calls = []
+
+    def capture(argv, cwd, directory, name, deadline, maximum, *, separate_stdout):
+        assert argv == [
+            sys.executable, "-I", "-m", "anvil.execution_runner", "--verify-owner",
+            "--candidate", str(owner.probe_calls[0]),
+            "--output", str(directory / "owner-cli"),
+        ]
+        assert cwd == owner.config.parent and name == "owner"
+        assert maximum == 4096 and separate_stdout is True
+        assert 0 < deadline - time.monotonic() <= 40
+        assert not (directory / "owner-cli").exists()
+        with owner.lock.open("a") as contender:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        calls.append(directory)
+        if failure in {"command_timeout", "output_overflow", "containment_unknown"}:
+            raise ExecutionError(failure, "Synthetic owned-capture refusal")
+        state = dict(owner.state)
+        if failure == "empty_main":
+            state["main_process_instance_id"] = ""
+        if failure == "extra_field":
+            state["unexpected"] = "not allowed"
+        if failure == "bool_restart":
+            state["restart_count"] = True
+        raw = json_bytes(state)
+        if failure == "malformed":
+            raw = b"{"
+        if failure == "duplicate_key":
+            raw = b'{"id":"wrong",' + json.dumps(state).encode()[1:]
+        if failure == "oversized":
+            raw = b" " * 4097
+        (directory / "owner.stdout").write_bytes(raw)
+        return {"exit_code": 0}
+
+    monkeypatch.setattr(runner, "capture", capture)
+    if failure is None:
+        assert config_module.confirm_execution_adapter_upgrade(preview["preview_id"])["written"]
+        assert len(calls) == len(set(calls)) == 3
+    else:
+        with pytest.raises(ValueError, match="verify"):
+            config_module.confirm_execution_adapter_upgrade(preview["preview_id"])
+        assert owner.config.read_bytes() == owner.original
+        assert not list(owner.config.parent.glob("*.before-execution-*"))
+        assert len(calls) == 1
+
+
+def test_registration_upgrade_never_executes_drifted_old_code(execution_upgrade_owner):
+    from anvil.config import confirm_execution_adapter_upgrade, preview_execution_adapter_upgrade
+
+    owner = execution_upgrade_owner
+    owner.script.write_text("# new candidate, old pinned bytes no longer installed")
+    preview = preview_execution_adapter_upgrade()
+    assert preview["previous"]["registration"]["code_sha256"] != preview["candidate"]["registration"]["code_sha256"]
+    assert confirm_execution_adapter_upgrade(preview["preview_id"])["written"]
+
+
+def test_registration_upgrade_requires_contract_probe_and_unchanged_profile(execution_upgrade_owner):
+    from anvil.config import preview_execution_adapter_upgrade
+
+    owner = execution_upgrade_owner
+    owner.probe_error = True
+    with pytest.raises(ValueError, match="lacks the saved contract"):
+        preview_execution_adapter_upgrade()
+    assert owner.config.read_bytes() == owner.original and owner.owner_reads == 0
+    owner.profile.write_text('{"different_owner":true}')
+    with pytest.raises(ValueError, match="preserve.*profile"):
+        preview_execution_adapter_upgrade()
+    assert len(owner.probe_calls) == 1
+
+
+@pytest.mark.parametrize("changed", ["config", "profile", "candidate", "preview", "journal"])
+def test_registration_upgrade_mid_confirmation_drift_preserves_config(execution_upgrade_owner, changed):
+    from anvil.config import confirm_execution_adapter_upgrade, preview_execution_adapter_upgrade
+
+    owner = execution_upgrade_owner
+    preview = preview_execution_adapter_upgrade()
+    directory = owner.probe_calls[0].parent
+
+    def drift(read_number):
+        if read_number != 3:
+            return
+        if changed in {"config", "profile"}:
+            path = getattr(owner, changed)
+            path.write_bytes(path.read_bytes() + b"\n# concurrent change\n")
+        elif changed == "journal":
+            owner.journal.write_text('{"cleanup_complete":false}')
+        else:
+            path = directory / (changed + ".json")
+            path.write_bytes(path.read_bytes() + b"\n")
+
+    owner.on_owner_read = drift
+    with pytest.raises(ValueError, match="changed"):
+        confirm_execution_adapter_upgrade(preview["preview_id"])
+    expected = owner.original + b"\n# concurrent change\n" if changed == "config" else owner.original
+    assert owner.config.read_bytes() == expected
+    assert not (directory / "result.json").exists()
+
+
+@pytest.fixture
 def execution_permission_root():
     """Use reachable disposable ancestry; pytest's private temp root masks exposure."""
     import os
