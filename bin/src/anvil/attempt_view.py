@@ -485,7 +485,7 @@ def _compose(
             "tasks",
             "id, feature_id, prd_id, title, description, status, priority, task_type, "
             "dependencies, conflict_groups, scores, acceptance_criteria, implementation_notes, "
-            "verification, claims, likely_files, parent_task_id, created_at, updated_at",
+            "verification, claims, likely_files, parent_task_id, created_at, updated_at, closure",
             "id = ? AND prd_id = ?",
             (stored, scope),
         )
@@ -493,7 +493,7 @@ def _compose(
     task_data = _json_columns(
         task_row,
         "dependencies conflict_groups scores acceptance_criteria "
-        "implementation_notes verification claims likely_files",
+        "implementation_notes verification claims likely_files closure",
     )
     # Match the native row reader, including JSON arrays in frozen profile bindings.
     typed_task = Task.model_validate(task_data)
