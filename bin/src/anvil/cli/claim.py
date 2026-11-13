@@ -632,6 +632,8 @@ def claim(
                         clean_source(resolved_cwd, execution_source)
                     except ExecutionError as error:
                         raise ClaimError(str(error)) from error
+                    if plan.claim_start_sha != execution_source:
+                        raise ClaimError("Native claim source differs from the preview source")
 
         try:
             from anvil.roots.registry import RootSetRegistry

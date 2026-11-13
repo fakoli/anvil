@@ -41,6 +41,8 @@ def sha(raw): return hashlib.sha256(raw).hexdigest()
 def validate_task(task):
     assert task['version'] == 2
     assert task['kind'] == 'implementation'
+    if len(task['task_id']) > 128 or len(task['instructions'].encode()) > 32000:
+        raise ValueError('Synthetic adapter task exceeds the actual v2 bounds')
     return task
 
 def profile_settings(path): return {"model":"synthetic/model", "sandbox_name":"synthetic-owned", "sandbox_id":"synthetic-sandbox", "thinking":"low", **json.loads(pathlib.Path(path).read_text())}
@@ -49,6 +51,8 @@ def frozen_source(task):
     root, revision = task['repository'], task['revision']
     raw = subprocess.check_output(['git', '-C', root, 'archive', revision])
     with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
+        if any(not item.isfile() and not item.isdir() for item in archive):
+            raise ValueError('Synthetic adapter refuses nonregular source members')
         files = {item.name: archive.extractfile(item).read() for item in archive if item.isfile()}
     return files, {'kind':'git','commit':revision,'files':{p:sha(b) for p,b in files.items()},'modes':{p:420 for p in files}}
 def verify_return(results, task, files, run_id):
@@ -305,9 +309,12 @@ def test_unknown_dispatch_keeps_slot_and_does_not_retry(execution_project, monke
     import anvil.execution as execution
 
     preview = _preview(execution_project)
+    original = execution.native_cli
 
-    def interrupted(*args, **kwargs):
-        raise OSError("simulated lost claim acknowledgement")
+    def interrupted(cwd, *arguments, **kwargs):
+        if arguments[0] == "claim":
+            raise OSError("simulated lost claim acknowledgement")
+        return original(cwd, *arguments, **kwargs)
 
     monkeypatch.setattr(execution, "native_cli", interrupted)
     with pytest.raises(OSError, match="lost claim"):
@@ -502,6 +509,151 @@ def test_capability_profile_change_and_busy_owner_are_closed(execution_project):
     with pytest.raises(ExecutionError, match="existing execution"):
         execution.refresh_execution_capabilities(repo)
     assert not (root / "runs").exists()
+
+
+def test_admission_repair_normalizes_only_new_claim_actor(execution_project):
+    backend, repo, state, _ = execution_project
+    before = (state / "events.jsonl").read_bytes()
+    preview = preview_run(repo, "release:T001", "cafe\u0301", RunOptions())
+    assert preview["actor"] == "caf\u00e9"
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == before
+
+
+def test_admission_repair_existing_owner_lookup_remains_exact(execution_project):
+    backend, repo, state, _ = execution_project
+    claimed = json.loads(native_cli(
+        repo, "claim", "release:T001", "--actor", "caf\u00e9", "--worktree", "--json"
+    ))["data"]["claim"]
+    directory = Path(claimed["worktree_path"])
+    before = (state / "events.jsonl").read_bytes()
+    with pytest.raises(ExecutionError, match="exact owner"):
+        preview_run(directory, "release:T001", "cafe\u0301", RunOptions())
+    preview = preview_run(directory, "release:T001", "caf\u00e9", RunOptions())
+    assert preview["claim"]["id"] == claimed["id"]
+    assert backend.get_claim(claimed["id"]).claimed_by == "caf\u00e9"
+    assert (state / "events.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("confirming", [False, True])
+def test_admission_repair_rechecks_material_after_packet_refresh(
+    execution_project, monkeypatch, confirming
+):
+    import anvil.execution as execution
+
+    backend, repo, state, _ = execution_project
+    task = backend.get_task("release:T001")
+    preview = _preview(execution_project) if confirming else None
+    original = execution.native_cli
+
+    def packet_then_status_change(cwd, *arguments, **kwargs):
+        result = original(cwd, *arguments, **kwargs)
+        if arguments[0] == "packet":
+            backend.append(_event("task.status_changed", {
+                "task_id": task.id, "from": "ready", "to": "drafted",
+            }, target_kind="task", target_id=task.id))
+        return result
+
+    monkeypatch.setattr(execution, "native_cli", packet_then_status_change)
+    with pytest.raises(ExecutionError, match="no longer ready"):
+        if confirming:
+            confirm_run(repo, task.id, "synthetic-owner", preview["preview_id"])
+        else:
+            _preview(execution_project)
+    assert not backend.list_active_claims()
+    assert not (state / "execution" / "slots").exists()
+    assert not (state / "execution" / "consumed").exists()
+
+
+def test_admission_repair_expiry_during_preflight_refuses_reservation(
+    execution_project, monkeypatch
+):
+    import anvil.execution as execution
+
+    backend, repo, state, _ = execution_project
+    preview = _preview(execution_project)
+    observed = execution.now()
+    original = execution.preflight_assignment
+
+    def preflight_then_expire(context):
+        result = original(context)
+        monkeypatch.setattr(execution, "now", lambda: observed + timedelta(seconds=301))
+        return result
+
+    monkeypatch.setattr(execution, "preflight_assignment", preflight_then_expire)
+    with pytest.raises(ExecutionError, match="expired"):
+        confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    assert not backend.list_active_claims()
+    assert not (state / "execution" / "slots").exists()
+    assert not (state / "execution" / "consumed").exists()
+
+
+def test_admission_repair_local_layout_refuses_before_journal(execution_project, monkeypatch):
+    backend, repo, state, _ = execution_project
+    before = (state / "events.jsonl").read_bytes()
+    monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
+    with pytest.raises(ExecutionError) as error:
+        preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    assert error.value.code == "unsupported_local_isolated_mode"
+    assert not (repo / ".anvil").exists()
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("invalid", ["directory", "oversized_assignment", "source_symlink"])
+def test_admission_repair_validates_actual_scope_before_reservation(execution_project, invalid):
+    from anvil.execution import git
+
+    backend, repo, state, _ = execution_project
+    task = backend.get_task("release:T001")
+    fields = {}
+    if invalid == "directory":
+        (repo / "directory").mkdir()
+        (repo / "directory" / "file.txt").write_text("retained\n")
+        fields["likely_files"] = ["directory"]
+    elif invalid == "source_symlink":
+        (repo / "source-link").symlink_to("README.md")
+    else:
+        fields["description"] = "x" * 33000
+    if invalid != "oversized_assignment":
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "Synthetic invalid execution source")
+    if fields:
+        backend.append(_event("task.created", {
+            **task.model_dump(mode="json"), "prd_id": task.prd_id, **fields,
+        }, target_kind="task", target_id=task.id))
+    before = (state / "events.jsonl").read_bytes()
+    with pytest.raises(ExecutionError):
+        preview_run(repo, task.id, "synthetic-owner", RunOptions())
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == before
+    root = state / "execution"
+    assert not (root / "slots").exists()
+    assert not (root / "consumed").exists()
+    assert not (root / "runs").exists()
+    assert not list((root / "previews").glob("*.json"))
+
+
+def test_admission_repair_checks_native_default_source_before_reservation(execution_project):
+    from anvil.execution import git
+
+    backend, repo, state, _ = execution_project
+    git(repo, "checkout", "-qb", "synthetic-preview-branch")
+    (repo / "separate.txt").write_text("must not silently disappear\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "Preview source differs from default base")
+    before = (state / "events.jsonl").read_bytes()
+    with pytest.raises(ExecutionError, match="source|Source"):
+        preview_run(repo, "release:T001", "synthetic-owner", RunOptions())
+    with pytest.raises(ExecutionError):
+        native_cli(
+            repo, "claim", "release:T001", "--actor", "synthetic-owner", "--worktree",
+            "--execution-scope", scope_digest(backend, "release:T001"),
+            "--execution-source", git(repo, "rev-parse", "HEAD").decode().strip(), "--json",
+        )
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == before
+    assert not (state / "execution" / "slots").exists()
 
 
 @pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])

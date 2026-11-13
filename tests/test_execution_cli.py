@@ -164,3 +164,30 @@ def test_text_preview_exposes_reviewable_scope(
     ):
         assert expected in result.output
     assert not backend.list_active_claims()
+
+
+@pytest.mark.parametrize("command", ["configure", "run", "capabilities"])
+def test_admission_repair_malformed_owner_yaml_is_structured(execution_project, command):
+    from anvil.config import global_config_path
+
+    backend, repo, state, registration = execution_project
+    config = global_config_path()
+    original = b"execution_adapter: [synthetic-private-marker\n"
+    config.write_bytes(original)
+    before = (state / "events.jsonl").read_bytes()
+    if command == "configure":
+        arguments = [
+            "run-configure", "--script", registration.script,
+            "--interpreter", registration.interpreter, "--profile", registration.profile,
+        ]
+    elif command == "run":
+        arguments = ["run", "release:T001", "--preview", "--cwd", str(repo)]
+    else:
+        arguments = ["run-capabilities", "--cwd", str(repo)]
+    result = CliRunner().invoke(app, [*arguments, "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["ok"] is False
+    assert "synthetic-private-marker" not in result.output
+    assert config.read_bytes() == original
+    assert not backend.list_active_claims()
+    assert (state / "events.jsonl").read_bytes() == before

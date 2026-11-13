@@ -43,6 +43,77 @@ def _wait(directory):
     pytest.fail("owned execution worker did not return")
 
 
+@pytest.mark.parametrize("preclaimed", [False, True])
+def test_admission_repair_preserves_large_work_packet_and_current_proof(
+    execution_project, preclaimed
+):
+    import signal
+
+    from anvil.execution import native_cli
+    from tests.test_bundle_state import _event
+
+    backend, repo, _, _ = execution_project
+    task = backend.get_task("release:T001")
+    description = "x" * 28000
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id, "description": description,
+    }, target_kind="task", target_id=task.id))
+    directory = repo
+    if preclaimed:
+        claimed = json.loads(native_cli(
+            repo, "claim", task.id, "--actor", "synthetic-owner", "--worktree", "--json"
+        ))["data"]["claim"]
+        directory = Path(claimed["worktree_path"])
+    preview = preview_run(directory, task.id, "synthetic-owner", RunOptions())
+    admitted = confirm_run(directory, task.id, "synthetic-owner", preview["preview_id"])
+    retained = journal_root(repo) / "runs" / admitted["run_id"]
+    try:
+        result = _wait(retained)
+        assert result["state"] == "needs_review", result
+        assignment = read_receipt(retained / "adapter-task.json")
+        assert description in assignment["instructions"]
+        assert 28000 <= len(assignment["instructions"].encode()) <= 32000
+        assert "active_claim" not in assignment["instructions"]
+        packet = (retained / "packet.txt").read_bytes()
+        assert len(packet) > 32000
+        assert json.loads(packet.split(b"\n\n", 1)[1])["active_claim"]["id"] == admitted["claim_id"]
+        evidence = backend.get_latest_evidence(task.id)
+        assert evidence.proofs[0].evidence_core.claim_id == admitted["claim_id"]
+    finally:
+        pid = read_receipt(retained / "launched.json")["pid"]
+        if not process_group_absent(pid):
+            os.killpg(pid, signal.SIGKILL)
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+
+
+def test_admission_repair_unicode_new_owner_reaches_native_proof(execution_project):
+    import signal
+
+    backend, repo, _, _ = execution_project
+    actor = "cafe\u0301"
+    preview = preview_run(repo, "release:T001", actor, RunOptions())
+    admitted = confirm_run(repo, "release:T001", actor, preview["preview_id"])
+    retained = journal_root(repo) / "runs" / admitted["run_id"]
+    try:
+        result = _wait(retained)
+        assert result["state"] == "needs_review", result
+        claim = backend.get_claim(admitted["claim_id"])
+        evidence = backend.get_latest_evidence("release:T001")
+        assert claim.claimed_by == "caf\u00e9"
+        assert evidence.proofs[0].evidence_core.claimed_by == claim.claimed_by
+    finally:
+        pid = read_receipt(retained / "launched.json")["pid"]
+        if not process_group_absent(pid):
+            os.killpg(pid, signal.SIGKILL)
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+
+
 def test_ready_run_edits_and_submits_real_native_proof(execution_project):
     backend, repo, state, _ = execution_project
     preview = preview_run(repo, "release:T001", "synthetic-owner", RunOptions())

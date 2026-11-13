@@ -12,7 +12,12 @@ import yaml
 
 from anvil.cli._helpers import _resolve_project_dir, resolve_actor
 from anvil.cli._json import JSON_OPTION, emit_success, fail_with
-from anvil.config import execution_file_bytes, global_config_path, register_execution_adapter
+from anvil.config import (
+    execution_config_mapping,
+    execution_file_bytes,
+    global_config_path,
+    register_execution_adapter,
+)
 from anvil.execution import (
     ExecutionError,
     RunOptions,
@@ -38,9 +43,7 @@ def run_configure(
         registration = register_execution_adapter(script, interpreter, profile)
         path = global_config_path()
         original = execution_file_bytes(path, 1024 * 1024) if path.exists() else b""
-        existing = yaml.safe_load(original) or {}
-        if not isinstance(existing, dict):
-            raise ValueError("Global configuration must be a mapping")
+        existing = execution_config_mapping(original)
         data = dataclasses.asdict(registration)
         previous = existing.get("execution_adapter")
         if previous is not None and previous != data:

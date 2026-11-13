@@ -38,6 +38,19 @@ uses those saved options and rechecks current material scope. Ready tasks get a
 native isolated claim. To use an existing claim, run from its isolated checkout
 as its exact actor. Dependencies must be `done`. Bundle members, root sets,
 unbounded paths, verification profiles and dirty source refuse in this slice.
+New claim actors use Anvil's native Unicode normalization; existing owners must
+still match their recorded identity exactly. Initial Run requires shared
+workspace State. `ANVIL_STATE_LAYOUT=local` refuses before reservation with
+`unsupported_local_isolated_mode`; this command never creates replacement State
+for an isolated checkout.
+
+Preview validates the concrete assignment, writable files and source export
+before reserving an execution slot or creating a claim. A ready task's preview
+source must match the native claim planner's selected source; for an existing
+branch, create its normal isolated owner claim first. Preview and confirmation
+refresh the native packet sidecar and may perform the packet command's ordinary
+stale-claim maintenance. They recheck task material and ownership afterward;
+preview is not a purely read-only operation.
 
 Omit model options to use the configured default. Set per-run options only on
 the preview:
@@ -113,3 +126,9 @@ Contract digests use Anvil's canonical UTF-8 JSON. Local interpreter pinning and
 operational status remain separate; neither an adapter result nor sandbox checks
 grant native acceptance. Hidden Git index flags and special file-mode bits
 refuse rather than hiding source changes or normalizing permissions.
+The full native packet output is retained byte-for-byte with its hash. Model
+instructions preserve its work content while omitting only active ownership,
+update-protocol instructions and the current task's status/update timestamp;
+the outer request binds those separately. The same assignment is validated
+before and after claiming, allowing only the native checkout path to change.
+Oversized instructions fail before reservation rather than being truncated.

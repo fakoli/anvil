@@ -157,6 +157,19 @@ def execution_file_bytes(path: Path, maximum: int = 128 * 1024 * 1024) -> bytes:
     return path.read_bytes()
 
 
+def execution_config_mapping(raw: bytes) -> dict[str, object]:
+    """Parse owner configuration without exposing private YAML in an error."""
+    try:
+        value = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        raise ValueError("Global execution configuration contains invalid YAML") from None
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Global execution configuration must be a mapping")
+    return value
+
+
 def load_execution_adapter() -> ExecutionAdapter:
     """Only the global owner file may authorize adapter code or a profile."""
     import hashlib
@@ -164,8 +177,8 @@ def load_execution_adapter() -> ExecutionAdapter:
     path = global_config_path()
     if not path.exists():
         raise ValueError("Run is not configured; use anvil run-configure")
-    value = yaml.safe_load(execution_file_bytes(path, 1024 * 1024))
-    registration = value.get("execution_adapter") if isinstance(value, dict) else None
+    value = execution_config_mapping(execution_file_bytes(path, 1024 * 1024))
+    registration = value.get("execution_adapter")
     if type(registration) is not dict or set(registration) != {
         "registration",
         "interpreter_sha256",

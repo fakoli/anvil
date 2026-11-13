@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from anvil.actors import canonicalize_new_actor
 from anvil.config import ExecutionAdapter, execution_file_bytes, load_execution_adapter
 from anvil.state.hashing import canonical_json_bytes
 from anvil.state.models import Claim, Task
@@ -480,13 +481,27 @@ class AdapterResult:
 
 
 def assignment_for(context: dict[str, Any], packet: bytes) -> dict[str, Any]:
+    # The native CLI emits its sidecar location before the JSON body. Retain
+    # those exact bytes in packet.txt; project only the structured work below.
+    header, separator, payload = packet.partition(b"\n\n")
+    if not separator or not header.startswith(b"Wrote packet to "):
+        raise ExecutionError("invalid_packet", "Expected the native JSON packet output")
+    work = json.loads(payload)
+    if not isinstance(work, dict) or not isinstance(work.get("task"), dict):
+        raise ExecutionError("invalid_packet", "Expected the native structured work packet")
+    # Claim authority stays in the full retained packet and outer request.
+    # Only this bookkeeping changes when a ready task acquires its claim.
+    work.pop("active_claim", None)
+    work.pop("update_protocol", None)
+    work["task"].pop("status", None)
+    work["task"].pop("updated_at", None)
     return {
         "version": 2,
         "task_id": context["task_id"],
         "kind": "implementation",
         "instructions": (
             "Implement this native Anvil packet. "
-            "Return scoped edits; never grant acceptance.\n" + packet.decode()
+            "Return scoped edits; never grant acceptance.\n" + json_bytes(work).decode()
         ),
         "writable_paths": context["writable_paths"],
         "checks": [],
@@ -497,26 +512,32 @@ def assignment_for(context: dict[str, Any], packet: bytes) -> dict[str, Any]:
     }
 
 
+def writable_preimages(cwd: Path, names: list[str]) -> list[dict[str, Any]]:
+    from anvil.execution_runner import checked_path
+
+    paths = []
+    for name in names:
+        path = checked_path(cwd, name)
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+        bounded_integer(mode, 0, 0o777)
+        paths.append({
+            "path": name,
+            "before_sha256": digest(path.read_bytes()) if path.exists() else None,
+            "host_mode": mode,
+        })
+    return paths
+
+
 def request_for(
     context: dict[str, Any], packet: bytes, assignment: dict[str, Any]
 ) -> ExecutionRequest:
     from anvil.claims.command_proof_artifact import claim_command_cwd_identity
-    from anvil.execution_runner import checked_path
 
     claim = Claim.model_validate(context["claim"])
     immutable = claim.attestation_context
     registration = ExecutionAdapter(**context["adapter"])
     root = Path(context["cwd"])
-    paths = []
-    for name in context["writable_paths"]:
-        path = checked_path(root, name)
-        paths.append(
-            {
-                "path": name,
-                "before_sha256": digest(path.read_bytes()) if path.exists() else None,
-                "host_mode": stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644,
-            }
-        )
+    paths = writable_preimages(root, context["writable_paths"])
     value = {
         "schema": "anvil.execution-request.v1",
         "dispatch_id": context["run_id"],
@@ -590,13 +611,20 @@ def adapter_module(registration: ExecutionAdapter) -> Any:
     return module
 
 
-def validate_adapter_contract(registration: ExecutionAdapter, cwd: Path) -> None:
+def validate_adapter_contract(
+    registration: ExecutionAdapter, cwd: Path, assignment: dict[str, Any] | None = None
+) -> None:
     """Local validation in isolated Python, without project import fallback."""
     from anvil.execution_runner import capture
 
     directory = private_directory(journal_root(cwd) / "operations" / uuid.uuid4().hex)
+    arguments = [sys.executable, "-I", "-m", "anvil.execution_runner", "--validate-adapter"]
+    if assignment is not None:
+        path = directory / "assignment.json"
+        write_receipt(path, assignment)
+        arguments.append(str(path))
     result = capture(
-        [sys.executable, "-I", "-m", "anvil.execution_runner", "--validate-adapter"],
+        arguments,
         cwd,
         directory,
         "contract",
@@ -609,7 +637,9 @@ def validate_adapter_contract(registration: ExecutionAdapter, cwd: Path) -> None
         dataclasses.asdict(registration)
     ):
         raise ExecutionError(
-            "adapter_unavailable", "Registered adapter lacks the required v2 contract"
+            "adapter_unavailable",
+            "Registered adapter refuses the concrete assignment or source"
+            if assignment is not None else "Registered adapter lacks the required v2 contract",
         )
 
 
@@ -780,10 +810,90 @@ def journal_root(cwd: Path) -> Path:
     return private_directory(state / "execution")
 
 
+def require_isolated_state_layout() -> None:
+    from anvil.cli._helpers import _is_local_layout
+
+    if _is_local_layout():
+        raise ExecutionError(
+            "unsupported_local_isolated_mode",
+            "Run requires shared workspace State for isolated claims; local State is unsupported",
+        )
+
+
+def require_planned_source(cwd: Path, task: Task, source: str, state: Path) -> None:
+    from anvil.cli._helpers import _load_config_optional
+    from anvil.git_ops import ClaimPlanError, resolve_claim_plan
+
+    config = _load_config_optional(state)
+    try:
+        plan = resolve_claim_plan(
+            task.id, task.title, cwd=cwd, worktree=True,
+            branch_prefix=config.branch_prefix if config is not None else "agent",
+            isolation_required=True,
+        )
+    except ClaimPlanError as error:
+        raise ExecutionError("claim_plan_refused", str(error)) from error
+    if plan.claim_start_sha != source:
+        raise ExecutionError(
+            "claim_source_mismatch",
+            "Native claim source differs from preview source; use a fresh isolated owner claim",
+        )
+
+
+def preflight_assignment(context: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Validate actual work and export locally before reserving any execution."""
+    cwd = Path(context["cwd"])
+    preimages = writable_preimages(cwd, context["writable_paths"])
+    packet = native_cli(cwd, "packet", context["task_id"], "--format", "json")
+    assignment = assignment_for(context, packet)
+    validate_adapter_contract(ExecutionAdapter(**context["adapter"]), cwd, assignment)
+    clean_source(cwd, context["source_sha"])
+    return assignment, preimages
+
+
+def revalidate_admission(backend: Any, context: dict[str, Any], state: Path) -> None:
+    """Recheck material after native packet refresh, before reserving a slot."""
+    task_id = context["task_id"]
+    if scope_digest(backend, task_id) != context["scope_sha256"]:
+        raise ExecutionError("scope_changed", "Task scope changed after preview")
+    claims = [
+        item.model_dump(mode="json")
+        for item in backend.list_active_claims()
+        if item.task_id == task_id
+    ]
+    if claims != ([context["claim"]] if context["claim"] else []):
+        raise ExecutionError("claim_changed", "Claim changed after preview")
+    task = backend.get_task(task_id)
+    if claims:
+        live_claim(backend, context, remaining=context["wall_seconds"] + 180)
+    elif str(task.status) != "ready":
+        raise ExecutionError("task_not_ready", "Task is no longer ready")
+    else:
+        require_planned_source(Path(context["cwd"]), task, context["source_sha"], state)
+
+
+def require_fresh_preview(preview: dict[str, Any]) -> None:
+    if not (
+        datetime.fromisoformat(preview["created_at"])
+        <= now()
+        < datetime.fromisoformat(preview["expires_at"])
+    ):
+        raise ExecutionError("preview_expired", "Preview expired or the clock moved backwards")
+
+
+def require_unconsumed_preview(root: Path, preview_id: str) -> None:
+    consumed = root / "consumed" / (identifier(preview_id) + ".json")
+    if consumed.exists():
+        existing = read_receipt(consumed)
+        raise ExecutionError(
+            "preview_consumed", "Preview already dispatched as " + existing["run_id"]
+        )
+
+
 def preview_run(
     cwd: Path, task_id: str, actor: str, options: RunOptions, wall_seconds: int = 600
 ) -> dict[str, Any]:
-    from anvil.cli._helpers import _open_backend
+    from anvil.cli._helpers import _open_backend, _require_state_dir, _resolve_state_dir
 
     if os.name != "posix":
         raise ExecutionError(
@@ -791,10 +901,11 @@ def preview_run(
         )
     if type(wall_seconds) is not int or not 1 <= wall_seconds <= 1800:
         raise ExecutionError("invalid_budget", "Run budget must be 1..1800 seconds")
+    require_isolated_state_layout()
     registration = load_execution_adapter()
-    validate_adapter_contract(registration, cwd)  # no model/runtime call
-    root = journal_root(cwd)
-    backend = _open_backend(root.parent, project_root=cwd)
+    state = _resolve_state_dir(cwd)
+    _require_state_dir(state)
+    backend = _open_backend(state, project_root=cwd)
     try:
         scope = execution_scope(backend, task_id)
         task = backend.get_task(task_id)
@@ -824,6 +935,13 @@ def preview_run(
             raise ExecutionError(
                 "task_not_ready", "Run requires a ready task or its active isolated claim"
             )
+        else:
+            # Creation uses the native canonical identity. Historical claim
+            # lookup above deliberately preserves the exact supplied spelling.
+            actor = canonicalize_new_actor(actor)
+        source = clean_source(cwd)
+        if not claims:
+            require_planned_source(cwd, task, source, state)
         created = now()
         value = {
             "version": 1,
@@ -833,7 +951,7 @@ def preview_run(
             "actor": actor,
             "cwd": str(cwd.resolve()),
             "scope_sha256": digest(json_bytes(scope)),
-            "source_sha": clean_source(cwd),
+            "source_sha": source,
             "claim": claims[0].model_dump(mode="json") if claims else None,
             "writable_paths": paths,
             "commands": commands,
@@ -843,6 +961,10 @@ def preview_run(
             "created_at": timestamp(created),
             "expires_at": timestamp(created + timedelta(seconds=300)),
         }
+        assignment, preimages = preflight_assignment(value)
+        revalidate_admission(backend, value, state)
+        value.update(assignment=assignment, preimages=preimages)
+        root = journal_root(cwd)
         write_receipt(root / "previews" / (value["preview_id"] + ".json"), value)
         return value
     finally:
@@ -854,8 +976,11 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
 
     if os.name != "posix":
         raise ExecutionError("unsupported_platform", "Owned Run currently requires POSIX")
+    require_isolated_state_layout()
     root = journal_root(cwd)
     preview = read_receipt(root / "previews" / (identifier(preview_id) + ".json"))
+    if preview["claim"] is None:
+        actor = canonicalize_new_actor(actor)
     if (
         preview["task_id"] != task_id
         or preview["actor"] != actor
@@ -864,28 +989,23 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
         raise ExecutionError(
             "preview_mismatch", "Preview belongs to another task, actor or checkout"
         )
-    if (
-        not datetime.fromisoformat(preview["created_at"])
-        <= now()
-        < datetime.fromisoformat(preview["expires_at"])
-    ):
-        raise ExecutionError("preview_expired", "Preview expired or the clock moved backwards")
+    require_fresh_preview(preview)
+    require_unconsumed_preview(root, preview_id)
     if dataclasses.asdict(load_execution_adapter()) != preview["adapter"]:
         raise ExecutionError("adapter_changed", "Adapter registration changed after preview")
     clean_source(cwd, preview["source_sha"])
     backend = _open_backend(root.parent, project_root=cwd)
     try:
-        if scope_digest(backend, task_id) != preview["scope_sha256"]:
-            raise ExecutionError("scope_changed", "Task scope changed after preview")
-        current_claims = [
-            item.model_dump(mode="json")
-            for item in backend.list_active_claims()
-            if item.task_id == task_id
-        ]
-        if current_claims != ([preview["claim"]] if preview["claim"] else []):
-            raise ExecutionError("claim_changed", "Claim changed after preview")
+        revalidate_admission(backend, preview, root.parent)
+        assignment, preimages = preflight_assignment(preview)
+        revalidate_admission(backend, preview, root.parent)
     finally:
         backend.close()
+    if assignment != preview.get("assignment") or preimages != preview.get("preimages"):
+        raise ExecutionError(
+            "assignment_changed", "Execution work or preimages changed; preview again"
+        )
+    require_fresh_preview(preview)
     run_id = uuid.uuid4().hex
     slot = root / "slots" / (digest(task_id.encode()) + ".json")
     reserve_slot(
@@ -915,6 +1035,7 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
         cwd = Path(claim["worktree_path"])
     else:
         claim = preview["claim"]
+    clean_source(cwd, preview["source_sha"])
     packet = native_cli(cwd, "packet", task_id, "--format", "json")
     with (run_directory / "packet.txt").open("xb") as stream:
         os.chmod(run_directory / "packet.txt", 0o600)
@@ -935,6 +1056,10 @@ def confirm_run(cwd: Path, task_id: str, actor: str, preview_id: str) -> dict[st
     finally:
         backend.close()
     assignment = assignment_for(request, packet)
+    if assignment != {**preview["assignment"], "repository": str(cwd)}:
+        raise ExecutionError(
+            "assignment_changed", "Claimed work differs from the admitted assignment"
+        )
     portable = request_for(request, packet, assignment)
     write_receipt(run_directory / "context.json", request)
     write_receipt(run_directory / "adapter-task.json", assignment)
@@ -978,11 +1103,8 @@ def reserve_slot(
             "admission_busy", "Task admission is active or needs reconciliation"
         ) from error
     try:
-        if consume_preview and consumed.exists():
-            existing = read_receipt(consumed)
-            raise ExecutionError(
-                "preview_consumed", "Preview already dispatched as " + existing["run_id"]
-            )
+        if consume_preview:
+            require_unconsumed_preview(root, value["preview_id"])
         if slot.exists():
             existing = read_receipt(slot)
             previous = root / "runs" / identifier(existing["run_id"])

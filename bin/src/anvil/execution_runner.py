@@ -810,9 +810,13 @@ def execute_run(directory: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-    if sys.argv[1:] == ["--validate-adapter"]:
+    if len(sys.argv) in {2, 3} and sys.argv[1] == "--validate-adapter":
         registration = load_execution_adapter()
-        adapter_module(registration)
+        adapter = adapter_module(registration)
+        if len(sys.argv) == 3:
+            assignment = read_receipt(Path(sys.argv[2]))
+            adapter.validate_task(assignment)
+            adapter.frozen_source(assignment)
         sys.stdout.buffer.write(json_bytes(dataclasses.asdict(registration)))
         return 0
     result = execute_run(Path(sys.argv[1]))
