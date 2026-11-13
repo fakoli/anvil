@@ -23,7 +23,17 @@ from anvil.state.backend import EventRejected
 from anvil.state.models import Task, TaskStatus
 from anvil.state.sqlite import SqliteBackend, query_only_transaction
 from anvil.task_actions import available_task_actions, transition_task
-from anvil.web import BundleListRequest, Repository, WebError
+from anvil.web import (
+    _DISPATCH_OPERATIONS,
+    BundleListRequest,
+    ExecutionCapabilities,
+    ExecutionOptions,
+    ExecutionPreview,
+    ExecutionStatus,
+    Repository,
+    WebError,
+    _native_writer,
+)
 
 ACTION_LABELS = {
     "ready": ("Make ready", "ready"),
@@ -124,8 +134,18 @@ def inspect_repository(repository: Repository, actor: str) -> dict[str, Any]:
         )
         tasks = backend.list_tasks()
         actions = {_task_key(task): _actions(backend, task, actor) for task in tasks}
+        claims = {claim.task_id: claim for claim in backend.list_active_claims()}
+        execution = {
+            _task_key(task): {"run": (
+                task.status == TaskStatus.ready
+                or task.status in {TaskStatus.claimed, TaskStatus.in_progress}
+                and task.id in claims and claims[task.id].claimed_by == actor
+                and bool(claims[task.id].worktree_path)
+            )} for task in tasks
+        }
         versions = {
-            _task_key(task): _version(backend, task) for task in tasks if actions[_task_key(task)]
+            _task_key(task): _version(backend, task) for task in tasks
+            if actions[_task_key(task)] or execution[_task_key(task)]["run"]
         }
         closures = {
             _task_key(task): task.closure.model_dump(mode="json")
@@ -140,6 +160,7 @@ def inspect_repository(repository: Repository, actor: str) -> dict[str, Any]:
                 "actions": actions,
                 "versions": versions,
                 "closures": closures,
+                "execution": execution,
                 "review_blockers": {
                     _task_key(task): blocker for task in tasks
                     if task.status == TaskStatus.needs_review
@@ -392,6 +413,251 @@ def execute_bundle_claim(
     return {"ok": True, "bundle_id": binding["bundle_id"]}
 
 
+_EXECUTION_MESSAGES = {
+    "adapter_busy": "The configured execution owner is busy or needs reconciliation.",
+    "adapter_changed": "The registered adapter changed. Preview again after reviewing it.",
+    "adapter_unavailable": "The configured adapter is unavailable for this task.",
+    "adapter_unregistered": "Configure an execution adapter with the native CLI first.",
+    "task_not_ready": "Make the task ready or use its current owned claim.",
+    "claim_changed": "The current claim does not match this operator or checkout.",
+    "insufficient_lease": "Renew the native claim before previewing this execution.",
+    "dirty_source": "The selected checkout has uncommitted changes.",
+    "source_changed": "The source changed. Inspect it and create a new preview.",
+    "scope_changed": "The approved task scope changed. Create a new preview.",
+    "prd_unapproved": "The current task scope needs approval before execution.",
+    "dependency_not_done": "Required dependencies have not completed.",
+    "unsupported_bundle": "This task belongs to a coordinator-owned batch.",
+    "unsupported_options": "The selected model or thinking option is unavailable.",
+    "invalid_capabilities": "Verified model information is unavailable. Refresh it explicitly.",
+    "continuation_unsupported": "The registered adapter does not support saved Continue.",
+    "ephemeral_run": "This run has no saved conversation to continue.",
+    "unsettled_run": "The previous run must settle before Continue can be previewed.",
+    "continuation_lineage": "The saved run does not match the current task history or source.",
+    "preview_expired": "The native preview expired. No execution was retried.",
+    "preview_consumed": "This preview was already consumed. Inspect its existing execution.",
+    "preview_mismatch": "The retained preview does not match this execution route.",
+    "invalid_receipt": "Execution evidence is unavailable or incomplete; the outcome is unknown.",
+}
+
+
+def _execution_identity(repository: Repository) -> None:
+    if not _native_writer(repository):
+        raise WebError("read_only_repository", "Execution needs a compatible native writer.")
+    with _read_backend(repository):
+        pass
+
+
+def _execution_checkout(
+    repository: Repository, actor: str, request: dict[str, Any],
+) -> tuple[Path, str]:
+    with _read_backend(repository) as (backend, _, __):
+        task_id = request["task_id"]
+        if request["prd_id"] != "default":
+            task_id = request["prd_id"] + ":" + task_id
+        task = backend.get_task(task_id)
+        if task is None or task.prd_id != request["prd_id"]:
+            raise WebError("task_not_found", "Task does not belong to the selected campaign.")
+        if _version(backend, task) != request["task_version"]:
+            raise WebError("stale_preview", "This task changed. Refresh before previewing.")
+        claims = [claim for claim in backend.list_active_claims() if claim.task_id == task_id]
+        checkout = Path(repository.root)
+        if claims:
+            if len(claims) != 1 or claims[0].claimed_by != actor or not claims[0].worktree_path:
+                raise WebError("claim_changed", _EXECUTION_MESSAGES["claim_changed"])
+            checkout = Path(claims[0].worktree_path).resolve()
+    # The claim is the only source of a non-enrollment checkout. Confirm its
+    # State belongs to this enrollment before native source/claim admission.
+    if checkout != Path(repository.root).resolve():
+        with _read_backend(repository.model_copy(update={"root": str(checkout)})):
+            pass
+    return checkout, task_id
+
+
+def _verified_options(cwd: Path, options: dict[str, Any]) -> dict[str, str]:
+    from anvil.execution import RunOptions, read_execution_capabilities
+
+    selected = RunOptions(**options).data()
+    if not selected:
+        return selected
+    capabilities = read_execution_capabilities(cwd)
+    if capabilities["status"] != "fresh":
+        raise WebError("invalid_capabilities", _EXECUTION_MESSAGES["invalid_capabilities"])
+    if (not selected.get("provider")
+            or {"provider": selected["provider"], "id": selected["model"]}
+            not in capabilities["models"]):
+        raise WebError("unsupported_options", _EXECUTION_MESSAGES["unsupported_options"])
+    if "thinking" in selected:
+        thinking = capabilities.get("thinking", {})
+        if (thinking.get("provider") != selected["provider"]
+                or thinking.get("model") != selected["model"]
+                or selected["thinking"] not in thinking.get("levels", [])):
+            raise WebError("unsupported_options", _EXECUTION_MESSAGES["unsupported_options"])
+    return selected
+
+
+def _execution_status(
+    repository: Repository, actor: str, binding: dict[str, Any],
+) -> dict[str, Any]:
+    from anvil.execution import inspect_execution_preview, inspect_run
+
+    operation = binding["operation"]
+    status = {
+        "operation": operation, "state": "unknown", "dispatch_state": "unknown",
+        "continuation": {"state": "unavailable", "reason": "No verified saved return."},
+    }
+    run_id = binding.get("run_id")
+    if binding.get("native_preview_id"):
+        observed = inspect_execution_preview(
+            Path(binding["cwd"]), binding["native_preview_id"], actor,
+        )
+        if observed["operation"] != operation or observed["task_id"] != binding["task_id"]:
+            raise WebError("preview_mismatch", _EXECUTION_MESSAGES["preview_mismatch"])
+        status.update(dispatch_state=observed["state"], task_id=binding["task_id"])
+        run_id = observed["run_id"]
+        if observed["state"] == "unconsumed":
+            status["state"] = "unconsumed"
+    elif operation == "metadata" and not binding.get("confirmation_attempted"):
+        status.update(state="unconsumed", dispatch_state="unconsumed")
+    if run_id is not None:
+        result = inspect_run(Path(binding["cwd"]), run_id)
+        if result.get("prior_run_id") is not None:
+            status["operation"] = "continue"
+        # Known native CLI IDs share the enrolled project's status authority;
+        # actor attribution is not a separate authentication mechanism.
+        with _read_backend(repository) as (backend, _, __):
+            if operation != "metadata" and backend.get_task(result["task_id"]) is None:
+                raise WebError("task_not_found", "The run is not a task in this project.")
+        allowed_states = {
+            "dispatched", "running_or_interrupted", "reconciliation_required",
+            "needs_review", "failed_stopped", "capabilities_ready",
+        }
+        status.update(
+            run_id=run_id, dispatch_state="consumed",
+            state=result["state"] if result["state"] in allowed_states else "unknown",
+            task_id=None if operation == "metadata" else result["task_id"],
+        )
+        if type(result.get("local_children_stopped")) is bool:
+            status["local_children_stopped"] = result["local_children_stopped"]
+        continuation = result.get("continuation", {})
+        if continuation.get("state") == "requires_preview":
+            status["continuation"] = {
+                "state": "requires_preview", "prior_run_id": run_id,
+                "reason": "A fresh eligible task, source and claim must pass native preview.",
+            }
+        elif continuation.get("state") == "unknown":
+            status["continuation"] = {"state": "unknown", "reason": "Saved return is incomplete."}
+    return ExecutionStatus.model_validate(status).model_dump(exclude_none=True)
+
+
+def execution_action(
+    repository: Repository, actor: str, operation: str, request: dict[str, Any] | None,
+) -> dict[str, Any]:
+    from anvil.execution import (
+        ExecutionError,
+        RunOptions,
+        confirm_continue,
+        confirm_run,
+        preview_continue,
+        preview_run,
+        read_execution_capabilities,
+        refresh_execution_capabilities,
+    )
+
+    _execution_identity(repository)
+    request = request or {}
+    try:
+        if operation == "execution_capabilities":
+            native = read_execution_capabilities(Path(repository.root))
+            selected = {key: native[key] for key in (
+                "status", "models", "thinking", "effective", "observed_at",
+            ) if key in native}
+            return ExecutionCapabilities.model_validate(selected).model_dump(exclude_none=True)
+        if operation == "execution_status":
+            return _execution_status(repository, actor, request["binding"])
+        if operation == "execution_inspect":
+            binding = {"operation": "run", "run_id": request["run_id"], "cwd": repository.root}
+            return {**_execution_status(repository, actor, binding), "binding": binding}
+        if operation == "metadata_preview":
+            selected = RunOptions(**request).data()
+            capabilities = read_execution_capabilities(Path(repository.root))
+            return {
+                **ExecutionPreview(
+                    operation="metadata", title="Refresh model information",
+                    details=["Read verified model capabilities without sending a task prompt.",
+                             "Selected model: "
+                             + (" / ".join(selected.values()) or "inherited configuration")],
+                    options=ExecutionOptions(**selected),
+                ).model_dump(exclude_none=True),
+                "binding": {
+                    "kind": "execution_metadata", "operation": "metadata", "cwd": repository.root,
+                    "options": selected, "registration_sha256": capabilities["registration_sha256"],
+                },
+            }
+        if operation == "execution_preview":
+            cwd, task_id = _execution_checkout(repository, actor, request)
+            options = _verified_options(cwd, request.get("options", {}))
+            prior_run_id = None
+            if request["operation"] == "continue":
+                prior = _execution_status(repository, actor, request["prior_binding"])
+                if prior["continuation"]["state"] != "requires_preview":
+                    raise WebError("unsettled_run", _EXECUTION_MESSAGES["unsettled_run"])
+                prior_run_id = prior["run_id"]
+                native = preview_continue(cwd, prior_run_id, actor, RunOptions(**options),
+                                          request["wall_seconds"], task_id=task_id)
+            else:
+                native = preview_run(
+                    cwd, task_id, actor, RunOptions(**options), request["wall_seconds"],
+                )
+            return {
+                **ExecutionPreview(
+                    operation=request["operation"],
+                    title="Continue saved run" if prior_run_id else "Run task",
+                    details=[f"Task: {task_id}", f"Operator: {actor}",
+                             *([f"Prior run: {prior_run_id}"] if prior_run_id else []),
+                             f"Source: {native['source_sha']}",
+                             f"Budget: {native['wall_seconds']} seconds",
+                             "Model options: "
+                             + (json.dumps(options) if options else "inherited configuration"),
+                             "Successful proof submission awaits review; "
+                             "no acceptance is granted."],
+                    options=ExecutionOptions(**options),
+                ).model_dump(exclude_none=True),
+                "binding": {
+                    "kind": "execution_" + request["operation"], "operation": request["operation"],
+                    "native_preview_id": native["preview_id"], "cwd": str(cwd), "task_id": task_id,
+                    "prior_run_id": prior_run_id, "options": options,
+                },
+            }
+        binding = request["binding"]
+        cwd = Path(binding["cwd"])
+        if operation == "metadata_confirm":
+            native = refresh_execution_capabilities(
+                cwd, **binding["options"],
+                expected_registration_sha256=binding["registration_sha256"],
+            )
+        elif operation == "execution_confirm":
+            _verified_options(cwd, binding["options"])
+            if binding["operation"] == "continue":
+                native = confirm_continue(
+                    cwd, binding["prior_run_id"], actor, binding["native_preview_id"],
+                )
+            else:
+                native = confirm_run(cwd, binding["task_id"], actor, binding["native_preview_id"])
+        else:
+            raise WebError("invalid_action", "Unknown execution operation.")
+        return ExecutionStatus(
+            operation=binding["operation"], state="dispatched", dispatch_state="consumed",
+            run_id=native["run_id"], task_id=binding.get("task_id"),
+            continuation={"state": "unavailable", "reason": "Execution has not returned."},
+        ).model_dump(exclude_none=True)
+    except (ExecutionError, EventRejected) as error:
+        code = getattr(error, "code", "execution_refused")
+        code = code if code in _EXECUTION_MESSAGES else "execution_refused"
+        raise WebError(code, _EXECUTION_MESSAGES.get(
+            code, "Native execution refused this request. Inspect it with the CLI.",
+        )) from None
+
+
 def main() -> None:
     operation = ""
     try:
@@ -411,6 +677,10 @@ def main() -> None:
             result = preview_bundle_claim(repository, actor, request["request"])
         elif operation == "execute":
             result = execute_action(repository, actor, request["request"])
+        elif operation.startswith("execution_") or operation in {
+            "metadata_preview", "metadata_confirm",
+        }:
+            result = execution_action(repository, actor, operation, request.get("request"))
         else:
             raise WebError("invalid_action", "Unknown action operation.")
         print(json.dumps({"ok": True, "data": result}))
@@ -433,7 +703,10 @@ def main() -> None:
                 {
                     "ok": False,
                     "error": {
-                        "code": "outcome_unknown" if operation == "execute" else "action_failed",
+                        "code": (
+                            "outcome_unknown"
+                            if operation in _DISPATCH_OPERATIONS else "action_failed"
+                        ),
                         "message": "The result could not be confirmed. Refresh and inspect "
                         "the task before trying another change.",
                     },

@@ -25,10 +25,10 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from anvil.read_contracts import (
     EventCursorV1,
@@ -44,6 +44,7 @@ MAX_SCRATCH_FILE_BYTES = 64 * 1024 * 1024
 MAX_ACTION_BYTES = 32_768
 PREVIEW_LIFETIME_SECONDS = 300
 _READER_SLOTS = threading.BoundedSemaphore(4)
+_WRITER_SLOTS = threading.BoundedSemaphore(2)
 
 
 class WebError(ValueError):
@@ -198,12 +199,13 @@ def _kill_reader(process: subprocess.Popen[bytes]) -> None:
 
 
 def _reader_output(repository: Repository, *, mutation: bool = False) -> bytes:
-    if not _READER_SLOTS.acquire(blocking=False):
+    slots = _WRITER_SLOTS if mutation else _READER_SLOTS
+    if not slots.acquire(blocking=False):
         raise WebError("busy", "All readers are busy. Try again shortly.")
     try:
         return _bounded_reader_output(repository, mutation=mutation)
     finally:
-        _READER_SLOTS.release()
+        slots.release()
 
 
 def _bounded_reader_output(repository: Repository, *, mutation: bool = False) -> bytes:
@@ -216,7 +218,8 @@ def _bounded_reader_output(repository: Repository, *, mutation: bool = False) ->
     # Separate exec worker applies the POSIX scratch-file ceiling without the
     # unsafe preexec_fn-in-a-thread pattern. Windows retains output/time limits.
     with tempfile.TemporaryDirectory(prefix="anvil-web-reader-") as scratch:
-        environment.update({"TMPDIR": scratch, "TEMP": scratch, "TMP": scratch})
+        if not mutation:
+            environment.update({"TMPDIR": scratch, "TEMP": scratch, "TMP": scratch})
         try:
             process = subprocess.Popen(
                 (
@@ -467,6 +470,127 @@ class BundleListRequest(BaseModel):
     )
 
 
+class ExecutionOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=255)
+    thinking: str | None = Field(default=None, min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def require_model_pair(self) -> ExecutionOptions:
+        if (self.provider is None) != (self.model is None):
+            raise ValueError("Provider and model are an exact pair")
+        return self
+
+
+class ExecutionPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    task_id: str = Field(pattern=r"^T[0-9]{3}(?:\.[0-9]+)*$", max_length=128)
+    prd_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", max_length=128)
+    task_version: str = Field(pattern=r"^[0-9a-f]{64}$")
+    operation: Literal["run", "continue"]
+    prior_inspection_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{43}$")
+    options: ExecutionOptions = Field(default_factory=ExecutionOptions)
+    wall_seconds: int = Field(default=600, ge=1, le=1800)
+
+    @model_validator(mode="after")
+    def require_prior_run(self) -> ExecutionPreviewRequest:
+        if (self.operation == "continue") != (self.prior_inspection_id is not None):
+            raise ValueError("Only Continue requires a known prior run")
+        return self
+
+
+class ExecutionConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    preview_id: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+    confirmed: Literal[True]
+
+    @field_validator("confirmed", mode="before")
+    @classmethod
+    def require_true(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError("Explicit confirmation is required")
+        return value
+
+
+class MetadataPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def require_model_pair(self) -> MetadataPreviewRequest:
+        ExecutionOptions(provider=self.provider, model=self.model)
+        return self
+
+
+class ExecutionInspectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class ExecutionStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    inspection_id: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
+class ExecutionContinuation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    state: Literal["unavailable", "requires_preview", "unknown"] = "unavailable"
+    prior_run_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    reason: str = Field(max_length=256)
+
+
+class ExecutionStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation: Literal["run", "continue", "metadata"]
+    state: Literal[
+        "unconsumed", "unknown", "dispatched", "running_or_interrupted",
+        "reconciliation_required", "needs_review", "failed_stopped", "capabilities_ready",
+    ]
+    dispatch_state: Literal["unconsumed", "consumed", "unknown"] = "unknown"
+    run_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    task_id: str | None = Field(default=None, max_length=255)
+    acceptance: Literal["not_granted"] = "not_granted"
+    local_children_stopped: bool | None = None
+    continuation: ExecutionContinuation
+
+
+class ExecutionPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation: Literal["run", "continue", "metadata"]
+    title: str = Field(max_length=128)
+    details: list[Annotated[str, Field(max_length=1024)]] = Field(max_length=16)
+    requires_confirmation: Literal[True] = True
+    options: ExecutionOptions = Field(default_factory=ExecutionOptions)
+
+
+class ExecutionModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    provider: str = Field(min_length=1, max_length=128)
+    id: str = Field(min_length=1, max_length=255)
+
+
+class ExecutionThinking(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    provider: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1, max_length=255)
+    levels: list[Annotated[str, Field(min_length=1, max_length=32)]] = Field(max_length=32)
+
+
+class ExecutionCapabilities(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    status: Literal["fresh", "stale", "unknown", "unavailable"]
+    models: list[ExecutionModel] = Field(default_factory=list, max_length=1000)
+    thinking: ExecutionThinking | None = None
+    effective: ExecutionOptions | None = None
+    observed_at: str | None = Field(default=None, max_length=64)
+
+
+_EXECUTION_MUTATIONS = {"execution_preview", "execution_confirm", "metadata_confirm"}
+_DISPATCH_OPERATIONS = {"execute", "execution_confirm", "metadata_confirm"}
+
+
 def _native_writer(repository: Repository) -> bool:
     """A custom read command never implicitly grants execution authority."""
     from anvil.state.schema import get_schema_version
@@ -497,7 +621,9 @@ def _action_worker(
     ]
     worker = repository.model_copy(update={"reader_argv": arguments})
     try:
-        response = json.loads(_reader_output(worker, mutation=operation == "execute"))
+        response = json.loads(_reader_output(
+            worker, mutation=operation == "execute" or operation in _EXECUTION_MUTATIONS,
+        ))
         if not isinstance(response, dict):
             raise ValueError("Invalid worker envelope")
         if response.get("ok") is False:
@@ -510,7 +636,7 @@ def _action_worker(
         elif response.get("ok") is not True or not isinstance(response.get("data"), dict):
             raise ValueError("Invalid worker result")
     except WebError as error:
-        if operation == "execute" and error.code != "busy":
+        if operation in _DISPATCH_OPERATIONS and error.code != "busy":
             raise WebError(
                 "outcome_unknown",
                 "The result could not be confirmed. Refresh the board "
@@ -519,7 +645,7 @@ def _action_worker(
         raise
     except (ValueError, TypeError) as error:
         raise WebError(
-            "outcome_unknown" if operation == "execute" else "invalid_response",
+            "outcome_unknown" if operation in _DISPATCH_OPERATIONS else "invalid_response",
             "The result could not be confirmed. Refresh and inspect the task before retrying.",
         ) from error
     if response["ok"] is False:
@@ -530,7 +656,7 @@ def _action_worker(
 
 
 class WebHTTPServer(ThreadingHTTPServer):
-    """Eight bounded request threads; four bounded isolated readers across repositories."""
+    """Eight request threads; four isolated readers and two reserved writer slots."""
 
     daemon_threads = True
 
@@ -588,10 +714,30 @@ def make_server(
     page = files("anvil").joinpath("_data/web/index.html").read_bytes()
     csrf_token = secrets.token_urlsafe(32)
     previews: dict[str, tuple[float, Repository, dict[str, Any]]] = {}
+    # ponytail: 128 retained handles per server; persistent handles need a native API.
+    inspections: dict[str, tuple[Repository, dict[str, Any]]] = {}
     preview_lock = threading.Lock()
     reads: dict[str, Future[dict[str, Any]]] = {}
     read_lock = threading.Lock()
     read_request_slots = threading.BoundedSemaphore(4)
+
+    def retain_inspection(repository: Repository, binding: dict[str, Any]) -> str:
+        inspection_id = secrets.token_urlsafe(32)
+        with preview_lock:
+            if len(inspections) >= 128:
+                inspections.pop(next(iter(inspections)))
+            inspections[inspection_id] = (repository, binding)
+        return inspection_id
+
+    def inspection_binding(repository: Repository, inspection_id: str) -> dict[str, Any]:
+        with preview_lock:
+            retained = inspections.get(inspection_id)
+            if retained is None or retained[0] != repository:
+                raise WebError(
+                    "inspection_unknown",
+                    "This inspection is unavailable. No execution was retried."
+                )
+            return dict(retained[1])
 
     def shared_read(
         repository: Repository, operation: str, request: dict[str, Any] | None = None,
@@ -601,7 +747,8 @@ def make_server(
         if not read_request_slots.acquire(blocking=False):
             raise WebError("busy", "Too many concurrent reads. Try again shortly.")
         try:
-            return coalesced_read(repository, operation, request)
+            # Each handler owns its top-level projection and opaque references.
+            return dict(coalesced_read(repository, operation, request))
         finally:
             read_request_slots.release()
 
@@ -725,6 +872,42 @@ def make_server(
                     body, content_type = json.dumps(data).encode(), "application/json"
                 else:
                     request_path, _, query = self.path.partition("?")
+                    execution_match = re.fullmatch(
+                        r"/api/repositories/([0-9a-f]{24})/(execution-capabilities|execution-status)",
+                        request_path,
+                    )
+                    if execution_match:
+                        repository = self._repository(execution_match[1])
+                        if not allow_writes or not _native_writer(repository):
+                            raise WebError(
+                                "read_only_repository", "Execution needs a native writer."
+                            )
+                        if execution_match[2] == "execution-capabilities":
+                            if query:
+                                raise WebError(
+                                    "invalid_request", "Capabilities takes no parameters."
+                                )
+                            result = shared_read(repository, "execution_capabilities")
+                        else:
+                            try:
+                                if len(query) > 128:
+                                    raise ValueError("Oversized inspection")
+                                pairs = parse_qs(query, strict_parsing=True, max_num_fields=1)
+                                if any(len(values) != 1 for values in pairs.values()):
+                                    raise ValueError("Duplicate inspection")
+                                selection = ExecutionStatusRequest.model_validate({
+                                    key: values[0] for key, values in pairs.items()
+                                })
+                            except (ValueError, ValidationError) as error:
+                                raise WebError(
+                                    "invalid_request", "Invalid inspection handle."
+                                ) from error
+                            result = shared_read(repository, "execution_status", {
+                                "binding": inspection_binding(repository, selection.inspection_id),
+                            })
+                            result["inspection_id"] = selection.inspection_id
+                        self._send(json.dumps(result).encode())
+                        return
                     bundle_match = re.fullmatch(
                         r"/api/repositories/([0-9a-f]{24})/bundles", request_path
                     )
@@ -835,7 +1018,8 @@ def make_server(
                 self.send_error(413)
                 return
             match = re.fullmatch(
-                r"/api/repositories/([0-9a-f]{24})/(preview|transition|bundle-preview|bundle-claim)",
+                r"/api/repositories/([0-9a-f]{24})/(preview|transition|bundle-preview|bundle-claim|"
+                r"execution-preview|execution-confirm|execution-inspect|metadata-preview|metadata-confirm)",
                 self.path,
             )
             if match is None:
@@ -852,6 +1036,75 @@ def make_server(
                 if len(raw) != length:
                     raise WebError("invalid_request", "Incomplete action request.")
                 assert actor is not None
+                if match[2] == "execution-inspect":
+                    request = ExecutionInspectionRequest.model_validate_json(raw)
+                    result = shared_read(repository, "execution_inspect", request.model_dump())
+                    binding = result.pop("binding")
+                    result["inspection_id"] = retain_inspection(repository, binding)
+                    self._send(json.dumps(result).encode())
+                    return
+                if match[2] in {"execution-preview", "metadata-preview"}:
+                    if match[2] == "execution-preview":
+                        selection = ExecutionPreviewRequest.model_validate_json(raw)
+                        execution_request = selection.model_dump(exclude_none=True)
+                        if selection.prior_inspection_id is not None:
+                            execution_request["prior_binding"] = inspection_binding(
+                                repository, selection.prior_inspection_id,
+                            )
+                        result = _action_worker(
+                            repository, actor, "execution_preview", execution_request,
+                        )
+                    else:
+                        metadata = MetadataPreviewRequest.model_validate_json(raw)
+                        result = _action_worker(
+                            repository, actor, "metadata_preview",
+                            metadata.model_dump(exclude_none=True),
+                        )
+                    binding = result.pop("binding")
+                    preview_id = secrets.token_urlsafe(32)
+                    with preview_lock:
+                        now = time.monotonic()
+                        for key, (expires, _, __) in list(previews.items()):
+                            if expires <= now:
+                                del previews[key]
+                        if len(previews) >= 128:
+                            raise WebError("busy", "Too many pending previews.")
+                        previews[preview_id] = (now + PREVIEW_LIFETIME_SECONDS, repository, binding)
+                    inspection_id = retain_inspection(repository, binding)
+                    binding["inspection_id"] = inspection_id
+                    result.update(preview_id=preview_id, inspection_id=inspection_id)
+                    self._send(json.dumps(result).encode())
+                    return
+                if match[2] in {"execution-confirm", "metadata-confirm"}:
+                    confirmation = ExecutionConfirmation.model_validate_json(raw)
+                    with preview_lock:
+                        pending = previews.pop(confirmation.preview_id, None)
+                        if pending is None or pending[0] <= time.monotonic():
+                            raise WebError(
+                                "preview_expired", "Preview expired or was already used."
+                            )
+                        if pending[1] != repository:
+                            raise WebError(
+                                "repository_changed", "Repository configuration changed."
+                            )
+                        binding = pending[2]
+                        expected = (
+                            {"execution_run", "execution_continue"}
+                            if match[2] == "execution-confirm" else {"execution_metadata"}
+                        )
+                        if binding.get("kind") not in expected:
+                            raise WebError(
+                                "preview_kind_mismatch", "Preview does not match this action."
+                            )
+                        binding["confirmation_attempted"] = True
+                    result = _action_worker(
+                        repository, actor, match[2].replace("-", "_"), {"binding": binding},
+                    )
+                    with preview_lock:
+                        binding["run_id"] = result["run_id"]
+                    result["inspection_id"] = binding["inspection_id"]
+                    self._send(json.dumps(result).encode(), status=202)
+                    return
                 if match[2] in {"preview", "bundle-preview"}:
                     if match[2] == "bundle-preview":
                         bundle_request = BundlePreviewRequest.model_validate_json(raw)
@@ -887,7 +1140,8 @@ def make_server(
                             "Repository configuration changed. Preview the move again.",
                         )
                     bundle_claim = match[2] == "bundle-claim"
-                    if (pending[2].get("kind") == "bundle_claim") != bundle_claim:
+                    kind = pending[2].get("kind", "task_transition")
+                    if kind != ("bundle_claim" if bundle_claim else "task_transition"):
                         raise WebError(
                             "preview_kind_mismatch", "Preview does not match this action."
                         )
