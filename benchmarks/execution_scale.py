@@ -428,22 +428,56 @@ def _command(project, task_id, offered_at, command_timeout, command_argv):
 
 
 class _ArtifactBudget:
-    """Serialize capture reservations; only the coordinator accounts for State."""
+    """Reserve flat capture writes; only the coordinator scans between native writes."""
 
     def __init__(self, work):
         self.work = work
         self.lock = threading.Lock()
         self.capture_bytes = 0
+        self.reserved_names = set()
         self.exhausted = False
         self.other_bytes = 0
         self.refresh()
 
     def refresh(self):
+        # Workers can reserve/write captures throughout this scan. They never
+        # write noncapture storage; the sole coordinator refreshes between its
+        # native writes. Inventory captures without recursing or stat'ing each
+        # already charged file, and publish against the latest reservations.
+        other_bytes = 0
+        capture_names = set()
+        captures = self.work / "captures"
+        try:
+            if self.work.is_symlink() or captures.is_symlink() or not captures.is_dir():
+                raise ValueError("Artifact accounting requires an owned captures directory")
+            directories = [self.work]
+            while directories:
+                with os.scandir(directories.pop()) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            raise ValueError("Artifact accounting refuses symbolic links")
+                        if Path(entry.path) == captures:
+                            with os.scandir(captures) as retained:
+                                for capture in retained:
+                                    if not capture.is_file(follow_symlinks=False):
+                                        raise ValueError(
+                                            "Capture artifacts must be flat regular files")
+                                    capture_names.add(capture.name)
+                        elif entry.is_dir(follow_symlinks=False):
+                            directories.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            other_bytes += entry.stat(follow_symlinks=False).st_size
+                        else:
+                            raise ValueError("Artifact accounting requires regular files")
+        except (OSError, ValueError):
+            with self.lock:
+                self.exhausted = True
+            raise
         with self.lock:
-            self.other_bytes = sum(
-                path.stat().st_size for path in self.work.rglob("*")
-                if path.is_file() and path.parent != self.work / "captures"
-            )
+            if capture_names - self.reserved_names:
+                self.exhausted = True
+                raise ValueError("Unaccounted capture artifact")
+            self.other_bytes = other_bytes
             total = self.other_bytes + self.capture_bytes
             if total > MAX_STORAGE_BYTES:
                 self.exhausted = True
@@ -451,6 +485,10 @@ class _ArtifactBudget:
             return total
 
     def write(self, path, raw):
+        captures = self.work / "captures"
+        if (path.parent != captures or self.work.is_symlink()
+                or captures.is_symlink() or not captures.is_dir()):
+            raise ValueError("Artifact writes require a flat owned capture path")
         with self.lock:
             if (self.exhausted
                     or self.other_bytes + self.capture_bytes + len(raw) > MAX_STORAGE_BYTES):
@@ -458,8 +496,10 @@ class _ArtifactBudget:
                 raise ValueError("Retained fixture exceeded 256 MiB storage budget")
             # Charge before opening; a failed/partial write never returns capacity.
             self.capture_bytes += len(raw)
-            with path.open("xb") as stream:
-                stream.write(raw)
+            self.reserved_names.add(path.name)
+        with path.open("xb") as stream:
+            if stream.write(raw) != len(raw):
+                raise OSError("Incomplete capture artifact write")
 
 
 def _prepare_proof(project, task_snapshot, claim_snapshot, execution, budget):

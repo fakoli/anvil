@@ -594,3 +594,257 @@ ObservedCommand.wait = interrupted_wait
     row = result["raw_timings"][0]
     assert row["exit_code"] == 0 and row["command_reaped"]
     assert row["command_supervisor_exit_code"] == 143
+
+
+class _ArtifactFileProbe:
+    """Exercise an actual exclusive file while controlling one I/O boundary."""
+
+    def __init__(self, stream, *, blocked_phase=None, entered=None, released=None, fault=None):
+        self.stream = stream
+        self.blocked_phase = blocked_phase
+        self.entered = entered
+        self.released = released
+        self.fault = fault
+
+    def _block(self, phase):
+        if self.blocked_phase == phase:
+            self.entered.set()
+            assert self.released.wait(timeout=5), "test did not release artifact I/O"
+
+    def __enter__(self):
+        self._block("open")
+        return self
+
+    def write(self, raw):
+        self._block("write")
+        if self.fault in {"short", "partial"}:
+            written = self.stream.write(raw[:2])
+            if self.fault == "partial":
+                raise OSError("injected partial artifact write")
+            return written
+        return self.stream.write(raw)
+
+    def __exit__(self, *args):
+        try:
+            self._block("close")
+        finally:
+            self.stream.close()
+        if self.fault == "close":
+            raise OSError("injected artifact close failure")
+
+
+@pytest.mark.parametrize("phase", ["open", "write", "close"])
+def test_artifact_io_does_not_hold_reservation_lock(tmp_path, monkeypatch, phase):
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    entered, released, second_finished = threading.Event(), threading.Event(), threading.Event()
+    original_open = Path.open
+
+    def probe_open(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        if path == captures / "first" and args == ("xb",):
+            return _ArtifactFileProbe(stream, blocked_phase=phase, entered=entered, released=released)
+        return stream
+
+    monkeypatch.setattr(Path, "open", probe_open)
+
+    def second_write():
+        budget.write(captures / "second", b"second")
+        second_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(budget.write, captures / "first", b"first")
+        second = None
+        try:
+            assert entered.wait(timeout=5)
+            second = executor.submit(second_write)
+            # A bounded synchronization assertion, not a throughput/speed assertion:
+            # the first writer cannot finish until this test releases it below.
+            assert second_finished.wait(timeout=2), "blocked I/O held the reservation lock"
+        finally:
+            released.set()
+            first.result(timeout=5)
+            if second is not None:
+                second.result(timeout=5)
+    assert (captures / "first").read_bytes() == b"first"
+    assert (captures / "second").read_bytes() == b"second"
+    assert budget.capture_bytes == budget.refresh() == 11
+
+
+def test_artifact_refresh_does_not_block_or_erase_reservations(tmp_path, monkeypatch):
+    captures, other = tmp_path / "captures", tmp_path / "other"
+    captures.mkdir()
+    other.mkdir()
+    (other / "state").write_bytes(b"12")
+    monkeypatch.setattr(execution_scale, "MAX_STORAGE_BYTES", 10)
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    (other / "state").write_bytes(b"12345678")
+    entered, released, written = threading.Event(), threading.Event(), threading.Event()
+    original_scandir = os.scandir
+
+    def blocked_scan(path):
+        if Path(path) == other:
+            entered.set()
+            assert released.wait(timeout=5), "test did not release noncapture scan"
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", blocked_scan)
+
+    def refresh():
+        with pytest.raises(ValueError, match="storage budget"):
+            budget.refresh()
+
+    def write():
+        budget.write(captures / "reserved-during-refresh", b"1234")
+        written.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        refreshed = executor.submit(refresh)
+        writer = None
+        try:
+            assert entered.wait(timeout=5)
+            writer = executor.submit(write)
+            assert written.wait(timeout=2), "refresh held the reservation lock during its scan"
+        finally:
+            released.set()
+            if writer is not None:
+                writer.result(timeout=5)
+            refreshed.result(timeout=5)
+    assert budget.capture_bytes == 4 and budget.other_bytes == 8 and budget.exhausted
+    assert (captures / "reserved-during-refresh").read_bytes() == b"1234"
+    with pytest.raises(ValueError, match="storage budget"):
+        budget.write(captures / "after-exhaustion", b"x")
+    assert budget.capture_bytes == 4
+
+
+@pytest.mark.parametrize("fault", ["open", "partial", "short", "close"])
+def test_failed_artifact_io_keeps_entire_reservation(tmp_path, monkeypatch, fault):
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    monkeypatch.setattr(execution_scale, "MAX_STORAGE_BYTES", 10)
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    original_open = Path.open
+    destination = captures / "failed"
+
+    def failing_open(path, *args, **kwargs):
+        if path == destination and args == ("xb",):
+            if fault == "open":
+                raise OSError("injected artifact open failure")
+            return _ArtifactFileProbe(original_open(path, *args, **kwargs), fault=fault)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(OSError):
+        budget.write(destination, b"123456")
+    assert budget.capture_bytes == budget.refresh() == 6
+    if fault == "open":
+        assert not destination.exists()
+    else:
+        assert destination.read_bytes() == (b"123456" if fault == "close" else b"12")
+    with pytest.raises(ValueError, match="storage budget"):
+        budget.write(captures / "cannot-refund-failure", b"12345")
+    assert budget.capture_bytes == 6
+
+
+def test_duplicate_artifact_creation_is_exclusive_and_stays_charged(tmp_path, monkeypatch):
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    monkeypatch.setattr(execution_scale, "MAX_STORAGE_BYTES", 10)
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    destination = captures / "same-name"
+    budget.write(destination, b"first")
+    with pytest.raises(FileExistsError):
+        budget.write(destination, b"other")
+    assert destination.read_bytes() == b"first"
+    assert budget.capture_bytes == budget.refresh() == 10
+    with pytest.raises(ValueError, match="storage budget"):
+        budget.write(captures / "extra", b"x")
+
+
+@pytest.mark.parametrize("destination", ["outside", "captures/nested/file"])
+def test_artifact_writer_requires_flat_owned_capture_path(tmp_path, destination):
+    (tmp_path / "captures").mkdir()
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    path = tmp_path / destination
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ValueError, match="capture"):
+        budget.write(path, b"unowned")
+    assert budget.capture_bytes == 0 and not path.exists()
+
+
+def test_artifact_refresh_skips_capture_recursion_and_file_stats(tmp_path, monkeypatch):
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    other = tmp_path / "project" / "captures"
+    other.mkdir(parents=True)
+    (other / "ordinary-state-file").write_bytes(b"other")
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    charged = captures / "charged"
+    budget.write(charged, b"charged")
+    original_stat, original_scandir = Path.stat, os.scandir
+    scanned = []
+
+    def reject_capture_stat(path, *args, **kwargs):
+        assert path != charged, "refresh stat'ed an already charged capture file"
+        return original_stat(path, *args, **kwargs)
+
+    def record_scan(path):
+        scanned.append(Path(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(Path, "stat", reject_capture_stat)
+    monkeypatch.setattr(os, "scandir", record_scan)
+    assert budget.refresh() == 12
+    assert scanned.count(captures) == 1  # One allowed flat ownership inventory.
+    assert other in scanned  # An unrelated nested directory called captures is counted.
+
+
+@pytest.mark.parametrize("unexpected", ["file", "nested", "capture-link", "noncapture-link"])
+def test_artifact_refresh_refuses_unaccounted_or_nested_content(tmp_path, unexpected):
+    work = tmp_path / "work"
+    captures = work / "captures"
+    captures.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"not-owned")
+    budget = execution_scale._ArtifactBudget(work)
+    if unexpected == "file":
+        (captures / "uncharged").write_bytes(b"unknown")
+    elif unexpected == "nested":
+        (captures / "nested").mkdir()
+        (captures / "nested/payload").write_bytes(b"unknown")
+    elif unexpected == "capture-link":
+        (captures / "foreign").symlink_to(outside)
+    else:
+        (work / "foreign").symlink_to(outside)
+    with pytest.raises(ValueError):
+        budget.refresh()
+    assert budget.exhausted
+    with pytest.raises(ValueError):
+        budget.write(captures / "after-refusal", b"x")
+    assert outside.read_bytes() == b"not-owned"
+
+
+@pytest.mark.parametrize("mode", ["coordinator", "worker"])
+@pytest.mark.parametrize("artifact", ["output", "proof.json", "timing.json"])
+def test_partial_artifact_failure_cannot_validate_fixture(tmp_path, monkeypatch, mode, artifact):
+    original_open = Path.open
+    work = tmp_path / "fixture"
+    destination = work / "captures" / ("scale:T001." + artifact)
+
+    def short_write(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        return _ArtifactFileProbe(stream, fault="short") if path == destination and args == ("xb",) else stream
+
+    monkeypatch.setattr(Path, "open", short_write)
+    result = execution_scale.run(work, tasks=1, workers=1, proof_preparation=mode)
+    assert not result["validated"] and result["replay_equal"] and result["no_false_acceptance"]
+    assert destination.read_bytes() and destination.stat().st_size == 2
+    row = result["raw_timings"][0]
+    if artifact == "timing.json":
+        assert result["completed"] == result["event_counts"]["evidence.submitted"] == 1
+        assert row["outcome"] == "submitted" and "append_returned_monotonic" in row
+        assert any(failure.get("stage") == "timing_retention" for failure in result["failures"])
+    else:
+        assert result["completed"] == result["event_counts"].get("evidence.submitted", 0) == 0
+        assert row["outcome"] == "failed" and "append_returned_monotonic" not in row
