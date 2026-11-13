@@ -18,6 +18,7 @@ from anvil.read_contracts import ReadErrorCode
 from anvil.roots import registry
 from anvil.state.models import RejectionReasonCode
 from anvil.state.sqlite import SqliteBackend
+from anvil.task_actions import transition_task
 from tests.test_project_snapshot import (
     _NOW,
     _event,
@@ -133,6 +134,97 @@ def test_scoping_complete_verification_and_stable_read_only_digest(populated):
         assert excluded not in text
     assert view["custody"]["runner_stop"] == "unknown"
     assert view["mutation_authority"] is False
+
+
+@pytest.mark.parametrize("task_id", ["T001", "named:T001"])
+@pytest.mark.parametrize(
+    "resolution", ["cancelled", "wont_do", "obsolete", "cannot_reproduce", "duplicate"]
+)
+def test_closed_task_keeps_stable_read_only_nonaccepted_projection(populated, task_id, resolution):
+    original = _read(populated, task_id)
+    task = populated.get_task(task_id)
+    transition_task(
+        populated, task_id, "close", "snapshot-test",
+        expected_status=task.status, expected_updated_at=task.updated_at,
+        resolution=resolution, reason="CLOSURE_REASON_SECRET",
+        duplicate_of=("named:T001" if task_id == "T001" else "T001")
+        if resolution == "duplicate" else None,
+    )
+    root = _state_path(populated)
+    before = {
+        p.name: p.read_bytes()
+        for p in root.iterdir()
+        if p.is_file() and p.suffix != ".db-shm"
+    }
+    view = _read(populated, task_id)
+    assert view == _read(populated, task_id)
+    if task_id == "named:T001":
+        assert view == _read(populated, "T001", prd_id="named")
+    assert {
+        p.name: p.read_bytes()
+        for p in root.iterdir()
+        if p.is_file() and p.suffix != ".db-shm"
+    } == before
+    assert view["task"] == {**original["task"], "status": "closed"}
+    assert view["acceptance"]["accepted"] is False
+    assert view["acceptance"]["latest_accepted_event_id"] is None
+    assert view["mutation_authority"] is False
+    assert view["custody"]["runner_stop"] == "unknown"
+    assert "CLOSURE_REASON_SECRET" not in json.dumps(view)
+    assert view["events"][-1]["action"] == "task.closed"
+    assert "closure" not in view["events"][-1]["payload"]
+
+
+def test_closed_task_retains_previous_attempt_and_evidence(claimed):
+    submitted = _submit(claimed)
+    claimed.append(_make_event(
+        "claim.released",
+        {"claim_id": "C001", "released_by": "agent-alpha",
+         "release_reason": "Stopped", "force": False},
+        target_kind="claim", target_id="C001",
+    ))
+    task = claimed.get_task("T001")
+    transition_task(
+        claimed, "T001", "close", "operator",
+        expected_status=task.status, expected_updated_at=task.updated_at,
+        resolution="cancelled", reason="Scope removed",
+    )
+    view = _read(claimed)
+    assert view["current"]["claim"]["id"] == "C001"
+    assert view["current"]["claim"]["status"] == "released"
+    assert view["current"]["evidence"]["event_id"] == submitted.id
+    assert view["history"]["counts"] == {"claims": 1, "evidence": 1, "reviews": 0}
+    assert view["acceptance"]["accepted"] is False
+    assert view["mutation_authority"] is False
+
+
+@pytest.mark.parametrize(
+    ("status", "closure"),
+    [
+        ("closed", None),
+        ("closed", "null"),
+        ("closed", "{"),
+        ("closed", "{}"),
+        ("closed", json.dumps({
+            "resolution": "duplicate", "reason": "Missing target",
+            "closed_by": "operator", "closed_at": _NOW.isoformat(),
+        })),
+        ("ready", json.dumps({
+            "resolution": "cancelled", "reason": "Not closed",
+            "closed_by": "operator", "closed_at": _NOW.isoformat(),
+        })),
+    ],
+)
+def test_invalid_closure_projection_refuses(populated, status, closure):
+    # Corrupt only disposable projection data, as for other malformed-row tests.
+    with sqlite3.connect(_state_path(populated) / "state.db") as conn:
+        conn.execute(
+            "UPDATE tasks SET status = ?, closure = ? WHERE id = 'T001'",
+            (status, closure),
+        )
+    with pytest.raises(ProjectSnapshotError) as error:
+        _read(populated)
+    assert error.value.error.code == ReadErrorCode.invalid_hierarchy
 
 
 @pytest.mark.parametrize("skew", [False, True])
