@@ -34,7 +34,7 @@ from tests.test_bundle_state import _event, _seed
 # A real executable contract double. It edits returned bytes, never fabricates
 # native proof or native state. The Run worker must run and submit real checks.
 _ADAPTER = r"""
-import hashlib, io, json, pathlib, subprocess, sys, tarfile, uuid
+import contextlib, hashlib, io, json, pathlib, re, subprocess, sys, tarfile, uuid
 
 TOOLS = {"read", "write", "edit", "grep", "find", "ls"}
 def sha(raw): return hashlib.sha256(raw).hexdigest()
@@ -60,6 +60,75 @@ def verify_return(results, task, files, run_id):
     assert worker['run_id'] == run_id and worker['task_id'] == task['task_id']
     assert worker['artifacts'] == {str(p.relative_to(results)):sha(p.read_bytes()) for p in results.rglob('*') if p.is_file() and p.name != 'worker-receipt.json'}
     return worker
+
+def private_control_bytes(value):
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+def saved_descriptor(task):
+    session = task['session']
+    if not isinstance(session, dict) or set(session) != {'conversation_id','directory','file','prior','prior_sha256'}:
+        raise ValueError('Invalid synthetic saved descriptor')
+    conversation_id = session['conversation_id']
+    if not isinstance(conversation_id, str) or re.fullmatch('[0-9a-f]{32}', conversation_id) is None:
+        raise ValueError('Invalid conversation identity')
+    directory = pathlib.Path(task['output_directory']).parent.parent/'conversations'/conversation_id
+    if session['directory'] != str(directory) or session['file'] != str(directory/'session.jsonl') or task['workspace'] != str(directory/'workspace'):
+        raise ValueError('Saved workspace/file differs')
+    prior = session['prior']
+    if task['operation'] == 'run':
+        if conversation_id != task['run_id'] or prior is not None or session['prior_sha256'] is not None:
+            raise ValueError('Invalid initial saved lineage')
+    elif task['operation'] == 'continue':
+        if not isinstance(prior, dict) or prior.get('conversation_id') != conversation_id or prior.get('run_id') == task['run_id'] or re.fullmatch('[0-9a-f]{32}', prior.get('run_id','')) is None or session['prior_sha256'] != sha(private_control_bytes(prior)):
+            raise ValueError('Invalid prior saved lineage')
+    else: raise ValueError('Unsupported saved operation')
+    return session
+
+def validate_native_task(task):
+    if task['version'] == 2: return task
+    keys={'version','run_id','task_id','kind','instructions','workspace','output_directory','writable_paths','allowed_tools','max_tool_calls','max_turns','source','checks','operation','run_options','runtime_defaults'}
+    if task['version'] != 3: raise ValueError('Invalid native version')
+    if task['operation'] == 'capabilities_selected':
+        if set(task) != keys|{'selected_model'} or task['writable_paths'] or task['checks'] or task['run_options']:
+            raise ValueError('Invalid selected metadata scope')
+        pair=task['selected_model']
+        if not isinstance(pair,dict) or set(pair) != {'provider','model'} or any(not isinstance(x,str) or not x or re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}',x) is None for x in pair.values()):
+            raise ValueError('Invalid selected model pair')
+    else:
+        if set(task) != keys|{'session'}: raise ValueError('Invalid saved task fields')
+        saved_descriptor(task)
+    return task
+
+def run_task(task, profile, output, timeout, *, save_session=False, previous_directory=None, selected_model=None):
+    raise RuntimeError('Synthetic fixture uses its executable entrypoint')
+
+@contextlib.contextmanager
+def exclusive_owner(profile, lock_root):
+    yield
+
+def verify_conversation(results, task, worker):
+    descriptor=saved_descriptor(task)
+    checkpoint_raw=(results/'conversation.json').read_bytes()
+    checkpoint=json.loads(checkpoint_raw)
+    if checkpoint_raw != private_control_bytes(checkpoint): raise ValueError('Noncanonical checkpoint')
+    prior=descriptor['prior']
+    conversation=worker['conversation']
+    if checkpoint['conversation_id'] != descriptor['conversation_id'] or checkpoint['run_id'] != task['run_id'] or checkpoint['task_id'] != task['task_id'] or checkpoint['task_sha256'] != sha(json.dumps(task).encode()) or checkpoint['source_commit'] != task['source']['commit']:
+        raise ValueError('Checkpoint task binding changed')
+    if checkpoint['prior_run_id'] != (prior['run_id'] if prior else None) or checkpoint['prior_checkpoint_sha256'] != descriptor['prior_sha256'] or conversation['checkpoint_sha256'] != sha(checkpoint_raw) or conversation['session_after'] != checkpoint['session'] or conversation['continuable'] is not True:
+        raise ValueError('Checkpoint prior binding changed')
+    if conversation['session_before'] != (prior['session'] if prior else None) or conversation['prior_prefix_sha256'] != (prior['session']['sha256'] if prior else sha(b'')):
+        raise ValueError('Session prefix changed')
+    return checkpoint
+
+def continuation_checkpoint(previous_directory, profile):
+    receipt=json.loads((previous_directory/'receipt.json').read_text())
+    with tarfile.open(previous_directory/'inputs.tar') as archive:
+        task=json.loads(archive.extractfile('task.json').read())
+    validate_native_task(task)
+    worker=verify_return(previous_directory/'results',task,{},receipt['run_id'])
+    if worker != receipt['worker']: raise ValueError('Prior worker mismatch')
+    return verify_conversation(previous_directory/'results',task,worker)
 
 def owner_receipt(profile):
     value={'sandbox_before':{'id':profile['sandbox_id'],'main_process_instance_id':'before','phase':'Stopped'},'sandbox_running':{'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Ready'},'sandbox_after':{'id':profile['sandbox_id'],'main_process_instance_id':'owned-main','phase':'Stopped'}}
@@ -91,28 +160,58 @@ def main():
     run_id = uuid.uuid4().hex
     native = {**task,'run_id':run_id,'source':source,'operation':'run','max_tool_calls':40,'max_turns':32,'allowed_tools':sorted(TOOLS),'runtime_defaults':{'model':profile['model'],'thinking':profile.get('thinking','high')}}
     if metadata: native['operation']='capabilities'
+    saved = not metadata and ('--save-session' in sys.argv or sys.argv[1] == 'continue')
+    selected = metadata and '--provider' in sys.argv
+    prior = None
+    if saved:
+        if sys.argv[1] == 'continue':
+            previous=pathlib.Path(sys.argv[sys.argv.index('--from')+1])
+            prior=continuation_checkpoint(previous, profile)
+        conversation_id=prior['conversation_id'] if prior else run_id
+        conversation_root=pathlib.Path('/synthetic/conversations')/conversation_id
+        native={key:value for key,value in native.items() if key not in {'repository','revision','wall_seconds'}}
+        native.update(version=3,operation='continue' if prior else 'run',workspace=str(conversation_root/'workspace'),output_directory='/synthetic/'+run_id+'/results',session={'conversation_id':conversation_id,'directory':str(conversation_root),'file':str(conversation_root/'session.jsonl'),'prior':prior,'prior_sha256':sha(private_control_bytes(prior)) if prior else None})
+        validate_native_task(native)
+    if selected:
+        native.update(version=3,operation='capabilities_selected',workspace='/synthetic/metadata',output_directory='/synthetic/'+run_id+'/results',selected_model={'provider':sys.argv[sys.argv.index('--provider')+1],'model':sys.argv[sys.argv.index('--model')+1]})
+        validate_native_task(native)
     if profile.get('wrong_options'): native['run_options']={'thinking':'max'}
     with tarfile.open(output/'inputs.tar','x') as archive:
         raw = json.dumps(native).encode(); item=tarfile.TarInfo('task.json'); item.size=len(raw); archive.addfile(item,io.BytesIO(raw))
     results=output/'results'; results.mkdir()
     if metadata:
         configuration={**configuration_for(profile),'prompt_sent':False}
+        if selected:
+            configuration['effective']={**native['selected_model'],'thinking':'low'}
+            configuration['available_models']=[{'provider':native['selected_model']['provider'],'id':native['selected_model']['model']}]
         worker={'run_id':run_id,'task_id':'capabilities','configuration':configuration,'artifacts':{}}
         (results/'worker-receipt.json').write_text(json.dumps(worker))
-        receipt={'version':2,'task_id':'capabilities','run_id':run_id,'input_sha256':sha((output/'inputs.tar').read_bytes()),'worker':worker,'capabilities_valid':True,'cleanup_complete':True,'protected_unchanged':True,'artifacts_verified':True,'acceptance':'not_granted','outcome':'capabilities'}
+        receipt={'version':native['version'],'task_id':'capabilities','run_id':run_id,'input_sha256':sha((output/'inputs.tar').read_bytes()),'worker':worker,'capabilities_valid':True,'cleanup_complete':True,'protected_unchanged':True,'artifacts_verified':True,'acceptance':'not_granted','outcome':'capabilities'}
         receipt.update(owner_receipt(profile))
         (output/'receipt.json').write_text(json.dumps(receipt)); return
     (results/'changed-files').mkdir()
     name=task['writable_paths'][0]; target=results/'changed-files'/name; target.parent.mkdir(parents=True,exist_ok=True)
-    target.write_bytes(profile.get('returned_content', 'implemented\n').encode())
+    target.write_bytes(profile.get('returned_content', 'continued\n' if prior else 'implemented\n').encode())
     changes=[{'path':name,'before_sha256':sha(files[name]) if name in files else None,'after_sha256':sha(target.read_bytes())}]
     if profile.get('wrong_preimage'): changes[0]['before_sha256']='0'*64
     (results/'changes.json').write_text(json.dumps(changes))
     configuration={**configuration_for(profile),'session_file':None}
+    if saved:
+        configuration.update(session_file=native['session']['file'],session_id=prior['session']['id'] if prior else str(uuid.uuid4()))
     (results/'rpc-configuration.json').write_text(json.dumps(configuration))
     worker={'run_id':run_id,'task_id':task['task_id'],'checks':[],'configuration':configuration,'artifacts':{str(p.relative_to(results)):sha(p.read_bytes()) for p in results.rglob('*') if p.is_file()}}
+    if saved:
+        session={'id':configuration['session_id'],'bytes':prior['session']['bytes']+64 if prior else 128,'sha256':sha((run_id+str(prior)).encode()),'header_sha256':prior['session']['header_sha256'] if prior else sha(configuration['session_id'].encode())}
+        terminal={**files,name:target.read_bytes()}
+        workspace={'files':{path:{'sha256':sha(value),'mode':420} for path,value in terminal.items()},'directories':{'.':493}}
+        checkpoint={'version':1,'conversation_id':native['session']['conversation_id'],'run_id':run_id,'task_id':task['task_id'],'task_sha256':sha(json.dumps(native).encode()),'source_commit':source['commit'],'prior_run_id':prior['run_id'] if prior else None,'prior_checkpoint_sha256':native['session']['prior_sha256'],'session':session,'workspace':workspace}
+        checkpoint_raw=private_control_bytes(checkpoint)
+        (results/'conversation.json').write_bytes(checkpoint_raw)
+        worker['conversation']={'checkpoint_sha256':sha(checkpoint_raw),'session_before':prior['session'] if prior else None,'session_after':session,'prior_prefix_sha256':prior['session']['sha256'] if prior else sha(b''),'continuable':True}
+        worker['extension']={'session':{'id':configuration['session_id'],'file':configuration['session_file'],'cwd':native['workspace'],'version':3}}
+        worker['artifacts']['conversation.json']=sha(checkpoint_raw)
     (results/'worker-receipt.json').write_text(json.dumps(worker))
-    receipt={'version':2,'task_id':task['task_id'],'run_id':run_id,'source':source,'input_sha256':sha((output/'inputs.tar').read_bytes()),'worker':worker,'delivery_valid':True,'cleanup_complete':True,'protected_unchanged':True,'artifacts_verified':True,'acceptance':'not_granted','outcome':'returned'}
+    receipt={'version':native['version'],'task_id':task['task_id'],'run_id':run_id,'source':source,'input_sha256':sha((output/'inputs.tar').read_bytes()),'worker':worker,'delivery_valid':True,'cleanup_complete':True,'protected_unchanged':True,'artifacts_verified':True,'acceptance':'not_granted','outcome':'returned'}
     receipt.update(owner_receipt(profile))
     (output/'receipt.json').write_text(json.dumps(receipt))
 if __name__ == '__main__': main()
@@ -191,6 +290,19 @@ def execution_project(git_repo, tmp_path, monkeypatch):
         yield backend, git_repo, state, registration
     finally:
         backend.close()
+
+
+@pytest.fixture
+def saved_execution_project(execution_project):
+    backend, repo, state, registration = execution_project
+    saved = register_execution_adapter(
+        Path(registration.script), Path(registration.interpreter), Path(registration.profile),
+        saved_session_continue=True,
+    )
+    Path(os.environ["ANVIL_GLOBAL_CONFIG"]).write_text(
+        yaml.safe_dump({"execution_adapter": dataclasses.asdict(saved)})
+    )
+    return backend, repo, state, saved
 
 
 @pytest.mark.parametrize("platform", ["darwin", "win32"])
@@ -754,3 +866,264 @@ def test_consumed_preview_racing_fresh_admission_preserves_new_slot(tmp_path):
     assert read_receipt(root / "consumed" / (old_preview + ".json")) == {"run_id": previous_run}
     assert not (root / "retired").exists()
     assert not (root / "runs").exists()
+
+
+def _completed_saved_run(project):
+    from anvil.execution import git
+    from tests.test_execution_runner import _wait
+
+    _, repo, _, _ = project
+    preview = _preview(project)
+    admitted = confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    result = _wait(directory)
+    assert result["state"] == "needs_review", result
+    checkout = Path(admitted["cwd"])
+    git(checkout, "add", "README.md")
+    git(checkout, "commit", "-qm", "Retain first synthetic edit")
+    git(repo, "merge", "--ff-only", git(checkout, "rev-parse", "HEAD").decode().strip())
+    return preview, admitted, directory
+
+
+def test_saved_same_task_requires_request_changes_readiness_and_new_claim(saved_execution_project):
+    from anvil.execution import confirm_continue, preview_continue
+    from tests.test_execution_runner import _wait
+
+    backend, repo, state, _ = saved_execution_project
+    _, prior, directory = _completed_saved_run(saved_execution_project)
+    before = (state / "events.jsonl").read_bytes()
+    with pytest.raises(ExecutionError, match="ready task"):
+        preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions())
+    assert (state / "events.jsonl").read_bytes() == before
+    rejected = json.loads(native_cli(
+        repo, "apply", "release:T001", "--reject", "--reason", "Add the requested follow-up edit",
+        "--reviewer", "synthetic-reviewer", "--json",
+    ))
+    assert rejected["ok"] is True and backend.get_task("release:T001").status.value == "drafted"
+    with pytest.raises(ExecutionError, match="ready task"):
+        preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions())
+    task = backend.get_task("release:T001")
+    command = shlex.join([sys.executable, "-I", "-c",
+                         "from pathlib import Path; assert Path('README.md').read_bytes() == b'continued\\n'; print('rework-proof')"])
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id,
+        "verification": {"commands": [command], "required_proofs": [
+            {"kind": "command", "command": command, "passing_exit_codes": [0], "label": "rework"}]},
+    }, target_kind="task", target_id=task.id))
+    native_cli(repo, "review", "tasks", "--prd", "release", "--json")
+    assert backend.get_task(task.id).status.value == "ready"
+    preview = preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions())
+    assert "Add the requested follow-up edit" in preview["assignment"]["instructions"]
+    assert preview["continuation_material"]["review"]["binding_status"] == "exact"
+    next_run = confirm_continue(repo, prior["run_id"], "synthetic-owner", preview["preview_id"])
+    returned = _wait(journal_root(repo) / "runs" / next_run["run_id"])
+    assert returned["state"] == "needs_review", returned
+    from anvil.execution import inspect_execution_preview
+
+    # Simulate losing the confirm response: inspect its exact saved route,
+    # then retrying confirm must never create a third dispatch or native claim.
+    dispatch_count = len(list(journal_root(repo).glob("runs/*/dispatch.json")))
+    retained_events = (state / "events.jsonl").read_bytes()
+    inspected = inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")
+    assert inspected["state"] == "consumed" and inspected["run_id"] == next_run["run_id"]
+    assert inspected["operation"] == "continue" and inspected["prior_run_id"] == prior["run_id"]
+    with pytest.raises(ExecutionError) as duplicate:
+        confirm_continue(repo, prior["run_id"], "synthetic-owner", preview["preview_id"])
+    assert duplicate.value.code == "preview_consumed"
+    assert len(list(journal_root(repo).glob("runs/*/dispatch.json"))) == dispatch_count == 2
+    assert (state / "events.jsonl").read_bytes() == retained_events
+    claim = backend.get_claim(next_run["claim_id"])
+    assert claim.generation == 2 and claim.id != prior["claim_id"]
+    evidence = backend.get_latest_evidence(task.id)
+    assert evidence.proofs[0].evidence_core.claim_id == claim.id
+    assert evidence.proofs[0].evidence_core.generation == 2
+    assert read_receipt(directory / "result.json")["state"] == "needs_review"
+    applied = [json.loads(line) for line in (state / "events.jsonl").read_bytes().splitlines()
+               if json.loads(line)["action"] == "task.applied"]
+    assert len(applied) == 1 and rejected["data"]["decision"] == "rejected"
+
+
+def test_saved_prior_tampering_and_metadata_cas_refuse_before_claim(saved_execution_project):
+    from anvil.execution import preview_continue, refresh_execution_capabilities
+
+    backend, repo, state, registration = saved_execution_project
+    followup_task = backend.get_task("release:T002")
+    backend.append(_event("task.created", {
+        **followup_task.model_dump(mode="json"), "prd_id": followup_task.prd_id,
+        "likely_files": ["README.md"],
+        "verification": backend.get_task("release:T001").verification.model_dump(mode="json"),
+    }, target_kind="task", target_id=followup_task.id))
+    _, prior, directory = _completed_saved_run(saved_execution_project)
+    before = (state / "events.jsonl").read_bytes()
+    for name, mutate in (
+        ("result.json", lambda value: value.update(local_children_stopped=False)),
+        ("adapter-result.json", lambda value: value["saved_conversation"].update(checkpoint_sha256="0"*64)),
+        ("submitted.json", lambda value: value["data"].update(evidence_id="EVFOREIGN")),
+        ("context.json", lambda value: value["claim"].update(claimed_by="foreign")),
+    ):
+        path = directory / name
+        original = path.read_bytes()
+        changed = json.loads(original)
+        mutate(changed)
+        path.write_text(json.dumps(changed))
+        try:
+            with pytest.raises(ExecutionError) as refused:
+                preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions(), task_id="release:T002")
+            assert refused.value.code == {
+                "result.json": "unsettled_run", "adapter-result.json": "result_mismatch",
+                "submitted.json": "unsettled_run", "context.json": "continuation_lineage",
+            }[name]
+        finally:
+            path.write_bytes(original)
+        assert (state / "events.jsonl").read_bytes() == before
+        assert not backend.list_active_claims()
+    with pytest.raises(ExecutionError, match="registration changed"):
+        refresh_execution_capabilities(repo, expected_registration_sha256="0"*64)
+    assert (state / "events.jsonl").read_bytes() == before
+    assert registration.registration["contract_version"] == 3
+    from anvil.execution import confirm_continue
+
+    preview = preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions(), task_id="release:T002")
+    path = directory / "result.json"
+    original = path.read_bytes()
+    changed = json.loads(original)
+    changed["local_children_stopped"] = False
+    path.write_text(json.dumps(changed))
+    try:
+        with pytest.raises(ExecutionError, match="reconciliation"):
+            confirm_continue(repo, prior["run_id"], "synthetic-owner", preview["preview_id"])
+    finally:
+        path.write_bytes(original)
+    assert (state / "events.jsonl").read_bytes() == before
+    assert not backend.list_active_claims()
+    assert not (journal_root(repo) / "consumed" / (preview["preview_id"] + ".json")).exists()
+    from anvil.task_actions import transition_task
+
+    task = backend.get_task("release:T001")
+    transition_task(backend, task.id, "close", "synthetic-reviewer",
+                    expected_status=task.status.value, expected_updated_at=task.updated_at,
+                    resolution="obsolete", reason="Separate explicit follow-up owns remaining work")
+    followup = preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions(), task_id="release:T002")
+    assert followup["task_id"] == "release:T002"
+    assert backend.get_task(task.id).status.value == "closed"
+    assert not backend.list_active_claims()
+
+
+def test_saved_preview_inspection_is_exact_and_read_only_after_expiry(saved_execution_project, monkeypatch):
+    from anvil.execution import inspect_execution_preview
+    from tests.test_execution_runner import _wait
+
+    backend, repo, state, _ = saved_execution_project
+    preview = _preview(saved_execution_project)
+    before = (state / "events.jsonl").read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr("anvil.execution.now", lambda: datetime.fromisoformat(preview["expires_at"]) + timedelta(seconds=1))
+        inspected = inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")
+        assert inspected["state"] == "unconsumed" and inspected["run_id"] is None
+    assert (state / "events.jsonl").read_bytes() == before
+    with pytest.raises(ExecutionError, match="actor"):
+        inspect_execution_preview(repo, preview["preview_id"], "foreign")
+    admitted = confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / admitted["run_id"]
+    result = _wait(directory)
+    assert result["state"] == "needs_review", result
+    before = (state / "events.jsonl").read_bytes()
+    inspected = inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")
+    assert inspected["state"] == "consumed" and inspected["run_id"] == admitted["run_id"]
+    from anvil.execution import json_bytes
+
+    names = ("request.json", "context.json", "dispatch.json")
+    retained = {name: (directory / name).read_bytes() for name in names}
+    for field in ("dispatch", "actor", "task"):
+        request, context, dispatch_data = (json.loads(retained[name]) for name in names)
+        if field == "dispatch":
+            request["dispatch_id"] = context["run_id"] = "f" * 32
+        elif field == "actor":
+            request["binding"]["actor"] = context["actor"] = "foreign-owner"
+        else:
+            request["binding"]["task_id"] = context["task_id"] = "release:T002"
+        request["request_sha256"] = digest(json_bytes({key: value for key, value in request.items() if key != "request_sha256"}))
+        dispatch_data.update(request_sha256=request["request_sha256"],
+                             request_file_sha256=digest(json_bytes(request)),
+                             context_sha256=digest(json_bytes(context)))
+        try:
+            for name, value in zip(names, (request, context, dispatch_data), strict=True):
+                (directory / name).write_bytes(json_bytes(value))
+            assert inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")["state"] == "unknown"
+        finally:
+            for name, raw in retained.items():
+                (directory / name).write_bytes(raw)
+    consumed = journal_root(repo) / "consumed" / (preview["preview_id"] + ".json")
+    original_consumed = consumed.read_bytes()
+    consumed.unlink()
+    try:
+        assert inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")["state"] == "unknown"
+    finally:
+        consumed.write_bytes(original_consumed)
+        consumed.chmod(0o600)
+    assert len(list(journal_root(repo).glob("runs/*/dispatch.json"))) == 1
+    dispatch = directory / "dispatch.json"
+    original = dispatch.read_bytes()
+    dispatch.write_text('{}')
+    try:
+        assert inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")["state"] == "unknown"
+    finally:
+        dispatch.write_bytes(original)
+    assert (state / "events.jsonl").read_bytes() == before
+    assert not backend.list_active_claims()
+
+
+
+def test_known_failed_saved_check_requires_explicit_release_before_continue(saved_execution_project):
+    from anvil.execution import confirm_continue, git, preview_continue
+    from tests.test_execution_runner import _wait
+
+    backend, repo, state, _ = saved_execution_project
+    task = backend.get_task("release:T001")
+    failed_command = "exit 9"
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id,
+        "verification": {"commands": [failed_command], "required_proofs": [
+            {"kind": "command", "command": failed_command, "passing_exit_codes": [0], "label": "fails"}]},
+    }, target_kind="task", target_id=task.id))
+    preview = _preview(saved_execution_project)
+    prior = confirm_run(repo, task.id, "synthetic-owner", preview["preview_id"])
+    directory = journal_root(repo) / "runs" / prior["run_id"]
+    failed = _wait(directory)
+    assert failed["state"] == "failed_stopped" and failed["error_code"] == "command_failed"
+    assert backend.get_latest_evidence(task.id) is None
+    assert backend.get_claim(prior["claim_id"]).status.value == "active"
+    checkout = Path(prior["cwd"])
+    git(checkout, "add", "README.md")
+    git(checkout, "commit", "-qm", "Retain inspected synthetic edit after failed check")
+    git(repo, "merge", "--ff-only", git(checkout, "rev-parse", "HEAD").decode().strip())
+    with pytest.raises(ExecutionError, match="isolated"):
+        preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions())
+    native_cli(repo, "release", prior["claim_id"], "--actor", "synthetic-owner",
+               "--reason", "Explicitly re-admit inspected failed-check work", "--json")
+    assert backend.get_task(task.id).status.value == "ready"
+    task = backend.get_task(task.id)
+    command = shlex.join([sys.executable, "-I", "-c",
+                         "from pathlib import Path; assert Path('README.md').read_bytes() == b'continued\\n'; print('recovered-native-proof')"])
+    backend.append(_event("task.created", {
+        **task.model_dump(mode="json"), "prd_id": task.prd_id,
+        "verification": {"commands": [command], "required_proofs": [
+            {"kind": "command", "command": command, "passing_exit_codes": [0], "label": "recovered"}]},
+    }, target_kind="task", target_id=task.id))
+    outcome_path = directory / "result.json"
+    original = outcome_path.read_bytes()
+    outcome_path.write_text(json.dumps({**failed, "error_code": "source_changed"}))
+    try:
+        with pytest.raises(ExecutionError, match="Uncertain native failure"):
+            preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions())
+    finally:
+        outcome_path.write_bytes(original)
+    continued = preview_continue(repo, prior["run_id"], "synthetic-owner", RunOptions())
+    assert continued["continuation_material"]["review"] is None
+    next_run = confirm_continue(repo, prior["run_id"], "synthetic-owner", continued["preview_id"])
+    assert _wait(journal_root(repo) / "runs" / next_run["run_id"])["state"] == "needs_review"
+    assert backend.get_claim(next_run["claim_id"]).generation == 2
+    proof = backend.get_latest_evidence(task.id).proofs[0].evidence_core
+    assert proof.claim_id == next_run["claim_id"] and proof.generation == 2
+    assert not any(json.loads(line)["action"] == "task.applied"
+                   for line in (state / "events.jsonl").read_bytes().splitlines())

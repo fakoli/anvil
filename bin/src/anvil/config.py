@@ -52,7 +52,7 @@ class ExecutionAdapter:
             value["schema"] != "anvil.execution-adapter.v1"
             or value["adapter_id"] != "codex-pi-coordination"
             or type(value["contract_version"]) is not int
-            or value["contract_version"] != 2
+            or value["contract_version"] not in {2, 3}
         ):
             raise ValueError("Unsupported portable execution registration")
         for name in ("interpreter", "script", "profile"):
@@ -76,7 +76,7 @@ class ExecutionAdapter:
             type(capabilities) is not dict
             or set(capabilities) != {"run", "saved_session_continue"}
             or capabilities["run"] is not True
-            or capabilities["saved_session_continue"] is not False
+            or capabilities["saved_session_continue"] is not (value["contract_version"] == 3)
         ):
             raise ValueError("Unsupported adapter capabilities")
 
@@ -105,11 +105,15 @@ class ExecutionAdapter:
         }
 
 
-def register_execution_adapter(script: Path, interpreter: Path, profile: Path) -> ExecutionAdapter:
+def register_execution_adapter(
+    script: Path, interpreter: Path, profile: Path, *, saved_session_continue: bool = False
+) -> ExecutionAdapter:
     """Derive portable identity from installed bytes; never accept caller version claims."""
     import hashlib
     import json
 
+    if type(saved_session_continue) is not bool:
+        raise ValueError("Saved-session support must be an explicit boolean")
     paths = {
         "script": script.absolute(),
         "interpreter": interpreter.resolve(strict=True),
@@ -128,14 +132,14 @@ def register_execution_adapter(script: Path, interpreter: Path, profile: Path) -
         {
             "schema": "anvil.execution-adapter.v1",
             "adapter_id": "codex-pi-coordination",
-            "contract_version": 2,
+            "contract_version": 3 if saved_session_continue else 2,
             "interpreter": str(paths["interpreter"]),
             "script": str(paths["script"]),
             "version": package.get("version"),
             "code_sha256": {name: hashes[name] for name in ("script", "extension")},
             "profile": str(paths["profile"]),
             "profile_sha256": hashes["profile"],
-            "capabilities": {"run": True, "saved_session_continue": False},
+            "capabilities": {"run": True, "saved_session_continue": saved_session_continue},
         },
         hashes["interpreter"],
     )
@@ -267,14 +271,8 @@ def execution_config_mapping(raw: bytes) -> dict[str, object]:
     return value
 
 
-def load_execution_adapter() -> ExecutionAdapter:
-    """Only the global owner file may authorize adapter code or a profile."""
-    import hashlib
-
-    path = global_config_path()
-    raw = execution_file_bytes(path, 1024 * 1024, missing_ok=True)
-    if raw is None:
-        raise ValueError("Run is not configured; use anvil run-configure")
+def execution_adapter_from_config(raw: bytes) -> ExecutionAdapter:
+    """Parse recorded identity without importing or requiring old executable bytes."""
     value = execution_config_mapping(raw)
     registration = value.get("execution_adapter")
     if type(registration) is not dict or set(registration) != {
@@ -282,7 +280,13 @@ def load_execution_adapter() -> ExecutionAdapter:
         "interpreter_sha256",
     }:
         raise ValueError("Missing or invalid global execution_adapter registration")
-    adapter = ExecutionAdapter(**registration)
+    return ExecutionAdapter(**registration)
+
+
+def validate_execution_adapter_inputs(adapter: ExecutionAdapter) -> None:
+    """Recheck exact trusted inputs without promoting an existing capability."""
+    import hashlib
+
     for name, fingerprint in adapter.hashes.items():
         actual_digest = hashlib.sha256(
             execution_file_bytes(Path(getattr(adapter, name)))
@@ -290,11 +294,298 @@ def load_execution_adapter() -> ExecutionAdapter:
         if actual_digest != fingerprint:
             raise ValueError("Registered execution input changed; review registration")
     installed = register_execution_adapter(
-        Path(adapter.script), Path(adapter.interpreter), Path(adapter.profile)
+        Path(adapter.script), Path(adapter.interpreter), Path(adapter.profile),
+        saved_session_continue=adapter.registration["capabilities"]["saved_session_continue"],
     )
     if installed != adapter:
         raise ValueError("Installed execution package identity changed")
+def load_execution_adapter() -> ExecutionAdapter:
+    """Only the global owner file may authorize adapter code or a profile."""
+    raw = execution_file_bytes(global_config_path(), 1024 * 1024, missing_ok=True)
+    if raw is None:
+        raise ValueError("Run is not configured; use anvil run-configure")
+    adapter = execution_adapter_from_config(raw)
+    validate_execution_adapter_inputs(adapter)
     return adapter
+
+
+def write_execution_adapter_config(
+    path: Path, adapter: ExecutionAdapter, original: bytes, *, before_publish=None
+) -> bool:
+    """Publish one exact owner-config preimage under the existing registration lock."""
+    import dataclasses
+    import os
+
+    from anvil.execution import private_directory, sync_directory
+
+    existing = execution_config_mapping(original)
+    data = dataclasses.asdict(adapter)
+    if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
+        raise ValueError("Global configuration changed during registration")
+    if existing.get("execution_adapter") == data:
+        if before_publish is not None:
+            before_publish()
+        if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
+            raise ValueError("Global configuration changed during registration")
+        return False
+    candidate = {**existing, "execution_adapter": data}
+    appended = original + (b"\n" if original and not original.endswith(b"\n") else b"")
+    appended += yaml.safe_dump({"execution_adapter": data}, sort_keys=True).encode()
+    # Appending is only appropriate for a first registration; replacing a key
+    # through duplicate YAML keys would conceal the old owner's configuration.
+    preserve_bytes = "execution_adapter" not in existing
+    try:
+        preserve_bytes = preserve_bytes and yaml.safe_load(appended) == candidate
+    except yaml.YAMLError:
+        preserve_bytes = False
+    raw = appended if preserve_bytes else yaml.safe_dump(candidate, sort_keys=False).encode()
+    if execution_config_mapping(raw) != candidate:
+        raise ValueError("Execution registration cannot preserve the owner configuration")
+    private_directory(path.parent)
+    if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
+        raise ValueError("Global configuration changed during registration")
+    lock = path.with_name(path.name + ".execution-registration.lock")
+    with lock.open("xb") as guard:
+        os.chmod(lock, 0o600)
+        guard.write(b"registration\n")
+        guard.flush()
+        os.fsync(guard.fileno())
+    try:
+        if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
+            raise ValueError("Global configuration changed during registration")
+        if before_publish is not None:
+            before_publish()
+        if original:
+            backup = path.with_name(path.name + ".before-execution-" + uuid.uuid4().hex)
+            with backup.open("xb") as stream:
+                os.chmod(backup, 0o600)
+                stream.write(original)
+                stream.flush()
+                os.fsync(stream.fileno())
+        temporary = path.with_name(path.name + ".execution-" + uuid.uuid4().hex)
+        with temporary.open("xb") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if before_publish is not None:
+            before_publish()
+        if (execution_file_bytes(path, 1024 * 1024, missing_ok=True) or b"") != original:
+            raise ValueError("Global configuration changed before registration publication")
+        os.replace(temporary, path)
+        sync_directory(path.parent)
+    finally:
+        lock.unlink()
+        sync_directory(path.parent)
+    return True
+
+
+def preview_execution_adapter_upgrade(
+    script: Path | None = None, interpreter: Path | None = None, profile: Path | None = None
+) -> dict[str, object]:
+    """Prepare an explicit saved-contract upgrade without executing the old adapter."""
+    import dataclasses
+    from datetime import timedelta
+
+    from anvil.execution import (
+        digest,
+        json_bytes,
+        now,
+        private_directory,
+        timestamp,
+        validate_adapter_contract,
+        write_receipt,
+    )
+
+    path = global_config_path()
+    original = execution_file_bytes(path, 1024 * 1024)
+    previous = execution_adapter_from_config(original)
+    candidate = register_execution_adapter(
+        script or Path(previous.script), interpreter or Path(previous.interpreter),
+        profile or Path(previous.profile), saved_session_continue=True,
+    )
+    if (candidate.profile != previous.profile
+            or candidate.hashes["profile"] != previous.hashes["profile"]):
+        raise ValueError("Registration upgrade must preserve the existing profile path and bytes")
+    preview_id = uuid.uuid4().hex
+    directory = path.parent / (path.name + ".execution-upgrades") / preview_id
+    # Check missing ancestry before creating any owner control files.
+    execution_file_bytes(directory / "preview.json", 1024 * 1024, missing_ok=True)
+    private_directory(directory.parent)
+    private_directory(directory)
+    execution_file_bytes(directory / "preview.json", 1024 * 1024, missing_ok=True)
+    candidate_path = directory / "candidate.json"
+    write_receipt(candidate_path, dataclasses.asdict(candidate))
+    validate_adapter_contract(candidate, path.parent, candidate_path=candidate_path)
+    if execution_file_bytes(path, 1024 * 1024) != original:
+        raise ValueError("Global configuration changed during upgrade preview")
+    validate_execution_adapter_inputs(candidate)
+    created = now()
+    result = {
+        "schema": "anvil.execution-registration-upgrade.v1", "preview_id": preview_id,
+        "config_path": str(path), "created_at": timestamp(created),
+        "expires_at": timestamp(created + timedelta(seconds=300)),
+        "config_sha256": digest(original),
+        "expected_registration_sha256": digest(json_bytes(dataclasses.asdict(previous))),
+        "candidate_registration_sha256": digest(json_bytes(dataclasses.asdict(candidate))),
+        "previous": dataclasses.asdict(previous), "candidate": dataclasses.asdict(candidate),
+        "changed": previous != candidate,
+    }
+    write_receipt(directory / "preview.json", result)
+    return result
+
+
+def _read_execution_adapter_owner(
+    registration: ExecutionAdapter, candidate_path: Path, cwd: Path
+) -> dict[str, object]:
+    """Read the candidate owner through bounded, retained descendant capture."""
+    import dataclasses
+    import json
+    import sys
+    import time
+
+    from anvil.execution import json_bytes, private_directory
+    from anvil.execution_runner import capture, validated_owner_state
+
+    validate_execution_adapter_inputs(registration)
+    candidate_bytes = execution_file_bytes(candidate_path, 1024 * 1024)
+    if json.loads(candidate_bytes) != dataclasses.asdict(registration):
+        raise ValueError("Registration upgrade candidate changed before owner read")
+    directory = private_directory(candidate_path.parent / "owner-checks" / uuid.uuid4().hex)
+    capture(
+        [sys.executable, "-I", "-m", "anvil.execution_runner", "--verify-owner",
+         "--candidate", str(candidate_path), "--output", str(directory / "owner-cli")],
+        cwd, directory, "owner", time.monotonic() + 40, 4096, separate_stdout=True,
+    )
+    raw = execution_file_bytes(directory / "owner.stdout", 4096)
+    selected = validated_owner_state(json.loads(raw))
+    if raw != json_bytes(selected):
+        raise ValueError("Noncanonical execution owner read")
+    validate_execution_adapter_inputs(registration)
+    if execution_file_bytes(candidate_path, 1024 * 1024) != candidate_bytes:
+        raise ValueError("Registration upgrade candidate changed during owner read")
+    return selected
+
+
+def confirm_execution_adapter_upgrade(preview_id: str) -> dict[str, object]:
+    """CAS one reviewed registration while its existing concrete owner is stopped."""
+    import dataclasses
+    import json
+    from datetime import datetime
+
+    from anvil.execution import (
+        adapter_module,
+        digest,
+        identifier,
+        json_bytes,
+        now,
+        validate_adapter_contract,
+        write_receipt,
+    )
+
+    path = global_config_path()
+    directory = path.parent / (path.name + ".execution-upgrades") / identifier(preview_id)
+    preview_bytes = execution_file_bytes(directory / "preview.json", 1024 * 1024)
+    preview = json.loads(preview_bytes)
+    expected_fields = {
+        "schema", "preview_id", "config_path", "created_at", "expires_at", "config_sha256",
+        "expected_registration_sha256", "candidate_registration_sha256", "previous", "candidate",
+        "changed",
+    }
+    if (type(preview) is not dict or set(preview) != expected_fields
+            or preview["schema"] != "anvil.execution-registration-upgrade.v1"
+            or preview["preview_id"] != preview_id or preview["config_path"] != str(path)):
+        raise ValueError("Invalid registration upgrade preview")
+    if (any(type(preview[name]) is not str or len(preview[name]) > 64
+            for name in ("created_at", "expires_at", "config_sha256",
+                         "expected_registration_sha256", "candidate_registration_sha256"))
+            or type(preview["candidate"]) is not dict
+            or set(preview["candidate"]) != {"registration", "interpreter_sha256"}):
+        raise ValueError("Invalid registration upgrade preview fields")
+    created = datetime.fromisoformat(preview["created_at"])
+    expires = datetime.fromisoformat(preview["expires_at"])
+    if (created.tzinfo is None or expires.tzinfo is None
+            or (expires - created).total_seconds() != 300
+            or not created <= now() < expires):
+        raise ValueError("Registration upgrade preview expired or clock moved backwards")
+    if execution_file_bytes(directory / "result.json", 1024 * 1024, missing_ok=True) is not None:
+        raise ValueError("Registration upgrade preview was already confirmed")
+    original = execution_file_bytes(path, 1024 * 1024)
+    previous = execution_adapter_from_config(original)
+    candidate = ExecutionAdapter(**preview["candidate"])
+    if (digest(original) != preview["config_sha256"]
+            or dataclasses.asdict(previous) != preview["previous"]
+            or digest(json_bytes(dataclasses.asdict(previous)))
+            != preview["expected_registration_sha256"]
+            or digest(json_bytes(dataclasses.asdict(candidate)))
+            != preview["candidate_registration_sha256"]
+            or preview["changed"] is not (previous != candidate)
+            or candidate.registration["contract_version"] != 3
+            or candidate.profile != previous.profile
+            or candidate.hashes["profile"] != previous.hashes["profile"]):
+        raise ValueError("Registration upgrade preimage changed")
+    candidate_path = directory / "candidate.json"
+    candidate_bytes = execution_file_bytes(candidate_path, 1024 * 1024)
+    if json.loads(candidate_bytes) != dataclasses.asdict(candidate):
+        raise ValueError("Registration upgrade candidate changed")
+    validate_execution_adapter_inputs(candidate)
+    validate_adapter_contract(candidate, path.parent, candidate_path=candidate_path)
+    module = adapter_module(candidate, require_registered=False)
+    profile = module.profile_settings(Path(candidate.profile))
+    validate_execution_adapter_inputs(candidate)
+    lock_root = Path.home() / ".local/state/codex-pi-coordination"
+    owner_key = module.digest(profile["sandbox_id"].encode())
+    execution_file_bytes(lock_root / (owner_key + ".lock"), 1024 * 1024, missing_ok=True)
+    execution_file_bytes(lock_root / (owner_key + ".json"), 1024 * 1024, missing_ok=True)
+    with module.exclusive_owner(profile, lock_root) as journal_path:
+        execution_file_bytes(lock_root / (owner_key + ".lock"), 1024 * 1024)
+        journal_raw = execution_file_bytes(journal_path, 1024 * 1024, missing_ok=True)
+        journal = json.loads(journal_raw) if journal_raw is not None else None
+        if journal is not None and (
+            type(journal) is not dict or journal.get("cleanup_complete") is not True
+        ):
+            raise ValueError("Execution owner custody is unresolved")
+        validate_execution_adapter_inputs(candidate)
+        try:
+            admitted = _read_execution_adapter_owner(candidate, candidate_path, path.parent)
+        except Exception:
+            raise ValueError("Cannot verify the stopped execution owner") from None
+        if admitted.get("id") != profile["sandbox_id"] or admitted.get("phase") != "Stopped":
+            raise ValueError("Execution owner must be the exact configured stopped sandbox")
+        if journal is not None:
+            expected = journal.get("sandbox_after")
+            if (type(expected) is not dict or expected.get("phase") != "Stopped"
+                    or expected.get("id") != admitted["id"]
+                    or expected.get("main_process_instance_id")
+                    != admitted.get("main_process_instance_id")):
+                raise ValueError("Stopped owner does not match the retained custody journal")
+        def before_publish():
+            validate_execution_adapter_inputs(candidate)
+            if execution_file_bytes(journal_path, 1024 * 1024, missing_ok=True) != journal_raw:
+                raise ValueError("Execution custody journal changed during registration")
+            try:
+                current = _read_execution_adapter_owner(candidate, candidate_path, path.parent)
+            except Exception:
+                raise ValueError("Cannot reverify the stopped execution owner") from None
+            if current != admitted:
+                raise ValueError("Execution owner changed during registration")
+            # Owner reads may take time. Recheck every local preimage after that
+            # call too, before the caller atomically publishes configuration.
+            validate_execution_adapter_inputs(candidate)
+            if (execution_file_bytes(journal_path, 1024 * 1024, missing_ok=True) != journal_raw
+                    or execution_file_bytes(candidate_path, 1024 * 1024) != candidate_bytes
+                    or execution_file_bytes(directory / "preview.json", 1024 * 1024)
+                    != preview_bytes):
+                raise ValueError("Registration or custody preimage changed during owner read")
+
+        changed = write_execution_adapter_config(
+            path, candidate, original, before_publish=before_publish
+        )
+        result = {"changed": changed, "written": changed,
+                  "registration": dataclasses.asdict(candidate),
+                  "preview_id": preview_id, "runtime_qualified": False}
+        write_receipt(directory / "result.json", result)
+        return result
 # v1.21.0 — complexity score at/above which a task is queued for sub-task
 # expansion. Single source of truth: the Config dataclass default, the
 # scoring engine's expansion-queue builder, and every CLI/MCP call site that
