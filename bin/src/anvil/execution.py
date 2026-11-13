@@ -1563,6 +1563,8 @@ def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[st
 
     root = journal_root(cwd)
     preview = read_receipt(root / "previews" / (identifier(preview_id) + ".json"))
+    if type(preview) is not dict:
+        raise ExecutionError("preview_mismatch", "Invalid preview object")
     if preview.get("claim") is None:
         actor = canonicalize_new_actor(actor)
     if preview.get("actor") != actor or preview.get("cwd") != str(cwd.resolve()):
@@ -1592,7 +1594,9 @@ def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[st
             run_id = identifier(consumed["run_id"])
             directory = root / "runs" / run_id
             admission = read_receipt(directory / "admission.json")
-            dispatch = read_receipt(directory / "dispatch.json")
+            dispatch = strict_object(read_receipt(directory / "dispatch.json"), {
+                "run_id", "at", "request_sha256", "request_file_sha256", "context_sha256",
+            })
             request_raw = execution_file_bytes(directory / "request.json")
             context_raw = execution_file_bytes(directory / "context.json")
             request = ExecutionRequest.from_data(json.loads(request_raw))
@@ -1622,8 +1626,12 @@ def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[st
         slot = root / "slots" / (digest(preview["task_id"].encode()) + ".json")
         if slot.exists():
             try:
-                reserved = read_receipt(slot)
-                if reserved.get("preview_id") == preview_id:
+                reserved = strict_object(read_receipt(slot), {"run_id", "task_id", "preview_id"})
+                identifier(reserved["run_id"])
+                reserved_preview_id = identifier(reserved["preview_id"])
+                if reserved["task_id"] != preview["task_id"]:
+                    raise ExecutionError("preview_mismatch", "Slot belongs to another task")
+                if reserved_preview_id == preview_id:
                     result["state"] = "unknown"
             except (ExecutionError, OSError, ValueError, TypeError, KeyError):
                 result["state"] = "unknown"

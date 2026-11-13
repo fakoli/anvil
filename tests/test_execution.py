@@ -1009,6 +1009,52 @@ def test_saved_prior_tampering_and_metadata_cas_refuse_before_claim(saved_execut
     assert not backend.list_active_claims()
 
 
+def test_preview_inspection_malformed_receipts_are_read_only(execution_project, monkeypatch):
+    from anvil.execution import inspect_execution_preview, json_bytes
+
+    backend, repo, state, _ = execution_project
+    preview = _preview(execution_project)
+    root = journal_root(repo)
+    preview_path = root / "previews" / (preview["preview_id"] + ".json")
+    preview_raw = preview_path.read_bytes()
+    events = (state / "events.jsonl").read_bytes()
+
+    def forbid_dispatch(*args, **kwargs):
+        pytest.fail("Inspection must not reserve or dispatch work")
+
+    monkeypatch.setattr("anvil.execution.reserve_slot", forbid_dispatch)
+    monkeypatch.setattr("anvil.execution.native_cli", forbid_dispatch)
+    for value in ([], None, 1):
+        preview_path.write_bytes(json_bytes(value))
+        with pytest.raises(ExecutionError, match="preview object"):
+            inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")
+        assert preview_path.read_bytes() == json_bytes(value)
+    preview_path.write_bytes(preview_raw)
+    slot = root / "slots" / (digest(preview["task_id"].encode()) + ".json")
+    slot.parent.mkdir(mode=0o700, exist_ok=True)
+    valid_slot = {"run_id": "a" * 32, "task_id": preview["task_id"],
+                  "preview_id": preview["preview_id"]}
+    for value, expected in [
+        *[(value, "unknown") for value in ([], None, 1, "slot", {},
+                                           {"preview_id": preview["preview_id"]})],
+        ({**valid_slot, "run_id": None}, "unknown"),
+        ({**valid_slot, "preview_id": []}, "unknown"),
+        ({**valid_slot, "task_id": "release:T002"}, "unknown"),
+        (valid_slot, "unknown"),
+        ({**valid_slot, "preview_id": "b" * 32}, "unconsumed"),
+    ]:
+        slot.write_bytes(json_bytes(value))
+        retained = {str(p.relative_to(root)): p.read_bytes()
+                    for p in root.rglob("*") if p.is_file()}
+        inspected = inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")
+        assert inspected["state"] == expected and inspected["run_id"] is None
+        assert {str(p.relative_to(root)): p.read_bytes()
+                for p in root.rglob("*") if p.is_file()} == retained
+    assert (state / "events.jsonl").read_bytes() == events
+    assert not backend.list_active_claims()
+    assert not list(root.glob("runs/*/dispatch.json"))
+
+
 def test_saved_preview_inspection_is_exact_and_read_only_after_expiry(saved_execution_project, monkeypatch):
     from anvil.execution import inspect_execution_preview
     from tests.test_execution_runner import _wait
@@ -1064,9 +1110,11 @@ def test_saved_preview_inspection_is_exact_and_read_only_after_expiry(saved_exec
     assert len(list(journal_root(repo).glob("runs/*/dispatch.json"))) == 1
     dispatch = directory / "dispatch.json"
     original = dispatch.read_bytes()
-    dispatch.write_text('{}')
     try:
-        assert inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")["state"] == "unknown"
+        for value in ({}, [], None, 1):
+            dispatch.write_bytes(json_bytes(value))
+            assert inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")["state"] == "unknown"
+            assert dispatch.read_bytes() == json_bytes(value)
     finally:
         dispatch.write_bytes(original)
     assert (state / "events.jsonl").read_bytes() == before
