@@ -435,11 +435,15 @@ class _ArtifactBudget:
         self.lock = threading.Lock()
         self.capture_bytes = 0
         self.reserved_names = set()
+        self.capture_write_failed = False
         self.exhausted = False
         self.other_bytes = 0
         self.refresh()
 
     def refresh(self):
+        with self.lock:
+            if self.capture_write_failed:
+                raise ValueError("Artifact accounting refused: capture write failed")
         # Workers can reserve/write captures throughout this scan. They never
         # write noncapture storage; the sole coordinator refreshes between its
         # native writes. Inventory captures without recursing or stat'ing each
@@ -474,6 +478,9 @@ class _ArtifactBudget:
                 self.exhausted = True
             raise
         with self.lock:
+            # A writer may have failed while the inventory was being scanned.
+            if self.capture_write_failed:
+                raise ValueError("Artifact accounting refused: capture write failed")
             if capture_names - self.reserved_names:
                 self.exhausted = True
                 raise ValueError("Unaccounted capture artifact")
@@ -497,9 +504,16 @@ class _ArtifactBudget:
             # Charge before opening; a failed/partial write never returns capacity.
             self.capture_bytes += len(raw)
             self.reserved_names.add(path.name)
-        with path.open("xb") as stream:
-            if stream.write(raw) != len(raw):
-                raise OSError("Incomplete capture artifact write")
+        try:
+            with path.open("xb") as stream:
+                if stream.write(raw) != len(raw):
+                    raise OSError("Incomplete capture artifact write")
+        except BaseException:
+            # A failed exclusive open may have collided with unaccounted bytes.
+            # Keep the charge, but never certify ambiguous ownership as clean.
+            with self.lock:
+                self.capture_write_failed = self.exhausted = True
+            raise
 
 
 def _prepare_proof(project, task_snapshot, claim_snapshot, execution, budget):

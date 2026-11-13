@@ -737,13 +737,15 @@ def test_failed_artifact_io_keeps_entire_reservation(tmp_path, monkeypatch, faul
     monkeypatch.setattr(Path, "open", failing_open)
     with pytest.raises(OSError):
         budget.write(destination, b"123456")
-    assert budget.capture_bytes == budget.refresh() == 6
+    assert budget.capture_bytes == 6 and budget.exhausted
+    with pytest.raises(ValueError, match="capture write failed"):
+        budget.refresh()
     if fault == "open":
         assert not destination.exists()
     else:
         assert destination.read_bytes() == (b"123456" if fault == "close" else b"12")
     with pytest.raises(ValueError, match="storage budget"):
-        budget.write(captures / "cannot-refund-failure", b"12345")
+        budget.write(captures / "cannot-refund-failure", b"x")
     assert budget.capture_bytes == 6
 
 
@@ -757,9 +759,63 @@ def test_duplicate_artifact_creation_is_exclusive_and_stays_charged(tmp_path, mo
     with pytest.raises(FileExistsError):
         budget.write(destination, b"other")
     assert destination.read_bytes() == b"first"
-    assert budget.capture_bytes == budget.refresh() == 10
+    assert budget.capture_bytes == 10 and budget.exhausted
+    with pytest.raises(ValueError, match="capture write failed"):
+        budget.refresh()
     with pytest.raises(ValueError, match="storage budget"):
         budget.write(captures / "extra", b"x")
+
+
+def test_unexpected_artifact_collision_poison_preserves_charge_and_bytes(tmp_path, monkeypatch):
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    monkeypatch.setattr(execution_scale, "MAX_STORAGE_BYTES", 10)
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    unexpected = captures / "foreign"
+    unexpected.write_bytes(b"X" * 64)
+    with pytest.raises(FileExistsError):
+        budget.write(unexpected, b"x")
+    assert unexpected.read_bytes() == b"X" * 64 and budget.capture_bytes == 1
+    with pytest.raises(ValueError, match="capture write failed"):
+        budget.refresh()
+    with pytest.raises(ValueError, match="storage budget"):
+        budget.write(captures / "cannot-hide-foreign-bytes", b"123456789")
+    assert budget.exhausted and budget.capture_bytes == 1
+    assert list(captures.iterdir()) == [unexpected]
+
+
+def test_inflight_refresh_refuses_concurrent_artifact_write_failure(tmp_path, monkeypatch):
+    captures, other = tmp_path / "captures", tmp_path / "other"
+    captures.mkdir()
+    other.mkdir()
+    budget = execution_scale._ArtifactBudget(tmp_path)
+    entered, released = threading.Event(), threading.Event()
+    original_scandir, original_open = os.scandir, Path.open
+
+    def blocked_scan(path):
+        if Path(path) == other:
+            entered.set()
+            assert released.wait(timeout=5), "test did not release accounting scan"
+        return original_scandir(path)
+
+    def failed_open(path, *args, **kwargs):
+        if path == captures / "failed":
+            raise OSError("injected exclusive creation failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", blocked_scan)
+    monkeypatch.setattr(Path, "open", failed_open)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        refresh = executor.submit(budget.refresh)
+        try:
+            assert entered.wait(timeout=5)
+            with pytest.raises(OSError):
+                budget.write(captures / "failed", b"charged")
+        finally:
+            released.set()
+        with pytest.raises(ValueError, match="capture write failed"):
+            refresh.result(timeout=5)
+    assert budget.capture_bytes == 7 and budget.exhausted
 
 
 @pytest.mark.parametrize("destination", ["outside", "captures/nested/file"])
