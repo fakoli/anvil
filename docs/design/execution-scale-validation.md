@@ -51,6 +51,53 @@ next to the receipt, in `anvil-execution-scale.work`. Existing receipts and
 work directories are never overwritten. The harness explicitly selects its own
 owner registry; it neither reads nor changes the operator's project State.
 
+## Finite paced host offers
+
+Declare a separate arrival condition with a fresh output destination:
+
+```sh
+uv run --project bin --locked python benchmarks/execution_scale.py --tasks 1000 --workers 128 --proof-preparation worker --arrival-rate 80 --output /tmp/anvil-paced.json
+```
+
+`--arrival-rate` is an integer from 1 to 1,000 offers per second. Omitting it
+preserves the burst fixture. The option is host-only: executor adapters, the
+existing campaign plan and OpenShell waves do not acquire a paced mode.
+The example's 80/s is an offered workload, not a throughput promise or workflow
+latency target. This finite condition does not replace previous burst failures.
+
+One owned producer schedules offers at `epoch + index / arrival_rate` while the
+existing sole coordinator consumes results and appends native evidence. The
+producer uses frozen task/claim snapshots and never accesses State. Only the
+producer waits for the schedule. The ledger writer is never paced. All native
+claims still precede execution; this does not measure concurrent claim creation.
+
+At each actual offer, the producer tries to reserve one of `--workers` slots
+without waiting for capacity. A reservation lasts through command/proof work,
+native append or failed handling, and timing retention. A full cap records
+`capacity_refused`; it neither delays that offer nor creates a command or proof.
+Any refusal fails full-load validation. Submission failure stops further offers,
+records the remaining tasks as `not_offered`, and drains already owned work.
+Producer cancellation is cooperative; its non-daemon thread is joined, with
+unknown stop treated as failure under the existing outer supervisor.
+
+The optional `arrival` receipt uses `anvil.execution-arrivals.v1`. It retains
+each scheduled and actual offer, reservation, executor-submission call time,
+admission/disposition and terminal handling time. Existing raw command, proof
+and ledger timestamps retain their boundaries; queue time starts at the actual
+offer. Late and catch-up offers keep their real timestamps and gaps. Configured
+rate and observed rate (offer intervals over first-to-last actual offer) are
+distinct; a one-offer sample has no observed rate.
+
+Backlog peaks are reconstructed at every raw event. The one-second cumulative
+series samples at `epoch + second`, including events at that boundary, through
+the rounded-up final handling time. Equal timestamps use offered, reserved,
+started, proof-ready, ledger, terminal order, then task ID. A terminal failure
+removes that task from backlog but remains in the failure count. In-flight means
+reserved through terminal handling; waiting-to-start and proof-ready-to-ledger
+are separate subsets. Drain measures final handling after the producer finishes.
+Zero final backlog proves only that this finite workload drained. Partial
+records, missing captures, storage failures or uncertain cleanup cannot pass.
+
 ## Workload and controls
 
 The fixture creates independent tasks with exact command-proof requirements and
@@ -118,6 +165,16 @@ capture and manager preflight. The 15 ms native-stage gate uses `claim_append`,
 progress append, proof validation and evidence append. Full cohort preparation
 and end-to-end acknowledgement remain separate measured costs; passing the
 native-stage gate does not mean either is below 15 ms.
+
+The accepted 15 ms p95 objective concerns ledger operations. The historical
+four fixture gates remain unchanged for compatibility and keep their original
+scope: `proof_validation` spans `_prepare_proof`, including artifact construction,
+native verification and retention, wherever that work runs. `proof_preparation`
+selects coordinator or worker execution; `proof_preparation_wait` measures
+command-end to proof-start waiting. No new 15 ms gate applies to arrival,
+admission, preparation wait, queue, completion or backlog drain, and no numeric
+workflow SLO is established. Historical misses remain failures against their
+original gates. This optional fixture adds no physical or real-model qualification.
 
 `peak_active_claims`, executor limit, observed overlapping command intervals,
 ledger writers and actual containers are separate fields. This harness reports
