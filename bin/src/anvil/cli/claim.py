@@ -126,6 +126,14 @@ def claim(
         ),
     ),
     prd: str | None = PRD_OPTION,
+    execution_scope: str | None = typer.Option(  # noqa: B008
+        None, "--execution-scope", hidden=True,
+        help="Require the previewed execution scope at native claim publication.",
+    ),
+    execution_source: str | None = typer.Option(  # noqa: B008
+        None, "--execution-source", hidden=True,
+        help="Require the exact previewed source before publishing an execution claim.",
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -143,6 +151,12 @@ def claim(
     dependency/cross-PRD/branch/worktree warnings are collected into
     ``warnings`` instead of being printed to stderr.
     """
+
+    if (execution_source is not None and execution_scope is None) or (
+        bundle_mode and (execution_scope is not None or execution_source is not None)
+    ):
+        fail("claim", "Execution scope guards require an ordinary task claim.",
+             code="execution_scope_invalid")
 
     from anvil.claims.manager import ClaimError, ClaimManager, ConflictWarning
     from anvil.clock import SystemClock
@@ -606,14 +620,26 @@ def claim(
             raise typer.Exit(code=1) from exc
 
         profiled = task.verification.profile is not None
+        def require_execution_binding() -> None:
+            require_canonical_prd_claim_binding(state_dir, backend.get_prd(task.prd_id))
+            if execution_scope is not None:
+                from anvil.execution import ExecutionError, clean_source, require_execution_scope
+                if not worktree or shared_tree or force:
+                    raise ClaimError("Execution requires an isolated claim without force")
+                require_execution_scope(backend, task_id, execution_scope)
+                if execution_source is not None:
+                    try:
+                        clean_source(resolved_cwd, execution_source)
+                    except ExecutionError as error:
+                        raise ClaimError(str(error)) from error
+                    if plan.claim_start_sha != execution_source:
+                        raise ClaimError("Native claim source differs from the preview source")
+
         try:
             from anvil.roots.registry import RootSetRegistry
             with RootSetRegistry().ordinary_claim_coordinator(resolved_cwd):
                 with backend.claim_operation_lock():
-                    require_canonical_prd_claim_binding(
-                        state_dir,
-                        backend.get_prd(task.prd_id),
-                    )
+                    require_execution_binding()
                     revalidate_claim_plan(plan, cwd=resolved_cwd)
                     try:
                         if profiled:
@@ -635,13 +661,8 @@ def claim(
                             git_metadata=metadata,
                             operation_locked=True,
                             pre_log_check=lambda: mutation_tracker.check_before_publication(
-                                lambda: require_canonical_prd_claim_binding(
-                                    state_dir,
-                                    backend.get_prd(task.prd_id),
-                                ),
-                            ) if profiled else require_canonical_prd_claim_binding(
-                                state_dir, backend.get_prd(task.prd_id),
-                            ),
+                                require_execution_binding,
+                            ) if profiled else require_execution_binding(),
                         )
                     except BaseException as exc:
                         if profiled:

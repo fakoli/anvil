@@ -6146,6 +6146,8 @@ class TestClaimCommand:
         normalized = " ".join(result.output.split())
         assert "built-in 240" in normalized
         assert "built-in 60" not in normalized
+        assert "--execution-scope" not in normalized
+        assert "--execution-source" not in normalized
 
     def test_new_claim_refuses_canonical_source_drift_before_state_or_git(
         self, tmp_path: Path

@@ -18,6 +18,7 @@ from anvil.cli.conflicts import conflicts
 from anvil.cli.describe import describe
 from anvil.cli.doctor import doctor
 from anvil.cli.drift import drift
+from anvil.cli.execute import continue_run, run, run_capabilities, run_configure, run_status
 from anvil.cli.gate_check import gate_check
 from anvil.cli.graph import graph
 from anvil.cli.hooks import hook_app
@@ -173,6 +174,11 @@ app.command()(deps)
 app.command("list")(list_tasks)
 app.command()(show)
 app.command()(claim)
+app.command()(run)
+app.command("run-configure")(run_configure)
+app.command("run-status")(run_status)
+app.command("run-capabilities")(run_capabilities)
+app.command("continue")(continue_run)
 app.command()(release)
 app.command()(renew)
 app.command()(next)
