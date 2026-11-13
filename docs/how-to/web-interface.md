@@ -120,6 +120,60 @@ claim/progress/submit/apply operations and may use `anvil task-action` for
 supported direct moves without a browser preview round trip. The same engine
 custody and transition checks apply.
 
+## Run and continue work
+
+With a native adapter already registered, choose **Run…** on an eligible card,
+review the preview, and select **Confirm run**. **Default** inherits the adapter's
+configuration without sending model or thinking overrides. The server checks
+current task scope, source and claim ownership before dispatch. Card availability
+is only a hint; a preview can refuse work that is no longer eligible.
+
+Confirmation returns after dispatch, closes the dialog and leaves the board usable.
+The selected run's status appears above the board. Successful proof submission
+ends in **Awaiting review**, without accepting the work. Independent tasks can
+continue during that human review; dependencies and exclusive adapter ownership
+still apply. **Make ready**, **Start claimed work**, drag and drop, and approval
+never launch a harness themselves.
+
+Expand **Advanced options** to choose an exact provider/model pair and thinking
+level. Choices come from verified metadata for that model. **Refresh model
+choices…** or **Refresh this model…** opens its own confirmation and performs a
+bounded metadata request, not a task run. Reopen Run after metadata is ready.
+Unknown or stale metadata disables advanced choices while Default remains
+available. Changing a choice invalidates the previous preview. Observed thinking
+settings are not defaults, and unsupported levels are never invented or substituted.
+
+To continue saved work, select an inspected run under **Runs in this repository**,
+then choose **Continue…** on an eligible task. A saved conversation must be
+positively reported by the native engine; the browser never guesses a latest
+session. For the same task, explicitly **Request changes**, prepare the revised
+scope and **Make ready** before a new Continue preview. An independent approved
+follow-up may instead continue the saved conversation under its own fresh claim.
+Work awaiting review or already closed does not relaunch itself. Inspect and
+commit returned edits through the normal workflow before continuing when native
+source checks require it.
+
+**Inspect a known run ID** accepts the exact run ID from the CLI and reads that
+one run. It does not scan history, dispatch work or grant authority to Continue.
+The configured project writer has the same status access as the native CLI;
+actor names are audit attribution, not a separate authentication system. Fresh
+Run/Continue admission still checks the current configured actor and claim.
+
+If confirmation loses its response, use **Inspect status**. The page retains a
+separate opaque reference to that exact preview after its single-use confirmation
+token expires or is consumed. Unconfirmed or incomplete outcomes remain unknown;
+there is no automatic retry. Inspection references are bounded to 128 on the
+server and in the page; an evicted reference cannot prove whether dispatch
+occurred. The CLI remains the durable inspection path after a page or server restart.
+
+Only one visible selected run is polled, with at most one request in flight.
+Polling pauses in a hidden tab, stops at a terminal result, and pauses after ten
+minutes until **Inspect status** is used again. **Running or interrupted** does
+not establish that the worker is alive; **Reconciliation required** stays unresolved.
+Hiding status or closing the browser never cancels, restarts or takes custody of
+a worker. These controls use the installed native worker and are unavailable for
+read-only or custom-reader enrollments.
+
 ## Reader identity and compatibility
 
 The default reader is the current installed Python/Anvil module running
