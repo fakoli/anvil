@@ -8,7 +8,7 @@ import os
 import shlex
 import shutil
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -233,17 +233,35 @@ def _preview(project, **kwargs):
     return preview_run(project[1], "release:T001", "synthetic-owner", RunOptions(), **kwargs)
 
 
-def test_preview_does_not_claim_and_expiry_is_closed(execution_project, monkeypatch):
+@pytest.mark.parametrize("preflight_seconds", [0, 5])
+def test_preview_does_not_claim_and_expiry_is_closed(
+    execution_project, monkeypatch, preflight_seconds
+):
     import anvil.execution as execution
 
+    current_time = execution.now()
+    preflight_assignment = execution.preflight_assignment
+    monkeypatch.setattr(execution, "now", lambda: current_time)
+
+    def advancing_preflight(preview):
+        nonlocal current_time
+        result = preflight_assignment(preview)
+        current_time += timedelta(seconds=preflight_seconds)
+        return result
+
+    def forbid_reservation(*args, **kwargs):
+        pytest.fail("Stale preview attempted execution reservation")
+
+    monkeypatch.setattr(execution, "preflight_assignment", advancing_preflight)
     backend, repo, state, _ = execution_project
     before = (state / "events.jsonl").read_bytes()
     preview = _preview(execution_project)
     assert not backend.list_active_claims()
     assert (state / "events.jsonl").read_bytes() == before
-    observed = execution.now()
+    monkeypatch.setattr(execution, "reserve_slot", forbid_reservation)
+    created_at = datetime.fromisoformat(preview["created_at"])
     for delta in (-timedelta(seconds=2), timedelta(seconds=301)):
-        monkeypatch.setattr(execution, "now", lambda delta=delta: observed + delta)
+        monkeypatch.setattr(execution, "now", lambda delta=delta: created_at + delta)
         with pytest.raises(ExecutionError, match="expired|backwards"):
             confirm_run(repo, "release:T001", "synthetic-owner", preview["preview_id"])
     assert not backend.list_active_claims()
