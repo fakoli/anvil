@@ -13,14 +13,16 @@ on:
         type: string
 
 jobs:
-  build:
-    name: build + qualify release artifacts
+  source:
+    name: bind exact release source
     runs-on: ubuntu-latest
     if: github.repository == 'fakoli/anvil'
     permissions:
       contents: read
     env:
       RELEASE_REF: ${{ github.event.release.tag_name || inputs.release_ref }}
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
     steps:
       - name: Checkout exact release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -41,9 +43,61 @@ jobs:
         run: uv python install 3.11
 
       - name: Verify exact tag, main ancestry, and synchronized metadata
+        id: source
         shell: bash
         run: |
           set -euo pipefail
+          version=$(uv run --no-project --python 3.11 python -c 'import tomllib; print(tomllib.load(open("bin/pyproject.toml", "rb"))["project"]["version"])')
+          test "$RELEASE_REF" = "v$version"
+          test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$RELEASE_REF")"
+          test "$(git describe --tags --exact-match HEAD)" = "$RELEASE_REF"
+          git merge-base --is-ancestor "$RELEASE_REF^{commit}" origin/main
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  python-tests:
+    needs: source
+    if: github.repository == 'fakoli/anvil'
+    uses: ./.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.source.outputs.commit }}
+
+  build:
+    needs: [source, python-tests]
+    name: build + qualify release artifacts
+    runs-on: ubuntu-latest
+    if: github.repository == 'fakoli/anvil'
+    permissions:
+      contents: read
+    env:
+      RELEASE_REF: ${{ github.event.release.tag_name || inputs.release_ref }}
+      EXPECTED_COMMIT: ${{ needs.source.outputs.commit }}
+    steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+          # Job-scoped suffix: setup-uv keys otherwise collide across
+          # same-OS/same-Python jobs and the losers fail to save (README:
+          # "the first job which starts uploading its cache will win").
+          cache-suffix: ${{ github.job }}
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Verify exact tag, main ancestry, and synchronized metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
           version=$(uv run --no-project --python 3.11 python -c 'import tomllib; print(tomllib.load(open("bin/pyproject.toml", "rb"))["project"]["version"])')
           test "$RELEASE_REF" = "v$version"
           test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$RELEASE_REF")"
@@ -57,7 +111,6 @@ jobs:
         run: |
           uv sync --project bin --locked --extra custom
           (cd bin && uv run --locked ruff check ..)
-          uv run --project bin --locked pytest -n auto
           uv run --project bin --locked python benchmarks/run_benchmark.py --scenarios overlapping_files --quick --out "$RUNNER_TEMP/anvil-benchmark-results.md"
           uvx --with-requirements docs/requirements.txt mkdocs build --strict
 

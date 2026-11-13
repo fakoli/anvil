@@ -787,4 +787,7 @@ def test_windows_ci_runs_timing_harness_mechanics_separately() -> None:
     assert "tests/test_git_ops.py" in workflow
     assert "tests/test_reconciliation.py" in workflow
     assert "-n 16" in workflow
-    assert "uv run --project bin pytest -n auto" in workflow
+    assert "needs: windows-delivery-tests" in workflow
+    partitions = (ROOT / ".github/workflows/python-tests.yml").read_text(encoding="utf-8")
+    assert "--anvil-test-shard ${{ matrix.shard }}/4" in partitions
+    assert "-n 4 --dist worksteal" in partitions

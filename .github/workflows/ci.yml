@@ -12,6 +12,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux-python-tests:
+    uses: ./.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.sha }}
+
+  windows-delivery-tests:
+    uses: ./.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.sha }}
+      windows_delivery: true
+
   dependency-floor:
     name: dependency floors (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -58,10 +73,18 @@ jobs:
           -q
 
   windows-contracts:
+    needs: windows-delivery-tests
+    if: ${{ always() }}
     name: windows focused contracts
     runs-on: windows-latest
 
     steps:
+      - name: Require every Python shard to pass
+        shell: bash
+        env:
+          SHARDS_RESULT: ${{ needs.windows-delivery-tests.result }}
+        run: test "$SHARDS_RESULT" = success
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,43 +127,10 @@ jobs:
           -q
           --basetemp "${{ runner.temp }}/anvil-timing-harness"
 
-      - name: Verify long-running delivery contracts
-        env:
-          _TYPER_FORCE_DISABLE_TERMINAL: "1"
-        run: >-
-          uv run --project bin --locked --python 3.11 pytest
-          tests/test_verification_profiles.py
-          tests/test_command_proof_artifact.py
-          tests/test_proof_gate.py
-          tests/test_profile_cli.py
-          tests/test_profile_mcp.py
-          tests/test_profile_live_boundaries.py
-          tests/test_profile_roots.py
-          tests/test_profile_workflows.py
-          tests/test_attempt_view.py
-          tests/test_attempt_timing.py
-          tests/test_attempt_bundle.py
-          tests/test_attempt_surfaces.py
-          tests/test_attempt_surfaces_mcp.py
-          tests/test_evidence_preflight_cli.py
-          tests/test_evidence_preflight_mcp.py
-          tests/test_evidence_preflight_common.py
-          tests/test_timing_receipts.py
-          tests/test_timing_ingestion.py
-          tests/test_progress_cli.py
-          tests/test_native_evidence_correction.py
-          tests/test_surface_contract.py
-          tests/test_long_running_delivery.py
-          tests/test_long_running_installation.py
-          tests/test_mcp_stdio.py
-          tests/test_root_sets.py::test_enrollment_without_flock_refuses_before_owner_changes
-          tests/test_root_sets.py::test_shared_json_reader_requires_bounded_regular_utf8
-          tests/test_root_sets.py::test_mcp_root_lifecycle_refuses_without_changing_custody
-          -n 4
-          -q
-          --basetemp "${{ runner.temp }}/anvil-long-running-contracts"
 
   test:
+    needs: linux-python-tests
+    if: ${{ always() }}
     name: test (python 3.11)
     runs-on: ubuntu-latest
     # Single version: requires-python = ">=3.11". Re-add 3.12 when you
@@ -150,6 +140,12 @@ jobs:
         python-version: ["3.11"]
 
     steps:
+      - name: Require every Python shard to pass
+        shell: bash
+        env:
+          SHARDS_RESULT: ${{ needs.linux-python-tests.result }}
+        run: test "$SHARDS_RESULT" = success
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,15 +179,6 @@ jobs:
           bin/src/anvil/mcp_server.py
           bin/src/anvil/planning/scoring.py
           bin/src/anvil/cli/plan.py
-
-      - name: Run test suite in parallel
-        env:
-          # GitHub Actions sets GITHUB_ACTIONS=true which makes typer/rich
-          # set FORCE_TERMINAL=True at import time, injecting ANSI codes into
-          # CliRunner output. _TYPER_FORCE_DISABLE_TERMINAL overrides that so
-          # --help assertions can match plain flag text (e.g. "--use-llm").
-          _TYPER_FORCE_DISABLE_TERMINAL: "1"
-        run: uv run --project bin pytest -n auto
 
       # Coordination benchmark smoke: drives the real anvil CLI against
       # a live SQLite state engine. Uses the venv materialized by `uv sync`

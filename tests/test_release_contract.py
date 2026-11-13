@@ -183,7 +183,13 @@ def test_publish_oidc_job_is_minimal_and_all_actions_are_immutable() -> None:
     assert '--out "$RUNNER_TEMP/anvil-benchmark-results.md"' in text
     assert "mkdocs build --strict" in text
     assert "(cd bin && uv run --locked ruff check ..)" in text
-    assert "uv run --project bin --locked pytest -n auto" in text
+    assert build["needs"] == ["source", "python-tests"]
+    assert workflow["jobs"]["python-tests"]["uses"] == "./.github/workflows/python-tests.yml"
+    assert workflow["jobs"]["python-tests"]["permissions"] == {"contents": "read"}
+    assert workflow["jobs"]["python-tests"]["needs"] == "source"
+    assert workflow["jobs"]["python-tests"]["with"]["ref"] == "${{ needs.source.outputs.commit }}"
+    assert build["steps"][0]["with"]["ref"] == "${{ needs.source.outputs.commit }}"
+    assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"' in text
     assert f"--expected-api-version {API_VERSION}" in text
     assert (
         "printf '%s\\0' \"$wheel\" \"$sdist\" | sort -z | "
@@ -200,5 +206,6 @@ def test_ci_release_contract_jobs_fetch_tags() -> None:
         (repo / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     )
     for job_name in ("dependency-floor", "test"):
-        checkout = workflow["jobs"][job_name]["steps"][0]
+        checkout = next(step for step in workflow["jobs"][job_name]["steps"]
+                        if step.get("uses", "").startswith("actions/checkout@"))
         assert checkout["with"]["fetch-depth"] == 0
