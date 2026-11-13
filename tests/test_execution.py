@@ -1024,7 +1024,14 @@ def test_preview_inspection_malformed_receipts_are_read_only(execution_project, 
 
     monkeypatch.setattr("anvil.execution.reserve_slot", forbid_dispatch)
     monkeypatch.setattr("anvil.execution.native_cli", forbid_dispatch)
-    for value in ([], None, 1):
+    for value in (
+        [], None, 1,
+        {key: value for key, value in preview.items() if key != "task_id"},
+        {**preview, "task_id": None}, {**preview, "task_id": []},
+        {**preview, "operation": {}}, {**preview, "operation": []},
+        {**preview, "preview_id": "f" * 32},
+        {**preview, "version": True}, {**preview, "claim": {}},
+    ):
         preview_path.write_bytes(json_bytes(value))
         with pytest.raises(ExecutionError, match="preview object"):
             inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")
@@ -1050,6 +1057,103 @@ def test_preview_inspection_malformed_receipts_are_read_only(execution_project, 
         assert inspected["state"] == expected and inspected["run_id"] is None
         assert {str(p.relative_to(root)): p.read_bytes()
                 for p in root.rglob("*") if p.is_file()} == retained
+    assert (state / "events.jsonl").read_bytes() == events
+    assert not backend.list_active_claims()
+    assert not list(root.glob("runs/*/dispatch.json"))
+
+
+def test_preview_route_reader_validates_fields_and_preserves_legacy_actor(tmp_path):
+    from anvil.execution import json_bytes, read_execution_preview
+    from tests.test_sqlite import _make_claim_payload
+
+    preview_id = "a" * 32
+    path = tmp_path / "previews" / (preview_id + ".json")
+    path.parent.mkdir(mode=0o700)
+    preview = {"version": 1, "preview_id": preview_id, "task_id": "release:T001",
+               "project_id": "synthetic", "actor": "synthetic-owner",
+               "cwd": str(tmp_path.resolve()), "claim": None}
+    # Legacy Run previews omit operation. Reading must preserve the exact bytes.
+    path.write_bytes(json_bytes(preview))
+    assert read_execution_preview(tmp_path, preview_id) == preview
+    assert path.read_bytes() == json_bytes(preview)
+    invalid = [{key: value for key, value in preview.items() if key != missing}
+               for missing in preview]
+    for field, maximum in (("task_id", 255), ("project_id", 255), ("actor", 4096),
+                           ("cwd", 4096), ("preview_id", 32)):
+        invalid.extend({**preview, field: value}
+                       for value in (None, [], {}, 1, "", "x" * (maximum + 1)))
+    invalid.extend({**preview, "version": value} for value in (None, True, 2, "1"))
+    invalid.extend({**preview, "operation": value} for value in (None, [], {}, 1, "other"))
+    invalid.extend({**preview, "claim": value} for value in ([], {}, 1, "claim"))
+    invalid.extend(({**preview, "preview_id": "b" * 32}, {**preview, "cwd": "relative"},
+                    {**preview, "continuation": {}}))
+    continuation = {
+        "prior_run_id": "b" * 32, "prior_adapter_run_id": "c" * 32,
+        "conversation_id": "d" * 32, "official_session_id": "synthetic-session",
+        **dict.fromkeys(("prior_request_file_sha256", "prior_result_file_sha256",
+                         "prior_adapter_result_file_sha256", "prior_adapter_receipt_sha256",
+                         "checkpoint_sha256", "session_sha256"), "e" * 64),
+    }
+    continued = {**preview, "operation": "continue", "continuation": continuation}
+    path.write_bytes(json_bytes(continued))
+    assert read_execution_preview(tmp_path, preview_id) == continued
+    invalid.extend({**continued, "continuation": value} for value in (None, [], {}, 1))
+    for key in ("prior_run_id", "prior_adapter_run_id", "conversation_id"):
+        invalid.append({**continued, "continuation": {**continuation, key: []}})
+    # Existing claims retain their exact historical actor spelling, even when
+    # it exceeds the current new-actor limit, and use resolved checkout identity.
+    historical_actor = "legacy-" + "x" * 130
+    claim = {**_make_claim_payload(task_id=preview["task_id"], actor=historical_actor),
+             "worktree_path": str(tmp_path / "unused" / "..")}
+    claimed = {**preview, "actor": historical_actor, "claim": claim}
+    path.write_bytes(json_bytes(claimed))
+    assert read_execution_preview(tmp_path, preview_id) == claimed
+    for field, value in (("task_id", "release:T002"), ("claimed_by", "foreign"),
+                         ("worktree_path", str(tmp_path / "foreign"))):
+        invalid.append({**claimed, "claim": {**claim, field: value}})
+    for value in invalid:
+        path.write_bytes(json_bytes(value))
+        with pytest.raises(ExecutionError) as failure:
+            read_execution_preview(tmp_path, preview_id)
+        assert failure.value.code == "preview_mismatch"
+        assert path.read_bytes() == json_bytes(value)
+
+
+def test_preview_validity_dates_refuse_confirmation_but_allow_inspection(execution_project, monkeypatch):
+    from anvil.execution import confirm_continue, inspect_execution_preview, json_bytes
+
+    backend, repo, state, _ = execution_project
+    preview = _preview(execution_project)
+    root = journal_root(repo)
+    path = root / "previews" / (preview["preview_id"] + ".json")
+    events = (state / "events.jsonl").read_bytes()
+
+    def forbid_dispatch(*args, **kwargs):
+        pytest.fail("Malformed preview must not reserve or dispatch work")
+
+    monkeypatch.setattr("anvil.execution.reserve_slot", forbid_dispatch)
+    monkeypatch.setattr("anvil.execution.native_cli", forbid_dispatch)
+    for field in ("created_at", "expires_at"):
+        invalid = [{key: value for key, value in preview.items() if key != field}]
+        invalid.extend({**preview, field: value}
+                       for value in (None, [], {}, 1, "invalid", "2026-01-01T00:00:00"))
+        for value in invalid:
+            path.write_bytes(json_bytes(value))
+            assert inspect_execution_preview(repo, preview["preview_id"], "synthetic-owner")["state"] == "unconsumed"
+            with pytest.raises(ExecutionError) as failure:
+                confirm_run(repo, preview["task_id"], "synthetic-owner", preview["preview_id"])
+            assert failure.value.code == "preview_mismatch"
+            assert path.read_bytes() == json_bytes(value)
+    for value in ({**preview, "preview_id": "f" * 32}, {**preview, "claim": {}},
+                  {**preview, "version": True}):
+        path.write_bytes(json_bytes(value))
+        for confirm in (
+            lambda: confirm_run(repo, preview["task_id"], "synthetic-owner", preview["preview_id"]),
+            lambda: confirm_continue(repo, "b" * 32, "synthetic-owner", preview["preview_id"]),
+        ):
+            with pytest.raises(ExecutionError) as failure:
+                confirm()
+            assert failure.value.code == "preview_mismatch"
     assert (state / "events.jsonl").read_bytes() == events
     assert not backend.list_active_claims()
     assert not list(root.glob("runs/*/dispatch.json"))

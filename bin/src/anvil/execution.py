@@ -1193,12 +1193,53 @@ def revalidate_admission(backend: Any, context: dict[str, Any], state: Path) -> 
     revalidate_continuation(backend, context)
 
 
+def read_execution_preview(root: Path, preview_id: str) -> dict[str, Any]:
+    """Validate retained routing fields without granting freshness or admission."""
+    try:
+        identifier(bounded_text(preview_id, 32))
+        preview = read_receipt(root / "previews" / (preview_id + ".json"))
+        if (type(preview) is not dict or type(preview["version"]) is not int
+                or preview["version"] != 1):
+            raise ValueError("Invalid preview version")
+        if identifier(bounded_text(preview["preview_id"], 32)) != preview_id:
+            raise ValueError("Preview identity differs")
+        for name, maximum in (
+            ("task_id", 255), ("project_id", 255), ("actor", 4096), ("cwd", 4096)
+        ):
+            bounded_text(preview[name], maximum)
+        if not Path(preview["cwd"]).is_absolute():
+            raise ValueError("Preview checkout is not absolute")
+        retained_claim = preview["claim"]
+        if retained_claim is not None:
+            claim = Claim.model_validate(retained_claim)
+            if (claim.task_id != preview["task_id"] or claim.claimed_by != preview["actor"]
+                    or str(Path(bounded_text(claim.worktree_path, 4096)).resolve())
+                    != preview["cwd"]):
+                raise ValueError("Claim differs from the retained route")
+        operation = bounded_text(preview.get("operation", "run"), 8)
+        if operation not in {"run", "continue"}:
+            raise ValueError("Unsupported preview route")
+        continuation = preview.get("continuation")
+        if operation == "continue":
+            validate_continuation(continuation)
+        elif continuation is not None:
+            raise ValueError("Run acquired continuation authority")
+    except (KeyError, TypeError, ValueError):
+        raise ExecutionError(
+            "preview_mismatch", "Invalid preview object or routing fields"
+        ) from None
+    return preview
+
+
 def require_fresh_preview(preview: dict[str, Any]) -> None:
-    if not (
-        datetime.fromisoformat(preview["created_at"])
-        <= now()
-        < datetime.fromisoformat(preview["expires_at"])
-    ):
+    try:
+        created = datetime.fromisoformat(bounded_text(preview["created_at"], 64))
+        expires = datetime.fromisoformat(bounded_text(preview["expires_at"], 64))
+        if created.tzinfo is None or expires.tzinfo is None:
+            raise ValueError("Preview times require time zones")
+    except (KeyError, TypeError, ValueError):
+        raise ExecutionError("preview_mismatch", "Invalid preview validity window") from None
+    if not created <= now() < expires:
         raise ExecutionError("preview_expired", "Preview expired or the clock moved backwards")
 
 
@@ -1334,7 +1375,7 @@ def confirm_continue(
     cwd: Path, prior_run_id: str, actor: str, preview_id: str
 ) -> dict[str, Any]:
     identifier(prior_run_id)
-    preview = read_receipt(journal_root(cwd) / "previews" / (identifier(preview_id) + ".json"))
+    preview = read_execution_preview(journal_root(cwd), preview_id)
     continuation = preview.get("continuation")
     if not isinstance(continuation, dict) or continuation.get("prior_run_id") != prior_run_id:
         raise ExecutionError("preview_mismatch", "Preview belongs to another prior Run")
@@ -1351,7 +1392,7 @@ def _confirm_execution(
     require_linux_capture()
     require_isolated_state_layout()
     root = journal_root(cwd)
-    preview = read_receipt(root / "previews" / (identifier(preview_id) + ".json"))
+    preview = read_execution_preview(root, preview_id)
     if preview["claim"] is None:
         actor = canonicalize_new_actor(actor)
     if (
@@ -1562,9 +1603,7 @@ def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[st
     from anvil.cli._helpers import _open_backend
 
     root = journal_root(cwd)
-    preview = read_receipt(root / "previews" / (identifier(preview_id) + ".json"))
-    if type(preview) is not dict:
-        raise ExecutionError("preview_mismatch", "Invalid preview object")
+    preview = read_execution_preview(root, preview_id)
     if preview.get("claim") is None:
         actor = canonicalize_new_actor(actor)
     if preview.get("actor") != actor or preview.get("cwd") != str(cwd.resolve()):
@@ -1576,13 +1615,7 @@ def inspect_execution_preview(cwd: Path, preview_id: str, actor: str) -> dict[st
     finally:
         backend.close()
     operation = preview.get("operation", "run")
-    if operation not in {"run", "continue"}:
-        raise ExecutionError("preview_mismatch", "Unsupported preview route")
     prior = preview.get("continuation")
-    if operation == "continue":
-        validate_continuation(prior)
-    elif prior is not None:
-        raise ExecutionError("preview_mismatch", "Run preview acquired continuation authority")
     result = {"preview_id": preview_id, "state": "unconsumed", "run_id": None,
               "operation": operation, "task_id": preview["task_id"],
               "prior_run_id": prior["prior_run_id"] if prior else None}
