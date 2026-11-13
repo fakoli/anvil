@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from benchmarks import execution_scale
 
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX qualification harness")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper qualification harness")
 
 
 @pytest.mark.parametrize("mode", ["coordinator", "worker"])
@@ -411,3 +411,186 @@ def test_normal_leader_exit_also_cleans_owned_descendants(tmp_path, mode):
     )
     assert receipt["child_exit_code"] == 0 and receipt["child_stopped"]
     _assert_descendant_stopped(output)
+
+
+@pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "nonzero", "timeout", "overflow", "inherited_pipe"])
+def test_each_command_reaps_descendants_before_return(tmp_path, detached, outcome):
+    command_script = _descendant_command(detached, outcome)
+    descendant_pid = None
+    try:
+        result = execution_scale._command(
+            tmp_path, "T001", time.perf_counter(), 1, [sys.executable, "-c", command_script])
+        descendant_pid = int((tmp_path / "descendant.pid").read_text())
+        assert result["output"].startswith(b"retained-prefix\n")
+        assert len(result["output"]) <= execution_scale.MAX_COMMAND_OUTPUT_BYTES
+        assert not Path(f"/proc/{descendant_pid}").exists(), (
+            f"command returned with owned descendant {descendant_pid} still present")
+        assert result["error"] is None if outcome in ("success", "nonzero") else result["error"]
+        assert result["command_pid"] != result["command_supervisor_pid"]
+        assert result["command_reaped"] and result["command_supervisor_reaped"]
+        assert result["command_containment_complete"]
+        if outcome in ("success", "nonzero"):
+            assert result["exit_code"] == (0 if outcome == "success" else 7)
+    finally:
+        _stop_test_descendant(tmp_path)
+
+
+def _descendant_command(detached, outcome):
+    child_script = (
+        "import os,signal,time\nfrom pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        + ("os.setsid()\n" if detached else "")
+        + "Path('descendant.pid').write_text(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    command_script = (
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        f"subprocess.Popen([sys.executable,'-c',{child_script!r}], "
+        + ("" if outcome == "inherited_pipe" else
+           "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, ")
+        + ")\nwhile not Path('descendant.pid').exists(): time.sleep(.005)\n"
+        "print('retained-prefix', flush=True)\n"
+        + {"success": "", "nonzero": "sys.exit(7)\n", "timeout": "time.sleep(60)\n",
+           "overflow": "sys.stdout.write('x'*200000);sys.stdout.flush()\n",
+           "inherited_pipe": ""}[outcome]
+    )
+    return command_script
+
+
+def _stop_test_descendant(project):
+    if not (project / "descendant.pid").exists():
+        return
+    descendant_pid = int((project / "descendant.pid").read_text())
+    try:
+        os.kill(descendant_pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    stopped = False
+    for _ in range(100):
+        try:
+            stat = Path(f"/proc/{descendant_pid}/stat").read_text()
+            stopped = stat[stat.rfind(")") + 2:].split()[0] == "Z"
+        except FileNotFoundError:
+            stopped = True
+        if stopped:
+            break
+        time.sleep(.01)
+    print(json.dumps({"owned_descendant_pid": descendant_pid, "stopped": stopped}))
+    assert stopped, "test cleanup must stop its owned descendant"
+
+
+@pytest.mark.parametrize("mode", ["coordinator", "worker"])
+def test_pre_exec_failure_is_not_counted_as_command_capture(tmp_path, mode):
+    def unavailable_executor(project):
+        return lambda task_id: [str(project / "does-not-exist")]
+
+    result = execution_scale.run(tmp_path / "missing", tasks=1, workers=1,
+                                 prepare_executor=unavailable_executor, proof_preparation=mode)
+    assert result["attempted"] == result["failed_tasks"] == 1
+    assert result["command_captures"] == result["retained_proof_artifacts"] == 0
+    assert not result["validated"] and result["completed"] == 0
+    row = result["raw_timings"][0]
+    assert row["command_pid"] is None and not row["command_reaped"]
+    assert row["command_supervisor_reaped"] and not row["command_containment_complete"]
+
+
+@pytest.mark.parametrize("fault", ["closed", "write_failure"])
+def test_failed_status_notification_still_cleans_launched_children(tmp_path, monkeypatch, fault):
+    # Fail the trusted notification only AFTER the child has started its own
+    # detached descendant. Raising out of the observer would skip helper cleanup.
+    injected = r"""
+import time
+from pathlib import Path
+original_notify = ObservedCommand.notify
+def failed_notify(self, message):
+    if message.startswith(b"started:"):
+        deadline = time.monotonic() + 2
+        while not Path("descendant.pid").exists() and time.monotonic() < deadline:
+            time.sleep(.005)
+        FAULT
+    original_notify(self, message)
+ObservedCommand.notify = failed_notify
+"""
+    fault_code = ('os.close(int(os.environ["ANVIL_SUBREAPER_STATUS_FD"]))' if fault == "closed"
+                  else 'os.write = lambda *args: (_ for _ in ()).throw(OSError("injected"))')
+    monkeypatch.setattr(execution_scale, "_COMMAND_STATUS_PRELUDE",
+                        execution_scale._COMMAND_STATUS_PRELUDE + injected.replace("FAULT", fault_code))
+    try:
+        result = execution_scale._command(
+            tmp_path, "T001", time.perf_counter(), 3,
+            [sys.executable, "-c", _descendant_command(True, "timeout")])
+        descendant_pid = int((tmp_path / "descendant.pid").read_text())
+        assert result["error"] and result["command_pid"] is None
+        assert result["command_supervisor_reaped"] and not result["command_reaped"]
+        assert not Path(f"/proc/{descendant_pid}").exists()
+    finally:
+        _stop_test_descendant(tmp_path)
+
+
+@pytest.mark.parametrize("status", [b"1", b"exited:0\n1", b"started:0\n", b"started:1\n1",
+                                    b"started:1\nexited:999\n1", b"x" * 129,
+                                    b"started:1\nexited:0\n1extra"])
+def test_invalid_containment_status_fails_closed(status):
+    with pytest.raises(ValueError):
+        execution_scale._command_status(status)
+
+
+def test_command_signal_exit_keeps_native_negative_status(tmp_path):
+    result = execution_scale._command(
+        tmp_path, "T001", time.perf_counter(), 3,
+        [sys.executable, "-c", "import os,signal;os.kill(os.getpid(),signal.SIGTERM)"])
+    assert result["exit_code"] == -signal.SIGTERM
+    assert result["command_supervisor_exit_code"] == 128 + signal.SIGTERM
+    assert result["command_reaped"] and result["command_containment_complete"]
+
+
+def test_unsupported_platform_refuses_before_state_or_child_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(execution_scale.sys, "platform", "darwin")
+    with pytest.raises(ValueError, match="Linux"):
+        execution_scale.run(tmp_path / "absent", tasks=1, workers=1)
+    assert not (tmp_path / "absent").exists()
+    receipt = execution_scale._supervise(tmp_path / "unsupported.json", {}, 10)
+    assert not receipt["child_started"] and not receipt["validated"]
+    assert receipt["error"]["code"] == "unsupported_environment"
+
+
+def _contained_command_child(output, options):
+    os.setsid()
+    project = output.parent / "owned-command"
+    project.mkdir()
+    execution_scale._command(project, "T001", time.perf_counter(), 30,
+                             [sys.executable, "-c", _descendant_command(True, "timeout")])
+
+
+def test_outer_deadline_preserves_subreaper_detached_cleanup(tmp_path):
+    _require_process_group_control()
+    output = tmp_path / "outer.json"
+    try:
+        result = execution_scale._supervise(output, {}, 3, child_target=_contained_command_child)
+        assert result["timed_out"] and result["child_stopped"]
+        pid = int((tmp_path / "owned-command/descendant.pid").read_text())
+        assert not Path(f"/proc/{pid}").exists()
+    finally:
+        _stop_test_descendant(tmp_path / "owned-command")
+
+
+@pytest.mark.parametrize("mode", ["coordinator", "worker"])
+def test_interrupted_containment_cannot_prove_successful_command(tmp_path, monkeypatch, mode):
+    injected = r"""
+original_wait = ObservedCommand.wait
+def interrupted_wait(self, *args, **kwargs):
+    returncode = original_wait(self, *args, **kwargs)
+    os.kill(os.getpid(), signal.SIGTERM)
+    return returncode
+ObservedCommand.wait = interrupted_wait
+"""
+    monkeypatch.setattr(execution_scale, "_COMMAND_STATUS_PRELUDE",
+                        execution_scale._COMMAND_STATUS_PRELUDE + injected)
+    result = execution_scale.run(tmp_path / "interrupted", tasks=1, workers=1,
+                                 proof_preparation=mode)
+    assert not result["validated"] and result["completed"] == 0
+    assert result["command_captures"] == result["failed_tasks"] == 1
+    assert result["retained_proof_artifacts"] == 0
+    row = result["raw_timings"][0]
+    assert row["exit_code"] == 0 and row["command_reaped"]
+    assert row["command_supervisor_exit_code"] == 143

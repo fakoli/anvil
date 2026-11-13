@@ -13,6 +13,7 @@ import json
 import math
 import multiprocessing
 import os
+import re
 import selectors
 import shlex
 import signal
@@ -28,6 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from benchmarks.harness.engine import (  # noqa: E402
+    _LINUX_SUBREAPER,
+    PROCESS_CLEANUP_ALLOWANCE_SECONDS,
+)
 from tests.conftest import append_exact_approved_prd  # noqa: E402
 
 from anvil.bundles.execution import bundle_execution_scope_digest  # noqa: E402
@@ -243,57 +248,167 @@ def _seed(project, backend, task_count, cohort_size, command_for_task=_native_co
     return task_ids, bundle_ids
 
 
+# Observe the existing helper's sole Popen without another process or rewriting
+# its cleanup code. The command cannot inherit this close-on-exec status pipe.
+# A notification failure must NOT escape Popen/wait and bypass helper cleanup.
+_COMMAND_STATUS_PRELUDE = r"""
+import os
+import subprocess
+
+class ObservedCommand(subprocess.Popen):
+    def notify(self, message):
+        try:
+            os.write(int(os.environ["ANVIL_SUBREAPER_STATUS_FD"]), message)
+        except OSError:
+            pass
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.exit_notified = False
+        self.notify(f"started:{self.pid}\n".encode("ascii"))
+
+    def wait(self, *args, **kwargs):
+        returncode = super().wait(*args, **kwargs)
+        if not self.exit_notified:
+            self.notify(f"exited:{returncode}\n".encode("ascii"))
+            self.exit_notified = True
+        return returncode
+
+subprocess.Popen = ObservedCommand
+"""
+MAX_COMMAND_STATUS_BYTES = 128
+
+
+def _command_status(status):
+    match = re.fullmatch(
+        rb"(?:started:([1-9][0-9]{0,19})\n)?(?:exited:(-?[0-9]{1,10})\n)?(1)?", status
+    )
+    if len(status) > MAX_COMMAND_STATUS_BYTES or match is None:
+        raise ValueError("Invalid fixture command containment status")
+    command_pid, exit_code, completed = match.groups()
+    if (exit_code is not None and command_pid is None
+            or completed is not None and exit_code is None):
+        raise ValueError("Incomplete fixture command containment status")
+    if exit_code is not None and not -64 <= int(exit_code) <= 255:
+        raise ValueError("Invalid fixture command exit status")
+    return (int(command_pid) if command_pid else None,
+            int(exit_code) if exit_code else None, completed is not None)
+
+
+def _require_linux_containment():
+    if sys.platform != "linux" or not Path("/proc/self/stat").is_file():
+        raise ValueError("Fixture command containment requires Linux subreaper and /proc support")
+
+
 def _command(project, task_id, offered_at, command_timeout, command_argv):
+    _require_linux_containment()
     started = datetime.now(UTC)
     began = time.perf_counter()
     environment = {"PATH": os.environ.get("PATH", os.defpath), "PYTHONIOENCODING": "utf-8"}
-    # Native executor CLIs locate their existing configuration through these
-    # paths. Preserve their values without copying credential/environment files.
+    # Preserve native executor configuration paths, never credential files.
     environment.update(
         {key: os.environ[key] for key in ("HOME", "XDG_CONFIG_HOME") if key in os.environ}
     )
     output = bytearray()
+    status = bytearray()
     error = None
-    # Commands stay in the supervisor's owned group, including descendants.
-    # Never start a new session here: the outer deadline must still reach them.
-    with subprocess.Popen(
-        command_argv, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env=environment,
-    ) as process:
-        try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                while selector.get_map():
-                    remaining = command_timeout - (time.perf_counter() - began)
-                    if remaining <= 0:
-                        raise TimeoutError("Fixture command exceeded timeout")
-                    for key, _ in selector.select(min(remaining, 0.1)):
-                        chunk = os.read(
-                            key.fd, min(65536, MAX_COMMAND_OUTPUT_BYTES + 1 - len(output))
-                        )
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        output.extend(chunk)
-                        if len(output) > MAX_COMMAND_OUTPUT_BYTES:
-                            del output[MAX_COMMAND_OUTPUT_BYTES:]
-                            raise ValueError(
-                                "Fixture command exceeded output limit; retained prefix"
-                            )
-                process.wait(timeout=max(0.001, command_timeout - (time.perf_counter() - began)))
-        except Exception as caught:
-            error = repr(caught)
-        finally:
+    forced_stop = False
+    status_reader, status_writer = os.pipe()
+    os.set_blocking(status_reader, False)
+    environment["ANVIL_SUBREAPER_STATUS_FD"] = str(status_writer)
+    process = None
+    cleanup_requested = False
+    try:
+        # One extra supervisor per command, in the outer owned group/session.
+        # Its subreaper also owns descendants that detach into another session.
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", _COMMAND_STATUS_PRELUDE + _LINUX_SUBREAPER,
+             *command_argv], cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=environment, pass_fds=(status_writer,),
+        )
+        os.close(status_writer)
+        status_writer = None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "output")
+            selector.register(status_reader, selectors.EVENT_READ, "status")
+            output_closed = False
+            deadline = began + command_timeout
+            while selector.get_map():
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise TimeoutError("Fixture command exceeded timeout or cleanup allowance")
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    target = output if key.data == "output" else status
+                    limit = (MAX_COMMAND_OUTPUT_BYTES if key.data == "output"
+                             else MAX_COMMAND_STATUS_BYTES)
+                    chunk = os.read(key.fd, min(65536, limit + 1 - len(target)))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        if key.data == "output":
+                            output_closed = True
+                        elif not _command_status(status)[2]:
+                            raise ValueError("Missing fixture command completion handshake")
+                        continue
+                    target.extend(chunk)
+                    if len(target) > limit:
+                        del target[limit:]
+                        raise ValueError(
+                            f"Fixture command exceeded {key.data} limit; retained prefix")
+                if output_closed and status.endswith(b"\n1") and not cleanup_requested:
+                    _command_status(status)  # Strictly validate before requesting cleanup.
+                    process.send_signal(signal.SIGUSR1)
+                    cleanup_requested = True
+                    deadline = time.perf_counter() + PROCESS_CLEANUP_ALLOWANCE_SECONDS
+            process.wait(timeout=max(.001, deadline - time.perf_counter()))
+    except Exception as caught:
+        error = repr(caught)
+    finally:
+        if status_writer is not None:
+            os.close(status_writer)
+        if process is not None:
             if process.poll() is None:
-                process.kill()
-            process.wait(timeout=5)
+                # The helper handles TERM by killing/reaping all owned descendants.
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+                try:
+                    process.wait(timeout=PROCESS_CLEANUP_ALLOWANCE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    forced_stop = True
+                    process.kill()
+                    process.wait(timeout=5)
+            # Capture any final ownership notifications after the supervisor join.
+            while len(status) <= MAX_COMMAND_STATUS_BYTES:
+                try:
+                    chunk = os.read(status_reader, MAX_COMMAND_STATUS_BYTES + 1 - len(status))
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                status.extend(chunk)
+            process.stdout.close()
+        os.close(status_reader)
+    command_pid = exit_code = None
+    completed = False
+    try:
+        command_pid, exit_code, completed = _command_status(status)
+    except ValueError as caught:
+        error = error or repr(caught)
+    supervisor_exit = process.returncode if process is not None else None
+    normalized_exit = exit_code if exit_code is None or exit_code >= 0 else 128 - exit_code
+    containment_complete = (not forced_stop and command_pid is not None
+                            and supervisor_exit != 126
+                            and (supervisor_exit == 143 or
+                                 completed and supervisor_exit == normalized_exit))
+    if not (completed and cleanup_requested and containment_complete
+            and supervisor_exit == normalized_exit):
+        error = error or "Fixture command containment did not complete"
     ended_monotonic = time.perf_counter()
     ended = datetime.now(UTC)
     return {
         "task_id": task_id,
         "started_at": started.isoformat().replace("+00:00", "Z"),
         "ended_at": ended.isoformat().replace("+00:00", "Z"),
-        "exit_code": process.returncode,
+        "exit_code": exit_code,
         "output": bytes(output),
         "command_argv": command_argv,
         "queue_seconds": began - offered_at,
@@ -301,8 +416,13 @@ def _command(project, task_id, offered_at, command_timeout, command_argv):
         "offered_monotonic": offered_at,
         "started_monotonic": began,
         "ended_monotonic": ended_monotonic,
-        "command_pid": process.pid,
-        "command_reaped": process.returncode is not None,
+        "capture_protocol": "linux-subreaper-status.v1",
+        "command_pid": command_pid,
+        "command_reaped": completed or containment_complete,
+        "command_supervisor_pid": process.pid if process is not None else None,
+        "command_supervisor_exit_code": supervisor_exit,
+        "command_supervisor_reaped": supervisor_exit is not None,
+        "command_containment_complete": containment_complete,
         "error": error,
     }
 
@@ -431,6 +551,7 @@ def _source_identity():
     files = [
         *sorted((checkout / "bin/src/anvil").rglob("*.py")),
         checkout / "tests/conftest.py",
+        checkout / "benchmarks/harness/engine.py",
         Path(__file__).resolve(),
     ]
     return {
@@ -530,6 +651,7 @@ def run(
     _check_options(tasks=tasks, workers=workers, cohort_size=cohort_size,
                    command_timeout=command_timeout, durability=durability,
                    events_storage=events_storage, proof_preparation=proof_preparation)
+    _require_linux_containment()
     work.mkdir(parents=True, exist_ok=False)
     source_identity = _source_identity()
     project = work / "project"
@@ -702,7 +824,10 @@ def run(
                         row.update({key: value for key, value in execution.items()
                                     if key.endswith("_monotonic") or key in (
                                         "started_at", "ended_at", "exit_code", "proof_sha256",
-                                        "command_pid", "command_reaped")})
+                                        "command_pid", "command_reaped", "capture_protocol",
+                                        "command_supervisor_pid", "command_supervisor_exit_code",
+                                        "command_supervisor_reaped",
+                                        "command_containment_complete")})
                         # Futures may remain until pool exit; retain artifacts, not duplicate bytes.
                         execution.pop("output", None)
                         execution.pop("proof", None)
@@ -785,6 +910,12 @@ def run(
         "proof_preparation": proof_preparation,
         "raw_timings": raw_timings,
         "source_sha256": source_identity,
+        "command_containment": {
+            "protocol": "linux-subreaper-status.v1",
+            "supervisors_per_command": 1,
+            "prelude_sha256": hashlib.sha256(_COMMAND_STATUS_PRELUDE.encode()).hexdigest(),
+            "cleanup_allowance_seconds": PROCESS_CLEANUP_ALLOWANCE_SECONDS,
+        },
         "source_unchanged": source_unchanged,
         "tasks": tasks,
         "cohort_size": cohort_size,
@@ -797,7 +928,7 @@ def run(
         "completed": len(completed),
         "attempted": len(raw_timings),
         "failed_tasks": sum(row["outcome"] == "failed" for row in raw_timings),
-        "command_captures": sum("command_pid" in row for row in raw_timings),
+        "command_captures": sum(row.get("command_pid") is not None for row in raw_timings),
         "retained_proof_artifacts": len(list(captures.glob("*.proof.json"))),
         "failures": failures,
         "event_counts": dict(counts),
@@ -823,8 +954,9 @@ def run(
             "still verifies current custody and proof material.",
             "Capture bytes are reserved under a lock; native State growth is checked every "
             "16 handled tasks and after close. Any exceeded storage budget fails the run.",
-            "Command latency includes process startup and a 20ms fixture wait; "
-            "queue delay is separate.",
+            "Linux-only command containment adds one supervisor per command. Command latency "
+            "includes supervisor startup, command execution, a 20ms fixture wait and cleanup; "
+            "queue delay is separate. Cleanup allowance is a best-effort bound, not a hard OS cap.",
             "Proofs are actual fixture-command captures, claim-owner self-attested, "
             "not external issuer attestations.",
             "No application correctness, browser, network-fleet, container "
@@ -854,9 +986,17 @@ def _stop_owned_process_group(process):
     try:
         for signum in previous_handlers:
             signal.signal(signum, signal.SIG_IGN)
+        cleanup_deadline = time.monotonic() + PROCESS_CLEANUP_ALLOWANCE_SECONDS
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
         process.join(5)
+        # A leader can exit before its subreapers finish adopted/detached cleanup.
+        while time.monotonic() < cleanup_deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(.01)
         # The leader may exit on TERM while its children ignore it. Always
         # finish the owned group, even after the leader has been reaped.
         with contextlib.suppress(ProcessLookupError):
@@ -873,15 +1013,17 @@ def _stop_owned_process_group(process):
 
 def _supervise(output, options, deadline, *, child_target=_child):
     try:
+        _require_linux_containment()
         # A signal-zero probe changes no process. Refuse before spawning if
         # the environment denies the group control required for bounded cleanup.
         os.killpg(os.getpgrp(), 0)
-    except (AttributeError, OSError) as error:
+    except (AttributeError, OSError, ValueError) as error:
         receipt = {
             "validated": False,
             "error": {
                 "code": "unsupported_environment",
-                "message": "POSIX process-group signaling is required for bounded cleanup.",
+                "message": "Linux subreaper, /proc and process-group signaling are required "
+                           "for cleanup.",
                 "detail": repr(error),
             },
             "child_started": False,
@@ -944,8 +1086,10 @@ def main():
     parser.add_argument("--deadline", type=int, default=900)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if os.name != "posix":
-        parser.error("this bounded subprocess harness requires POSIX process-group cleanup")
+    try:
+        _require_linux_containment()
+    except ValueError as error:
+        parser.error(str(error))
     if not 10 <= args.deadline <= 3600:
         parser.error("deadline must be 10..3600 seconds")
     output = args.output.resolve()
