@@ -24,4 +24,4 @@ fi
 })
 
 cd "$ORIGINAL_PWD" || exit 1
-exec uv run --quiet --project "$BIN_DIR" python -m anvil.cli "$@"
+exec uv run --quiet --project "$BIN_DIR" python -P -m anvil.cli "$@"

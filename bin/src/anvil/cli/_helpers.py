@@ -627,21 +627,173 @@ def _home_dir() -> Path:
     return path_home
 
 
+# Owner marker for a legacy BARE-NAME workspace (``~/.anvil/workspaces/<basename>``,
+# created only by the original #42 code). Hashed-key workspaces bind the
+# project path in their directory name; a bare-name one is keyed on the
+# basename alone, so it is honoured only when this marker names the caller's
+# canonical root. The marker is written by ``anvil migrate-workspace
+# --adopt-legacy --yes`` — an explicit operator decision, never on first use.
+WORKSPACE_OWNER_MARKER = "workspace-owner.json"
+_WORKSPACE_OWNER_VERSION = 1
+_MAX_WORKSPACE_OWNER_BYTES = 4_096
+
+# hashed ``.anvil`` state dir -> the unclaimed bare-name workspace that
+# resolution deliberately did NOT honour for it. Lets the "not initialized"
+# messages point a pre-#42 user at the adoption command.
+_UNCLAIMED_LEGACY_WORKSPACES: dict[Path, Path] = {}
+
+
+def read_workspace_owner(anvil_dir: Path) -> tuple[str, str | None]:
+    """Read a workspace owner marker without following links.
+
+    Returns ``("missing", None)`` when there is no marker, ``("valid", root)``
+    for a well-formed one, and ``("invalid", None)`` for anything else (a
+    link, a non-regular or oversized file, unreadable or malformed content).
+    Only ``"valid"`` can ever authorize a workspace.
+    """
+    marker = anvil_dir / WORKSPACE_OWNER_MARKER
+    try:
+        entry = marker.lstat()
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "invalid", None
+    if (
+        not stat.S_ISREG(entry.st_mode)
+        or getattr(entry, "st_file_attributes", 0) & 0x400  # reparse point
+        or entry.st_size > _MAX_WORKSPACE_OWNER_BYTES
+    ):
+        return "invalid", None
+    flags = os.O_RDONLY
+    for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC", "O_BINARY"):
+        flags |= getattr(os, name, 0)
+    try:
+        descriptor = os.open(marker, flags)
+    except OSError:
+        return "invalid", None
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(opened, entry):
+            return "invalid", None
+        raw = os.read(descriptor, _MAX_WORKSPACE_OWNER_BYTES + 1)
+    except OSError:
+        return "invalid", None
+    finally:
+        os.close(descriptor)
+    if len(raw) > _MAX_WORKSPACE_OWNER_BYTES:
+        return "invalid", None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError):
+        return "invalid", None
+    if (
+        not isinstance(data, dict)
+        or type(data.get("version")) is not int
+        or data["version"] != _WORKSPACE_OWNER_VERSION
+        or not isinstance(data.get("canonical_root"), str)
+        or not data["canonical_root"].strip()
+    ):
+        return "invalid", None
+    return "valid", data["canonical_root"]
+
+
+def workspace_owner_matches(owner: str, root: Path) -> bool:
+    """True when a marker's ``canonical_root`` names ``root`` (resolved, normcased)."""
+    try:
+        return os.path.normcase(os.path.realpath(owner)) == os.path.normcase(
+            os.path.realpath(root)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def write_workspace_owner(anvil_dir: Path, root: Path) -> None:
+    """Atomically bind a bare-name workspace to ``root`` (temp file + replace)."""
+    payload = (
+        json.dumps(
+            {"version": _WORKSPACE_OWNER_VERSION, "canonical_root": str(root)},
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    marker = anvil_dir / WORKSPACE_OWNER_MARKER
+    temporary = anvil_dir / f".{WORKSPACE_OWNER_MARKER}.{os.getpid()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
+        flags |= getattr(os, name, 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        try:
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError("incomplete workspace owner marker write")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, marker)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _legacy_workspace_base(root: Path) -> Path:
+    """The pre-hash bare-name workspace location for a canonical root."""
+    return _home_dir() / ".anvil" / "workspaces" / (root.name or "project")
+
+
+def unclaimed_legacy_workspace(loc: Path) -> Path | None:
+    """The bare-name workspace for ``loc``'s basename when it holds a state.db
+    and carries NO owner marker — i.e. one an operator could adopt with
+    ``anvil migrate-workspace --adopt-legacy``. ``None`` otherwise (including
+    when it is already bound, to this project or any other)."""
+    legacy = _legacy_workspace_base(_canonical_project_root(loc))
+    anvil_dir = legacy / _STATE_DIR_NAME
+    if not (anvil_dir / "state.db").exists():
+        return None
+    return legacy if read_workspace_owner(anvil_dir)[0] == "missing" else None
+
+
+def legacy_workspace_hint(state_dir: Path) -> str:
+    """One trailing sentence for "not initialized" messages, or ``""``.
+
+    Non-empty only when resolving ``state_dir`` skipped an unclaimed bare-name
+    workspace, so a pre-#42 user is told how to get their history back instead
+    of silently seeing an empty project.
+    """
+    legacy = _UNCLAIMED_LEGACY_WORKSPACES.get(state_dir)
+    if legacy is None:
+        return ""
+    return (
+        f" A legacy workspace exists at {legacy.as_posix()}; run "
+        "`anvil migrate-workspace --adopt-legacy` if it belongs to this project."
+    )
+
+
 def _home_workspace_base(loc: Path) -> Path:
     """The HOME-dir base (the dir that CONTAINS ``.anvil/``) for a project's shared
     workspace under ``~/.anvil/workspaces/``, keyed by the canonical repo.
 
-    DUAL-KEY (B44), fully backward-compatible: a pre-existing **bare-name**
-    workspace (``<repo-name>/``, created by the original #42 code) keeps resolving
-    so its db is never orphaned. New projects get the collision-proof hashed key
-    (:func:`_workspace_key`). Only one extra ``exists()`` check, on the default
-    no-explicit-cwd path."""
+    Projects resolve to the collision-proof hashed key (:func:`_workspace_key`).
+    A pre-existing **bare-name** workspace (``<repo-name>/``, created by the
+    original #42 code) is honoured ONLY when its owner marker names this
+    canonical root (B44-1). A bare-name directory is keyed on the basename
+    alone, so without that binding any same-named checkout would resolve to
+    another project's state. An unmarked one is never adopted implicitly:
+    ``anvil migrate-workspace --adopt-legacy`` binds it on operator request."""
     root = _canonical_project_root(loc)
     workspaces = _home_dir() / ".anvil" / "workspaces"
-    legacy = workspaces / (root.name or "project")
-    if (legacy / ".anvil" / "state.db").exists():
-        return legacy
-    return workspaces / _workspace_key(root)
+    hashed = workspaces / _workspace_key(root)
+    legacy = _legacy_workspace_base(root)
+    legacy_anvil = legacy / _STATE_DIR_NAME
+    if (legacy_anvil / "state.db").exists():
+        owner_state, owner = read_workspace_owner(legacy_anvil)
+        if owner_state == "valid" and owner is not None and workspace_owner_matches(owner, root):
+            return legacy
+        if owner_state == "missing":
+            _UNCLAIMED_LEGACY_WORKSPACES[hashed / _STATE_DIR_NAME] = legacy
+    return hashed
 
 
 def _is_local_layout() -> bool:
@@ -1633,12 +1785,12 @@ def _require_state_dir(
             fail(
                 command or "",
                 "anvil not initialized in this project. "
-                "Run `anvil init` first.",
+                "Run `anvil init` first." + legacy_workspace_hint(state_dir),
                 code="not_initialized",
             )
         typer.echo(
             "Error: anvil not initialized in this project. "
-            "Run `anvil init` first.",
+            "Run `anvil init` first." + legacy_workspace_hint(state_dir),
             err=True,
         )
         raise typer.Exit(code=1)

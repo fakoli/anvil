@@ -10,7 +10,9 @@ breaking existing callers (add keyword-only args with defaults only).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -719,6 +721,11 @@ class Config:
     s3_region: str | None = None  # falls back to AWS_REGION env; mirrors bedrock_region
     s3_profile: str | None = None # named AWS profile; mirrors bedrock_profile
 
+    # Keys the project config.yaml set but that were NOT honoured because that
+    # file is repository content (tracked by git) rather than the operator's
+    # own file. See ``_drop_repository_controlled_keys``. Diagnostic only.
+    repository_controlled_keys_ignored: tuple[str, ...] = ()
+
     # Lease / heartbeat durations in MINUTES. Stored as float so sub-minute
     # values (e.g. ``default_lease_minutes: 0.5`` → 30 s) round-trip without
     # being truncated to whole minutes. ClaimManager computes the lease via
@@ -896,6 +903,19 @@ class Config:
     # prior advisory behaviour without surprise.
     strict_evidence: bool = False
 
+    # Hook evidence capture. The PostToolUse ``capture-evidence`` hook records
+    # each matching verification command (command line, exit code, a hash of
+    # the full output, and secret-redacted 4000-char excerpts) into
+    # ``.evidence-buffer/``; ``anvil submit`` reconciles those lines into
+    # typed command proofs.
+    #
+    #   capture_evidence: true   # DEFAULT — the designed behaviour.
+    #   capture_evidence: false  # the hook records nothing. Tasks that
+    #                            # declare command ``required_proofs`` can
+    #                            # then only be satisfied by an imported
+    #                            # claim-bound command-proof artifact.
+    capture_evidence: bool = True
+
     # T020 — fast-lane (right-size process by score) thresholds.
     #
     # A task whose complexity AND blast_radius scores are both at/below these
@@ -956,6 +976,119 @@ class Config:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Repository-controlled project config
+# ---------------------------------------------------------------------------
+#
+# With in-repo state (``ANVIL_STATE_LAYOUT=local`` or ``ANVIL_ROOT``) the
+# project ``config.yaml`` can be a file somebody else committed. Such a file
+# must not be able to (a) grant itself permission to call a paid/remote API,
+# (b) choose the URL that receives the request, or (c) name the environment
+# variable whose value is sent as the credential. Those three decisions belong
+# to the operator: the global config, the environment, or a project config the
+# operator keeps untracked (the default ``.anvil/`` is gitignored) or in the
+# home workspace. A tracked file may still *restrict* (``llm_allow_api: false``).
+
+_OPERATOR_ONLY_KEYS: Final[tuple[str, ...]] = (
+    "llm_allow_api",
+    "custom_base_url",
+    "custom_api_key_env",
+)
+
+
+def _grants_operator_only_key(data: dict[str, object], key: str) -> bool:
+    value = data.get(key)
+    if key == "llm_allow_api":
+        return value is True
+    return isinstance(value, str) and value.strip() != ""
+
+
+def _tracked_by_git(path: Path) -> bool:
+    """True when *path* is a file tracked by an enclosing git work tree.
+
+    "Not a repository", "not tracked" and "git is not installed" all mean the
+    file did not arrive as repository content. Any other failure is treated as
+    tracked so an unexpected git error can never widen what is trusted.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                path.name,
+            ],
+            cwd=path.parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if result.returncode == 0:
+        return True
+    stderr = result.stderr.lower()
+    if result.returncode == 1 or "not a git repository" in stderr:
+        return False
+    return True
+
+
+def _is_repository_controlled(path: str | Path, resolved: Path) -> bool:
+    """True when the project config is content of a git repository."""
+    home_state = (_home_dir() / ".anvil").resolve()
+    if resolved.is_relative_to(home_state):
+        return False  # home workspace: the operator's own file, never a checkout
+    literal = Path(os.path.abspath(Path(path).expanduser()))
+    candidates = [resolved] if literal == resolved else [literal, resolved]
+    return any(_tracked_by_git(candidate) for candidate in candidates)
+
+
+def _drop_repository_controlled_keys(
+    data: dict[str, object], path: str | Path, resolved: Path
+) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Remove operator-only grants from a git-tracked project config.
+
+    Returns the (possibly reduced) mapping and the names that were dropped.
+    Git is consulted only when the file actually sets one of the keys, so the
+    common case costs nothing.
+    """
+    granted = tuple(
+        key for key in _OPERATOR_ONLY_KEYS if _grants_operator_only_key(data, key)
+    )
+    if not granted or not _is_repository_controlled(path, resolved):
+        return data, ()
+    return {k: v for k, v in data.items() if k not in granted}, granted
+
+
+def _with_ignored_keys(config: Config, ignored: tuple[str, ...]) -> Config:
+    if not ignored:
+        return config
+    return dataclasses.replace(config, repository_controlled_keys_ignored=ignored)
+
+
+def repository_controlled_keys_hint(config: Config | None) -> str:
+    """One-paragraph explanation for error messages, or ``""`` when not relevant."""
+    if config is None or not config.repository_controlled_keys_ignored:
+        return ""
+    names = ", ".join(config.repository_controlled_keys_ignored)
+    return (
+        f"\n\nNote: this project's config.yaml is tracked by git, so its {names} "
+        "setting(s) were ignored — a repository must not be able to authorize API "
+        "use, pick the endpoint, or name the credential variable on your behalf. "
+        f"Set them in {global_config_path()} (or CUSTOM_LLM_BASE_URL / "
+        "CUSTOM_LLM_API_KEY in the environment), or keep the project config "
+        "untracked."
+    )
+
+
 def load_config(path: str | Path) -> Config:
     """Parse config.yaml at *path* and return a Config instance.
 
@@ -981,8 +1114,9 @@ def load_config(path: str | Path) -> Config:
         )
 
     data = _normalize_config_aliases(_read_yaml_mapping(resolved))
+    data, ignored = _drop_repository_controlled_keys(data, path, resolved)
     _validate_required(data, resolved)
-    return _build_config(data, resolved)
+    return _with_ignored_keys(_build_config(data, resolved), ignored)
 
 
 # T016/B17 — global-config layer.
@@ -1122,6 +1256,9 @@ def load_merged_config(
         global_data = _normalize_config_aliases(_read_yaml_mapping(gpath))
 
     project_data = _normalize_config_aliases(_read_yaml_mapping(resolved))
+    project_data, ignored = _drop_repository_controlled_keys(
+        project_data, path, resolved
+    )
 
     # Shallow merge: project keys win over global keys. config.yaml is a flat
     # mapping of scalars plus the single nested ``sync`` block; a project that
@@ -1131,7 +1268,7 @@ def load_merged_config(
     merged: dict[str, object] = {**global_data, **project_data}
 
     _validate_required(merged, resolved)
-    return _build_config(merged, resolved)
+    return _with_ignored_keys(_build_config(merged, resolved), ignored)
 
 
 def _read_yaml_mapping(resolved: Path) -> dict[str, object]:
@@ -1251,6 +1388,18 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
             f"{type(llm_fallback_raw).__name__} ({resolved})."
         )
     llm_fallback = llm_fallback_raw
+
+    # ``capture_evidence`` — strict bool, like ``llm_fallback``: a quoted
+    # "false" must not silently leave capture on. Blank/absent → default True.
+    capture_evidence_raw = data.get("capture_evidence", True)
+    if capture_evidence_raw is None:
+        capture_evidence_raw = True
+    if not isinstance(capture_evidence_raw, bool):
+        raise ValueError(
+            f"capture_evidence must be a boolean, got "
+            f"{type(capture_evidence_raw).__name__} ({resolved})."
+        )
+    capture_evidence = capture_evidence_raw
 
     auto_expand_threshold = _validate_auto_expand_threshold(
         data.get("auto_expand_threshold", DEFAULT_AUTO_EXPAND_THRESHOLD),
@@ -1433,6 +1582,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         # key → False (advisory), preserving pre-T025 behaviour for every
         # config written before this knob existed.
         strict_evidence=bool(data.get("strict_evidence", False)),
+        capture_evidence=capture_evidence,
         # T020 — fast-lane ceilings. Absent keys fall back to the renderer's
         # built-in defaults (see _build_config above), preserving prior routing.
         fast_lane_complexity_max=fast_lane_complexity_max,
@@ -1919,6 +2069,22 @@ fast_lane_blast_radius_max: 2
 # (flag > config > default).
 # ---------------------------------------------------------------------------
 strict_evidence: false
+
+# ---------------------------------------------------------------------------
+# Hook evidence capture
+#
+# The PostToolUse `capture-evidence` hook buffers each matching verification
+# command (pytest, ruff check, mypy, npm test, cargo test, bun test) under
+# `.evidence-buffer/`: the command line, its exit code, a SHA-256 of the full
+# output, and 4000-character stdout/stderr excerpts. Common secret shapes
+# (NAME=value credentials, bearer tokens, provider keys, URL passwords,
+# private-key blocks) are redacted before anything is written.
+#
+#   capture_evidence: true   # DEFAULT
+#   capture_evidence: false  # record nothing; command `required_proofs` then
+#                            # need an imported claim-bound proof artifact.
+# ---------------------------------------------------------------------------
+capture_evidence: true
 
 # ---------------------------------------------------------------------------
 # GitHub sync (optional)

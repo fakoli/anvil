@@ -39,6 +39,11 @@ def _humanize(component: str) -> str:
     return component.replace("-", " ").replace("_", " ").replace("/", " ").strip()
 
 
+def _is_single_line_text(value: str) -> bool:
+    """True when *value* has no control characters (newline, CR, tab, DEL, ...)."""
+    return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
 def draft_prd_from_model(
     model: CodebaseModel,
     *,
@@ -52,7 +57,16 @@ def draft_prd_from_model(
     "establish project structure" task) so the downstream seed pipeline always
     has something to promote to ``ready``.
     """
-    components = model.components()
+    # Paths are written into single-line markdown fields that the PRD parser
+    # reads back. Git paths may contain newlines, so a file name could end its
+    # line and add PRD fields of its own (for example a verification command).
+    # Names with control characters are left out of the seed; the scan model
+    # itself still records them.
+    components = {
+        name: [f for f in files if _is_single_line_text(f.path)]
+        for name, files in model.components().items()
+        if _is_single_line_text(name)
+    }
     languages = model.language_counts()
 
     # Pick the components worth a feature: those with enough files, biggest

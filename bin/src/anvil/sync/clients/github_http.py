@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -353,6 +354,7 @@ class GithubHttpClient:
         if labels:
             params["labels"] = ",".join(labels)
         path: str | None = f"/repos/{self.repo}/issues"
+        page_params: dict[str, Any] | None = params
         # Track visited paths to break a malformed-Link-header infinite loop
         # (e.g. a buggy proxy that returns the same path as rel="next").
         # Hard cap of 1000 pages is far past any realistic repo size and
@@ -363,7 +365,7 @@ class GithubHttpClient:
             if path in visited:
                 break
             visited.add(path)
-            response = self._request("GET", path, params=params)
+            response = self._request("GET", path, params=page_params)
             page = response.json()
             if not isinstance(page, list):
                 raise SyncProviderError(
@@ -376,9 +378,17 @@ class GithubHttpClient:
             # Parse Link header for next-page URL.
             link = response.headers.get("link") or response.headers.get("Link")
             path = _parse_next_link(link)
-            # After the first request, the URL is absolute (from Link),
-            # so params are already encoded in it — don't double-send.
-            params = {}
+            if path is not None and "://" in path:
+                # An absolute next link is followed with the Bearer token, so it
+                # must stay on the API host this client was configured for.
+                if urlsplit(path).netloc != urlsplit(self.base_url).netloc:
+                    raise SyncProviderError(
+                        "GitHub pagination link points at a different host; "
+                        "refusing to follow it."
+                    )
+            # After the first request, the URL comes from Link with its query
+            # already encoded — send no params so that query is kept as-is.
+            page_params = None
         return results
 
     def close_issue(self, *, number: str) -> dict[str, Any]:

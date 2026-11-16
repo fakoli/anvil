@@ -129,9 +129,13 @@ def test_dispatch_capture_evidence_extracts_payload_and_temp_files(
         exit_code,
         stdout_file,
         stderr_file,
+        output_sha256,
         actor,
         cwd,
     ):  # noqa: ANN001, ANN202
+        # The dispatcher must pass every Typer option explicitly; an omitted
+        # ``output_sha256`` would arrive in the real command as an OptionInfo.
+        assert output_sha256 is None
         temp_paths.extend([stdout_file, stderr_file])
         calls.append(
             {

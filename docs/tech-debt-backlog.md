@@ -170,19 +170,23 @@ has no active claim). Decision logic is covered by the stub test
 ## B44 home-workspace (PR #53) — deferred review findings
 
 ### B44-1 · Bare-name workspace residual collision (cross-project)
-**Status**: OPEN (deliberate trade-off). `_home_workspace_base`'s dual-key honors a
-pre-existing **bare-name** workspace (`~/.anvil/workspaces/<basename>/`) whenever it
-has a `state.db`, keyed on basename ALONE — it cannot verify the bare dir belongs to
-*this* canonical root (pre-#42 bare dirs carry no origin marker). So a NEW project
-sharing a basename with a pre-existing bare workspace (e.g. a second repo named
-`anvil` vs the live `~/.anvil/workspaces/anvil/`) resolves to that other project's
-db. This is a **strict subset** of the #42 collision (which collided ALL
-same-basename projects); the PR fixes it for new (hashed-key) workspaces and keeps
-it only for pre-existing bare ones. A full fix needs either re-keying existing bare
-workspaces (rejected — risks orphaning the live db) or an origin marker the existing
-markerless bare dirs lack. Behavior pinned by `test_existing_bare_key_workspace_is_honored`
-+ `test_partial_bare_workspace_falls_to_hashed`. Close by recording a canonical-root
-origin marker for bare workspaces and matching it before honoring.
+**Status**: DONE. A pre-existing **bare-name** workspace
+(`~/.anvil/workspaces/<basename>/`) used to be honored for any project with that
+basename whenever it had a `state.db`, so a second repo with the same name resolved
+to the first one's db. `_home_workspace_base` now honors a bare-name workspace only
+when `.anvil/workspace-owner.json` (`{"version": 1, "canonical_root": ...}`, a
+regular non-link file of bounded size) names the caller's canonical root; anything
+else resolves to the hashed key exactly as for a new project. Existing bare dirs
+are neither re-keyed nor adopted on first use (both would guess at ownership):
+`anvil migrate-workspace --adopt-legacy [--yes]` writes the marker on operator
+request and refuses when the workspace is bound elsewhere, its marker is invalid,
+or the project already has a hashed-key workspace. The CLI "not initialized"
+messages, the SessionStart hint and plain `migrate-workspace` name an unclaimed
+bare workspace so a pre-#42 user is not silently stranded. Pinned by
+`test_existing_bare_key_workspace_is_honored`,
+`test_unmarked_bare_key_workspace_is_not_honored`,
+`test_partial_bare_workspace_falls_to_hashed` and
+`tests/test_workspace_owner_marker.py`.
 
 ### B44-2 · PostToolUse hooks inert under the home-workspace layout
 **Status**: DONE / superseded. The active `hooks.json` manifest uses the

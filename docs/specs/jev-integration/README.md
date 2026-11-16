@@ -99,6 +99,6 @@ Capture the problem, code-level authority boundaries, why each integration was
 chosen, actual before/after measurements, retained failures, rejected extra
 use cases, and future-system implications. Separate mocked tests, live
 synthetic measurements, source merge, installation, and live enablement.
-Prepare notes for the author's `sekoudoumbouya` repository only; no draft
+Prepare notes for the author's personal repository only; no draft
 article or publication is requested. Never copy credentials, private logs,
 personal infrastructure, or task content into public notes.

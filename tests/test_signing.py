@@ -60,6 +60,24 @@ def test_keypair_generate_is_idempotent_and_0600(tmp_path) -> None:  # type: ign
     assert sid1 == signing.fingerprint(pub1)
 
 
+def test_new_keys_directory_is_private_and_key_never_written_through_a_link(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import pytest
+
+    if os.name == "nt":
+        pytest.skip("POSIX permission and symlink semantics")
+    fresh = tmp_path / "fresh-keys"
+    signing.load_or_create_signer(fresh)
+    assert (fresh.stat().st_mode & 0o777) == 0o700
+
+    linked = tmp_path / "linked-keys"
+    linked.mkdir()
+    outside = tmp_path / "outside.pem"
+    (linked / signing._PRIV_FILENAME).symlink_to(outside)  # dangling link
+    with pytest.raises(OSError):
+        signing.load_or_create_signer(linked)
+    assert not outside.exists()
+
+
 def test_sign_verify_roundtrip_and_tamper(tmp_path) -> None:  # type: ignore[no-untyped-def]
     priv, pub, _ = _signer(tmp_path)
     sig = signing.sign(priv, b"hello")

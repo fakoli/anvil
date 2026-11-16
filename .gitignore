@@ -31,3 +31,10 @@ site/
 
 # anvil-pulse dashboard runtime (pid/log files)
 .anvil-pulse/
+
+# Local secrets — never commit (anvil's optional JEV integration reads <project>/.env)
+.env
+.env.*
+!.env.example
+*.pem
+*.key

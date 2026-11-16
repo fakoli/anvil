@@ -25,6 +25,7 @@ from anvil.cli._helpers import (
     _slug,
     canonical_prd_id,
     current_parameter_source_name,
+    legacy_workspace_hint,
     resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
@@ -577,7 +578,7 @@ def status(
             fail(
                 "status",
                 "anvil not initialized in this project. "
-                "Run `anvil init` to start.",
+                "Run `anvil init` to start." + legacy_workspace_hint(state_dir),
                 code="not_initialized",
             )
         if hook_format:
@@ -585,7 +586,7 @@ def status(
             raise typer.Exit(code=0)
         typer.echo(
             "anvil not initialized in this project. "
-            "Run `anvil init` to start."
+            "Run `anvil init` to start." + legacy_workspace_hint(state_dir)
         )
         raise typer.Exit(code=1)
 

@@ -171,6 +171,7 @@ def _assert_uv_mcp_spec(spec: dict, project_var: str) -> None:
         "--project",
         f"${{{project_var}}}/bin",
         "python",
+        "-P",
         "-m",
         "anvil.mcp_server",
     ]
@@ -585,12 +586,12 @@ def test_codex_hooks_json_uses_shell_free_dispatcher() -> None:
     assert commands, "expected hook commands"
     expected_prefix = 'uv run --quiet --project "${CLAUDE_PLUGIN_ROOT}/bin" '
     expected = [
-        expected_prefix + "python -m anvil.cli hook dispatch detect-state",
-        expected_prefix + "python -m anvil.cli hook dispatch check-claim",
-        expected_prefix + "python -m anvil.cli hook dispatch record-file-change",
-        expected_prefix + "python -m anvil.cli hook dispatch capture-evidence",
-        expected_prefix + "python -m anvil.cli hook dispatch heartbeat",
-        expected_prefix + "python -m anvil.cli hook dispatch heartbeat",
+        expected_prefix + "python -P -m anvil.cli hook dispatch detect-state",
+        expected_prefix + "python -P -m anvil.cli hook dispatch check-claim",
+        expected_prefix + "python -P -m anvil.cli hook dispatch record-file-change",
+        expected_prefix + "python -P -m anvil.cli hook dispatch capture-evidence",
+        expected_prefix + "python -P -m anvil.cli hook dispatch heartbeat",
+        expected_prefix + "python -P -m anvil.cli hook dispatch heartbeat",
     ]
     assert Counter(commands) == Counter(expected)
     for command in commands:

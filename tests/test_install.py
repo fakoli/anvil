@@ -15,6 +15,7 @@ so writes land under ``tmp_path`` and never touch the real machine.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -40,14 +41,14 @@ def _assert_checkout_launcher(spec: dict) -> None:
     assert spec["command"] == "uv"
     assert spec["args"][0] == "run"
     assert "--project" in spec["args"]
-    assert spec["args"][-3:] == ["python", "-m", "anvil.mcp_server"]
+    assert spec["args"][-4:] == ["python", "-P", "-m", "anvil.mcp_server"]
 
 
 def _assert_uv_checkout_launcher(spec: dict) -> None:
     assert spec["command"] == "uv"
     assert spec["args"][0:2] == ["run", "--quiet"]
     assert "--project" in spec["args"]
-    assert spec["args"][-3:] == ["python", "-m", "anvil.mcp_server"]
+    assert spec["args"][-4:] == ["python", "-P", "-m", "anvil.mcp_server"]
 
 
 def _assert_checkout_argv(argv: list[str]) -> None:
@@ -618,6 +619,48 @@ def test_dangling_symlink_dest_is_refused(sandbox: dict[str, Path]) -> None:
     result = runner.invoke(app, ["install", "codex", "--write"])
     assert result.exit_code == 2
     assert "symlink" in result.stderr.lower()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links require POSIX semantics")
+@pytest.mark.parametrize(
+    ("harness", "dest"), [("codex", "AGENTS.md"), ("opencode", "opencode.json")]
+)
+def test_project_dest_linked_outside_project_is_refused(
+    sandbox: dict[str, Path], harness: str, dest: str
+) -> None:
+    """A project-scoped dest that leaves the project through a link is refused:
+    the project may be someone else's repository content, and writing through
+    the link would change an unrelated file and copy it into the project."""
+    outside = sandbox["home"] / "notes.txt"
+    outside.write_text("private notes\n", encoding="utf-8")
+    (sandbox["project"] / dest).symlink_to(outside)
+
+    result = runner.invoke(app, ["install", harness, "--write"])
+
+    assert result.exit_code == 2
+    assert "outside the project" in result.stderr
+    assert outside.read_text(encoding="utf-8") == "private notes\n"
+    assert not (sandbox["project"] / f"{dest}.anvil-bak").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links require POSIX semantics")
+def test_project_dest_linked_inside_project_still_installs(
+    sandbox: dict[str, Path],
+) -> None:
+    """``AGENTS.md -> CLAUDE.md`` inside the project is a common layout and must
+    keep working: the write passes through the link and the link survives."""
+    target = sandbox["project"] / "CLAUDE.md"
+    target.write_text("# House rules\n", encoding="utf-8")
+    link = sandbox["project"] / "AGENTS.md"
+    link.symlink_to(target)
+
+    result = runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert link.is_symlink()
+    text = target.read_text(encoding="utf-8")
+    assert "# House rules" in text
+    assert "BEGIN ANVIL" in text
 
 
 def test_instruction_file_new_is_marked_block(sandbox: dict[str, Path]) -> None:

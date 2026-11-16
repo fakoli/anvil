@@ -27,6 +27,7 @@ except ImportError:  # POSIX: msvcrt is Windows-only.
     msvcrt = None  # type: ignore[assignment]
 import base64
 import datetime
+import errno
 import hashlib
 import json
 import logging
@@ -46,7 +47,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TextIO
 
 from pydantic import BaseModel
 
@@ -1206,6 +1207,32 @@ def _query_only_event_transaction(
             lock_fh.close()
 
 
+def _state_log_opener(path: str, flags: int) -> int:
+    """``open(..., opener=)`` hook that refuses a link or special file at the leaf.
+
+    ``events.jsonl`` and ``audit.jsonl`` can sit inside a repository checkout
+    (in-repo state layout), so the leaf may be content somebody else committed.
+    A symbolic link there must never redirect engine writes to a file outside
+    the state directory. Creation mode is unchanged (umask-governed), and a
+    linked *directory* above the leaf keeps working.
+    """
+    if os.path.islink(path):
+        raise OSError(errno.ELOOP, "refusing to append through a symbolic link", path)
+    descriptor = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "state log is not a regular file", path)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_state_log_for_append(path: str | os.PathLike[str]) -> TextIO:
+    """Open an append-only state log without following a link at its leaf."""
+    return open(path, "a", encoding="utf-8", opener=_state_log_opener)
+
+
 class SqliteBackend:
     """Concrete SQLite + JSONL implementation of the Backend protocol.
 
@@ -1888,7 +1915,10 @@ class SqliteBackend:
             # ---- Phase 3: log-first append ----
             event_line = self._serialize_event_line(event)
             try:
-                with open(self._events_path, "a", encoding="utf-8") as log_fh:
+                with open(
+                    self._events_path, "a", encoding="utf-8",
+                    opener=_state_log_opener,
+                ) as log_fh:
                     log_fh.write(event_line)
                     # Phase 4: fsync before COMMIT in strict mode.
                     if self._durability == "strict":
@@ -6709,7 +6739,7 @@ class SqliteBackend:
                     ),
                 }
                 line = json.dumps(record) + "\n"
-            with open(audit_path, "a", encoding="utf-8") as fh:
+            with open(audit_path, "a", encoding="utf-8", opener=_state_log_opener) as fh:
                 fh.write(line)
         except OSError as exc:
             logger.error(
@@ -10901,6 +10931,15 @@ class SqliteBackend:
                 raise EventRejected(
                     f"bundle.claimed: member tasks are not ready: {not_ready}."
                 )
+            member_placeholders = ",".join("?" for _ in member_ids)
+            for (member_prd_id,) in conn.execute(
+                "SELECT DISTINCT COALESCE(prd_id, ?) FROM tasks "
+                f"WHERE id IN ({member_placeholders}) ORDER BY 1",
+                (DEFAULT_PRD_ID, *member_ids),
+            ).fetchall():
+                stale_graph = self._prd_task_graph_stale_reason(conn, member_prd_id)
+                if stale_graph is not None:
+                    raise EventRejected(f"bundle.claimed: {stale_graph}")
             graph = analyze_bundle_graph(
                 member_ids,
                 {member[0]: json.loads(member[2] or "[]") for member in member_rows},
@@ -12724,6 +12763,84 @@ class SqliteBackend:
             # path to drop the lock without an abort log line.
             conn.execute("COMMIT")
 
+    def prd_task_graph_stale_reason(self, prd_id: str) -> str | None:
+        """Why ``prd_id``'s task graph predates its current revision, else None."""
+        return self._prd_task_graph_stale_reason(self._require_conn(), prd_id)
+
+    def _prd_task_graph_stale_reason(
+        self, conn: sqlite3.Connection, prd_id: str
+    ) -> str | None:
+        """Detect a task graph planned from superseded PRD material.
+
+        ``prd parse`` records a revision and touches only PRD and requirement
+        rows; feature and task rows are rebuilt by planning. A graph is current
+        when no *material* PRD revision was recorded after the last planning
+        batch that wrote graph rows for the PRD. Title-only revisions keep the
+        material digest and never make a graph stale. A PRD with no planning
+        batch at all (legacy per-event graphs) has unknown provenance and is
+        not judged here.
+        """
+        current = conn.execute(
+            "SELECT revision, material_sha256 FROM prds WHERE id = ?", (prd_id,)
+        ).fetchone()
+        if current is None or current[1] is None:
+            return None  # An unbound PRD is refused by the PRD binding gate.
+        content_actions = {"prd.parsed", "prd.revised"}
+        oldest_content_after_plan: tuple[str, Any] | None = None
+        planned = False
+        cursor = conn.execute(
+            "SELECT action, payload_json FROM events WHERE action IN "
+            "('prd.parsed', 'prd.revised', 'planning.batch_applied') "
+            "AND COALESCE(json_extract(payload_json, '$.prd_id'), ?) = ? "
+            "ORDER BY rowid DESC",
+            (DEFAULT_PRD_ID, prd_id),
+        )
+        for action, raw_payload in cursor:
+            try:
+                payload = json.loads(raw_payload)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if action != "planning.batch_applied":
+                oldest_content_after_plan = (action, payload)
+                continue
+            operations = payload.get("operations")
+            if not isinstance(operations, list):
+                continue
+            embedded_content = [
+                operation
+                for operation in operations
+                if isinstance(operation, dict)
+                and operation.get("action") in content_actions
+            ]
+            if len(operations) > len(embedded_content):
+                # This batch wrote graph rows from the revision current at its
+                # append (its own embedded content, when present, included).
+                planned = True
+                break
+            for operation in embedded_content:
+                oldest_content_after_plan = (
+                    str(operation.get("action")),
+                    operation.get("payload_json"),
+                )
+        cursor.close()
+        if not planned or oldest_content_after_plan is None:
+            return None
+        action, content = oldest_content_after_plan
+        planned_material = (
+            content.get("parent_material_sha256")
+            if action == "prd.revised" and isinstance(content, dict)
+            else None
+        )
+        if planned_material is not None and planned_material == current[1]:
+            return None
+        return (
+            f"the task graph for PRD '{prd_id}' was planned before its current "
+            f"revision {current[0]}; run `anvil plan` to regenerate tasks from "
+            "the current PRD before claiming."
+        )
+
     def _validate_claim_created_locked(
         self,
         conn: sqlite3.Connection,
@@ -12748,6 +12865,9 @@ class SqliteBackend:
                 f"'{actual_status}'. Another claim may have already acquired "
                 "this task."
             )
+        stale_graph = self._prd_task_graph_stale_reason(conn, row[1] or DEFAULT_PRD_ID)
+        if stale_graph is not None:
+            raise EventRejected(f"claim.created: {stale_graph}")
 
         terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
         placeholders = ",".join("?" for _ in terminal)
@@ -14261,6 +14381,13 @@ class SqliteBackend:
                 warn_action="evidence.submitted",
                 warn_target_id=claim_id or "",
             )
+        if existing_row is None:
+            # First evidence for this claim. Surfaces look the active claim up
+            # before they take the append lock, so a release, force-release,
+            # stale reap, or lease expiry can land in between; decide it here,
+            # under the lock, against the engine clock. An exact replay of an
+            # already-recorded submission (same evidence id) is not re-judged.
+            self._require_live_claim_for_first_evidence(conn, claim_id)
 
         # Task eligibility: must exist and be in an active-work status, or be
         # already at needs_review (idempotent replay — write's task UPDATE will
@@ -14283,6 +14410,52 @@ class SqliteBackend:
                 f"evidence.submitted: task '{task_id}' has status "
                 f"'{actual_status}', which is not eligible for evidence submission "
                 "(must be 'claimed', 'in_progress', or 'blocked')."
+            )
+
+    def _require_live_claim_for_first_evidence(
+        self, conn: sqlite3.Connection, claim_id: str
+    ) -> None:
+        """Reject evidence for a claim that no longer holds its task.
+
+        Mirrors the stale reaper's rule exactly (``lease_expires_at < now`` is
+        expired; a bundle member is governed by its bundle claim's lease), so a
+        submission the surfaces would have refused after reaping is refused
+        even when the reap has not run or lost a race.
+        """
+        row = conn.execute(
+            "SELECT status, lease_expires_at, bundle_claim_id FROM claims WHERE id = ?",
+            (claim_id,),
+        ).fetchone()
+        if row is None or row[0] != ClaimStatus.active.value:
+            status = "missing" if row is None else row[0]
+            raise EventRejected(
+                f"evidence.submitted: claim '{claim_id}' is no longer active "
+                f"(status '{status}'); claim the task again before submitting evidence."
+            )
+        lease_text = row[1]
+        if row[2] is not None:
+            bundle_row = conn.execute(
+                "SELECT status, lease_expires_at FROM bundle_claims WHERE id = ?",
+                (row[2],),
+            ).fetchone()
+            if bundle_row is None or bundle_row[0] != "active":
+                raise EventRejected(
+                    f"evidence.submitted: claim '{claim_id}' belongs to a bundle "
+                    "claim that is no longer active; claim the bundle again before "
+                    "submitting evidence."
+                )
+            lease_text = bundle_row[1]
+        try:
+            lease_expires_at = datetime.datetime.fromisoformat(lease_text)
+            expired = lease_expires_at < self._clock.now()
+        except (TypeError, ValueError):
+            raise EventRejected(
+                f"evidence.submitted: claim '{claim_id}' has an unreadable lease."
+            ) from None
+        if expired:
+            raise EventRejected(
+                f"evidence.submitted: the lease on claim '{claim_id}' expired at "
+                f"{lease_text}; claim the task again before submitting evidence."
             )
 
     def _write_evidence_submitted(
@@ -15395,7 +15568,7 @@ class SqliteBackend:
             "reason": reason,
         }
         try:
-            with open(audit_path, "a", encoding="utf-8") as fh:
+            with open(audit_path, "a", encoding="utf-8", opener=_state_log_opener) as fh:
                 fh.write(json.dumps(record) + "\n")
         except OSError:
             pass

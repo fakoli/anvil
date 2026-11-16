@@ -179,6 +179,20 @@ def test_cli_missing_workflow_file_errors(tmp_path: Path):
         os.chdir(cwd)
 
 
+@pytest.mark.parametrize("name", ["../x", "a/b", "..", "..\\x"])
+def test_cli_rejects_workflow_names_that_are_paths(tmp_path: Path, name: str):
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        runner.invoke(app, ["init", "--name", "X"], catch_exceptions=False)
+        (tmp_path / "x.yaml").write_text("name: x\nsteps: []\n", encoding="utf-8")
+        result = runner.invoke(app, ["run-workflow", name])
+        assert result.exit_code == 1
+        assert "plain name" in result.output
+    finally:
+        os.chdir(cwd)
+
+
 def test_cli_end_to_end_runs_workflow(tmp_path: Path):
     cwd = os.getcwd()
     os.chdir(tmp_path)

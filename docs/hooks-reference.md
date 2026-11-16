@@ -252,6 +252,17 @@ seven python processes for this; the consolidation to one was a
 hook-perf-budget fix flagged by the hook-critic agent (see the script
 header comments).
 
+**Redaction and the off switch.** Before a record is written, recognizable
+secrets in the command line and both excerpts are replaced with `[REDACTED]`
+(credential-named `NAME=value` pairs and flags, `Authorization`/`Bearer`
+values, URL passwords, provider token shapes, private-key blocks).
+`output_sha256` remains the hash of the raw full output, and the record's
+`semantic_digest` binds the stored command. A command the claimed task pins
+verbatim as a required command proof is stored as written. Set
+`capture_evidence: false` in `config.yaml` to make this hook record nothing
+(default `true`). Details:
+[`docs/evidence-buffer.md`](evidence-buffer.md#secret-redaction).
+
 **Truncation.** Both `stdout` and `stderr` are truncated to 4000
 characters in the captured record. The legacy wrapper computes the digest over
 the full strings first, then transports only the bounded excerpts and digest to
@@ -274,7 +285,10 @@ the descriptive `submit --output-file` path, and claim-bound proof import.
    enough to honour the <200ms budget, so it always writes to orphan. The
    user may attach it later via `submit --output-file` as descriptive output,
    but must rerun under a claim or import a valid claim-bound artifact to
-   satisfy typed proof requirements.
+   satisfy typed proof requirements. This fallback runs without the anvil
+   CLI, so it applies neither secret redaction nor the `capture_evidence`
+   switch; it exists only in the legacy wrapper, which the shipped manifest
+   does not wire.
 
 **Side effects.** Appends one line to `.anvil/.evidence-buffer/<claim-id>.json`
 or `.anvil/.evidence-buffer/orphan.json`.
@@ -367,6 +381,10 @@ add it to the matcher.
 Checks:
 - Run a command whose string contains one of the matcher substrings.
   `uv run pytest` matches (`pytest` substring). `make test` does not.
+- Confirm `capture_evidence` is not `false` in the project or global
+  `config.yaml`.
+- The harness must report an integer `tool_response.exit_code`; the
+  dispatcher records nothing rather than infer a passing result.
 - Apply the packet's structured `hook_environment` in the tool process. A
   missing/stale `ANVIL_CLAIM_ID`, wrong `ANVIL_ACTOR`, or sibling session sends
   the record to `.anvil/.evidence-buffer/orphan.json`.

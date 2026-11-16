@@ -64,6 +64,13 @@ def run_workflow(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="run-workflow", json_output=False)
 
+    # NAME selects a file inside <state>/workflows; it is never a path.
+    if not name or name in {".", ".."} or any(sep in name for sep in ("/", "\\")):
+        typer.echo(
+            f"Error: workflow name {name!r} must be a plain name, not a path.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     wf_path = state_dir / "workflows" / f"{name}.yaml"
     if not wf_path.exists():
         typer.echo(f"Error: no workflow at {wf_path}", err=True)

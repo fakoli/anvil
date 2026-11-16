@@ -391,6 +391,30 @@ Migrated 12 file(s) from /repo/.anvil → ~/.anvil/workspaces/<key>/.anvil.
 The legacy directory was left in place as a fallback.
 ```
 
+### `--adopt-legacy` — bind a legacy bare-name HOME workspace
+
+A different kind of legacy state: the first HOME-workspace release keyed
+workspaces on the repo basename alone (`~/.anvil/workspaces/<name>/`). Because
+any same-named checkout would match, such a directory now resolves only when
+its `.anvil/workspace-owner.json` marker names the project's canonical root
+(B44-1); otherwise the project resolves to its hashed-key workspace as if the
+bare one did not exist. Nothing adopts a bare-name workspace implicitly.
+
+```bash
+# Dry run — reports the workspace, its last-written time and the project root:
+$ anvil migrate-workspace --adopt-legacy
+# Bind it (writes the marker atomically, mode 0600; copies/moves nothing):
+$ anvil migrate-workspace --adopt-legacy --yes
+```
+
+JSON `status` values: `adopt_dry_run`, `adopted`, `already_adopted`,
+`no_legacy_workspace`. Refusals exit 1 with code `legacy_workspace_owned`
+(bound to another root), `legacy_marker_invalid` (marker is a link, oversized
+or malformed), `workspace_conflict` (this project already has a hashed-key
+workspace — both paths are reported and the operator chooses), or
+`adoption_failed`. Plain `migrate-workspace` keeps its existing statuses and
+adds an `adoptable_legacy_workspace` field (and a note) when one exists.
+
 ## When you need a real migration
 
 Any non-additive schema change (renaming a column, dropping a table, changing

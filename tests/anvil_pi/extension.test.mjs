@@ -5,13 +5,15 @@
 // silent modes, cwd threading, abort, and extension wiring.
 
 import * as assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 
+// Default: the global npm install of the pi harness next to this node binary.
 const PI_INSTALL_DIR = process.env.PI_INSTALL_DIR
-  ?? "/data/apps/devtools/node-24.20.0/lib/node_modules/@earendil-works/pi-coding-agent";
+  || join(dirname(realpathSync(process.execPath)), "..", "lib", "node_modules",
+    "@earendil-works", "pi-coding-agent");
 const require = createRequire(import.meta.url);
 let createJiti;
 try {

@@ -793,6 +793,59 @@ class TestListTasks:
             "5",
         ]
 
+    def test_pagination_keeps_next_page_query_and_stays_on_api_host(
+        self, http_provider
+    ) -> None:
+        seen: list[str] = []
+        pages = iter(
+            [
+                httpx.Response(
+                    200,
+                    json=[_make_gh_issue_payload(number=1)],
+                    headers={
+                        "Link": (
+                            "<https://api.github.com/repos/octo/repo/"
+                            'issues?page=2>; rel="next"'
+                        )
+                    },
+                ),
+                httpx.Response(200, json=[_make_gh_issue_payload(number=2)]),
+            ]
+        )
+
+        def _next_page(request):
+            seen.append(str(request.url))
+            return next(pages)
+
+        with respx.mock(base_url="https://api.github.com") as mock:
+            mock.get("/repos/octo/repo/issues").mock(side_effect=_next_page)
+            tasks = http_provider.list_tasks()
+
+        assert len(tasks) == 2
+        assert seen[1].endswith("/repos/octo/repo/issues?page=2")
+
+    def test_pagination_link_to_another_host_is_not_followed(
+        self, http_provider
+    ) -> None:
+        """The next-page request carries the Bearer token, so it must never
+        leave the configured API host."""
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("https://api.github.com/repos/octo/repo/issues").mock(
+                return_value=httpx.Response(
+                    200,
+                    json=[_make_gh_issue_payload(number=1)],
+                    headers={
+                        "Link": '<https://collector.invalid/steal?page=2>; rel="next"'
+                    },
+                )
+            )
+            foreign = mock.get(url__startswith="https://collector.invalid/").mock(
+                return_value=httpx.Response(200, json=[])
+            )
+            with pytest.raises(SyncProviderError):
+                http_provider.list_tasks()
+        assert not foreign.called
+
     def test_empty_result_returns_empty_list(self, http_provider) -> None:
         with respx.mock(base_url="https://api.github.com") as mock:
             mock.get("/repos/octo/repo/issues").mock(

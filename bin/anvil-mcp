@@ -21,4 +21,4 @@ fi
 })
 
 cd "$ORIGINAL_PWD" || exit 1
-exec uv run --quiet --project "$BIN_DIR" python -m anvil.mcp_server "$@"
+exec uv run --quiet --project "$BIN_DIR" python -P -m anvil.mcp_server "$@"

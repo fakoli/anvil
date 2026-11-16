@@ -17,10 +17,20 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DRIVER = REPO_ROOT / "tests" / "anvil_pi" / "extension.test.mjs"
 
-PI_INSTALL_DIR = os.environ.get(
-    "PI_INSTALL_DIR",
-    "/data/apps/devtools/node-24.20.0/lib/node_modules/@earendil-works/pi-coding-agent",
-)
+
+
+def _default_pi_install_dir() -> str:
+    """Global npm install of the pi harness next to the ``node`` on PATH."""
+    node = shutil.which("node")
+    if node is None:
+        return ""
+    prefix = Path(node).resolve().parent.parent
+    return str(
+        prefix / "lib" / "node_modules" / "@earendil-works" / "pi-coding-agent"
+    )
+
+
+PI_INSTALL_DIR = os.environ.get("PI_INSTALL_DIR") or _default_pi_install_dir()
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None

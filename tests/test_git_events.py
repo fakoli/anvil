@@ -5416,6 +5416,40 @@ class TestMigrateEvents:
         assert not (state_dir / ".gitattributes").exists()
         assert not (state_dir / "id_mapping.json").exists()
 
+    @pytest.mark.skipif(os.name == "nt", reason="symbolic links require POSIX semantics")
+    @pytest.mark.parametrize(
+        "artifact",
+        [
+            "id_mapping.json",
+            "events.jsonl.tmp",
+            ".gitattributes",
+            "events.jsonl.pre-git-migration.bak",
+        ],
+    )
+    @pytest.mark.parametrize("target_exists", [True, False])
+    def test_yes_refuses_linked_artifacts_without_writing(
+        self, tmp_path: Path, artifact: str, target_exists: bool
+    ) -> None:
+        _build_local_project(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        outside = tmp_path / "outside.txt"
+        if target_exists:
+            outside.write_text("keep\n", encoding="utf-8")
+        (state_dir / artifact).symlink_to(outside)
+        log_before = (state_dir / "events.jsonl").read_bytes()
+        config_before = (state_dir / "config.yaml").read_bytes()
+
+        result = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
+
+        assert result.exit_code == 1, result.output
+        if target_exists:
+            assert outside.read_text(encoding="utf-8") == "keep\n"
+        else:
+            assert not outside.exists()
+        assert not (state_dir / "events.jsonl").is_symlink()
+        assert (state_dir / "events.jsonl").read_bytes() == log_before
+        assert (state_dir / "config.yaml").read_bytes() == config_before
+
     def test_yes_applies_full_migration(self, tmp_path: Path) -> None:
         pre_state = _build_conversion_eligible_project(tmp_path)
         state_dir = tmp_path / ".anvil"

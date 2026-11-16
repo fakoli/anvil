@@ -4241,6 +4241,34 @@ def apply_review_decision(
                 "expected 'needs_review'. Submit completion evidence first.",
             )
 
+        # merge_check: strict — the same refusal `anvil apply --approve` makes.
+        # This tool mirrors that command, so a project that opted into the
+        # strict base-freshness gate must not be approvable around it through
+        # MCP. Only the opt-in strict mode probes Git here; the default
+        # advisory mode is unchanged (no probe, no added latency).
+        if approve:
+            from anvil.cli.packet_apply import (
+                _load_config_optional,
+                _merge_check_block,
+            )
+
+            merge_cfg = _load_config_optional(state_dir)
+            if merge_cfg is not None and merge_cfg.merge_check == "strict":
+                _, merge_block = _merge_check_block(
+                    task_id,
+                    backend,
+                    state_dir,
+                    _resolve_project_dir(Path(cwd) if cwd else None),
+                )
+                if merge_block is not None and merge_block.get("stale"):
+                    raise ToolError(
+                        f"base_stale: merge check refused approval of task "
+                        f"'{task_id}': branch '{merge_block['branch']}' is stale "
+                        f"against {merge_block['base_ref']}. Task remains in "
+                        "needs_review. Rebase/merge the base and re-verify, or "
+                        "set merge_check: advisory in config.yaml.",
+                    )
+
         # T025/B25 — completion-evidence ENFORCEMENT on the MCP accept path.
         # Only approvals are gated (rejecting a task with missing evidence is
         # the right move). When strict is in effect and the gate is INCOMPLETE,

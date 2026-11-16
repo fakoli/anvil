@@ -8,6 +8,7 @@
         "--project",
         "${CLAUDE_PLUGIN_ROOT}/bin",
         "python",
+        "-P",
         "-m",
         "anvil.mcp_server"
       ],
