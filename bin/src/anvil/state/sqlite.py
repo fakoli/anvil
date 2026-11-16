@@ -1220,8 +1220,23 @@ def _state_log_opener(path: str, flags: int) -> int:
         raise OSError(errno.ELOOP, "refusing to append through a symbolic link", path)
     descriptor = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o666)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
             raise OSError(errno.EINVAL, "state log is not a regular file", path)
+        # Where O_NOFOLLOW does not exist (Windows) the check above the open is
+        # the only refusal, and the leaf can be swapped for a link in between.
+        # Requiring the name to still be a plain file that *is* the opened one
+        # closes that window: a link opens its target, never itself.
+        current = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or getattr(current, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or not os.path.samestat(current, opened)
+        ):
+            raise OSError(
+                errno.ELOOP, "refusing to append through a symbolic link", path
+            )
     except BaseException:
         os.close(descriptor)
         raise

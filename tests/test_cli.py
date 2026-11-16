@@ -11542,6 +11542,50 @@ class TestApplyMergeCheck:
         status = json.loads(show.output.strip().splitlines()[-1])["data"]["task"]["status"]
         assert status == "needs_review"
 
+    @pytest.mark.parametrize("require_verification", [True, False])
+    def test_strict_probe_failure_through_mcp_matches_apply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        require_verification: bool,
+    ) -> None:
+        """A merge probe that cannot run refuses a strict-verified MCP approval
+        (as `apply --approve --strict` does) and is skipped otherwise."""
+        import asyncio
+
+        from fastmcp import Client
+        from fastmcp.exceptions import ToolError
+
+        import anvil.git_ops.freshness as freshness
+        from anvil.mcp_server import mcp
+
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "merge_check: strict\n")
+        self._claim_submit(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        def broken_probe(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("git is unavailable")
+
+        monkeypatch.setattr(freshness, "check_freshness", broken_probe)
+
+        async def approve() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "apply_review_decision",
+                    {
+                        "task_id": "T001", "approve": True, "reviewer": "rv",
+                        "strict": require_verification,
+                    },
+                )
+
+        if require_verification:
+            with pytest.raises(ToolError, match="verifier_unavailable"):
+                asyncio.run(approve())
+        else:
+            asyncio.run(approve())
+        show = _invoke_cmd(tmp_path, ["show", "T001", "--json"])
+        status = json.loads(show.output.strip().splitlines()[-1])["data"]["task"]["status"]
+        assert status == ("needs_review" if require_verification else "done")
+
     def test_advisory_stale_base_still_approves_through_mcp(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

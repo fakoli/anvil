@@ -53,7 +53,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   contain control characters out of the seed PRD, so a newline in a file name can
   no longer add PRD fields such as a verification command.
 - MCP `apply_review_decision` now refuses a verifiably stale branch under
-  `merge_check: strict`, matching `anvil apply --approve`. Advisory (default) and
+  `merge_check: strict`, and refuses a strict-verified approval when the merge
+  probe cannot run, matching `anvil apply --approve`. Advisory (default) and
   `off` are unchanged.
 - GitHub sync never follows a pagination link to a host other than the configured
   API host, and keeps the next-page query string.

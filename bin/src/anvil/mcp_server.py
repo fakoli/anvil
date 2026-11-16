@@ -4260,6 +4260,15 @@ def apply_review_decision(
                     state_dir,
                     _resolve_project_dir(Path(cwd) if cwd else None),
                 )
+                # A probe that could not run decides nothing. When this
+                # approval also requires verification that is a refusal, as it
+                # is for `anvil apply --approve`; otherwise the gate is skipped.
+                if merge_block is None and _resolve_strict_evidence(strict, state_dir):
+                    raise ToolError(
+                        "verifier_unavailable: required merge verification "
+                        f"could not run for task '{task_id}'. Task remains in "
+                        "needs_review.",
+                    )
                 if merge_block is not None and merge_block.get("stale"):
                     raise ToolError(
                         f"base_stale: merge check refused approval of task "

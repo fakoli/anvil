@@ -381,6 +381,23 @@ def _adopt_legacy_workspace(
 
     try:
         write_workspace_owner(legacy_anvil, root)
+    except FileExistsError:
+        # Another adoption published its marker after the check above. The
+        # marker is never replaced, so the published owner decides.
+        raced_state, raced_owner = read_workspace_owner(legacy_anvil)
+        if not (
+            raced_state == "valid"
+            and raced_owner is not None
+            and workspace_owner_matches(raced_owner, root)
+        ):
+            _adopt_refused(
+                json_output,
+                f"legacy workspace {_display_path(legacy)} was bound to another "
+                f"project while this command ran; it cannot be adopted by "
+                f"{_display_path(root)}. Run `anvil init` to start a separate "
+                "workspace for this project.",
+                "legacy_workspace_owned",
+            )
     except OSError as exc:
         _adopt_refused(json_output, f"adoption failed: {exc}", "adoption_failed")
     _emit_report(json_output, {

@@ -35,10 +35,12 @@ _MAX_VALUE = 4096
 _KEYWORD = r"(?:api[_-]?key|apikey|token|secret|password|passwd|credential)"
 
 # A value: double-quoted, single-quoted, or a bare run up to a shell/markup
-# delimiter. Quotes are consumed with the value.
+# delimiter. Quotes are consumed with the value. The closing quote is optional:
+# a value whose quote never closes on its line (a typo, or an excerpt cut off
+# mid-value) is redacted to the end of that line instead of being kept.
 _VALUE = (
-    rf'(?:"[^"\n]{{0,{_MAX_VALUE}}}"'
-    rf"|'[^'\n]{{0,{_MAX_VALUE}}}'"
+    rf'(?:"[^"\n]{{0,{_MAX_VALUE}}}"?'
+    rf"|'[^'\n]{{0,{_MAX_VALUE}}}'?"
     rf"|[^\s\"',;&|)<>]{{1,{_MAX_VALUE}}})"
 )
 

@@ -76,6 +76,26 @@ def test_linked_log_leaf_is_refused(tmp_path: Path, target_exists: bool) -> None
         assert not outside.exists()
 
 
+def test_leaf_swapped_for_a_link_after_the_check_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without O_NOFOLLOW (Windows) a link that appears after the pre-check is
+    still refused, because the opened file is not the file at that name."""
+    import os
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    log = tmp_path / "events.jsonl"
+    log.symlink_to(outside)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(os.path, "islink", lambda path: False)  # the stale check
+
+    with pytest.raises(OSError):
+        _open_state_log_for_append(log)
+
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
 def test_engine_append_does_not_write_through_linked_event_log(
     tmp_path: Path, frozen_clock
 ) -> None:  # type: ignore[no-untyped-def]

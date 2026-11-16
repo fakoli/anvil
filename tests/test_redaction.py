@@ -83,6 +83,11 @@ def test_text_without_a_secret_is_returned_unchanged(text: str) -> None:
             "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\nafter",
             f"{REDACTED}\nafter",
         ),
+        # A quoted value whose quote never closes is redacted to the end of
+        # its line, not kept because the pattern wanted a closing quote.
+        (f'PASSWORD="{_S}', f"PASSWORD={REDACTED}"),
+        (f"export API_TOKEN='{_S} tail\nnext line", f"export API_TOKEN={REDACTED}\nnext line"),
+        (f'pytest --password "{_S}', f"pytest --password {REDACTED}"),
         # A key block cut off before its END marker is redacted to the end.
         ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk", REDACTED),
     ],

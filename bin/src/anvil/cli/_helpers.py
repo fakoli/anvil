@@ -708,7 +708,13 @@ def workspace_owner_matches(owner: str, root: Path) -> bool:
 
 
 def write_workspace_owner(anvil_dir: Path, root: Path) -> None:
-    """Atomically bind a bare-name workspace to ``root`` (temp file + replace)."""
+    """Bind a bare-name workspace to ``root``; never replaces an existing marker.
+
+    The marker is staged in a temporary file and published with a hard link,
+    which is atomic and fails when the name is already taken. Two projects that
+    adopt the same workspace at once therefore cannot both win: the second
+    raises ``FileExistsError`` and the caller decides from the published owner.
+    """
     payload = (
         json.dumps(
             {"version": _WORKSPACE_OWNER_VERSION, "canonical_root": str(root)},
@@ -721,21 +727,32 @@ def write_workspace_owner(anvil_dir: Path, root: Path) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
         flags |= getattr(os, name, 0)
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
+
+    def _write_exclusively(path: Path) -> None:
+        descriptor = os.open(path, flags, 0o600)
         try:
             if os.write(descriptor, payload) != len(payload):
                 raise OSError("incomplete workspace owner marker write")
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary, marker)
-    except BaseException:
+
+    _write_exclusively(temporary)
+    try:
+        try:
+            os.link(temporary, marker)
+        except FileExistsError:
+            raise
+        except OSError:
+            # No hard links here (some network and FAT volumes). Exclusive
+            # creation still refuses to replace; a reader may briefly see a
+            # partial marker, which reads as invalid and is never honoured.
+            _write_exclusively(marker)
+    finally:
         try:
             os.unlink(temporary)
         except OSError:
             pass
-        raise
 
 
 def _legacy_workspace_base(root: Path) -> Path:

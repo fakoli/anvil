@@ -1043,12 +1043,16 @@ def _tracked_by_git(path: Path) -> bool:
 
 def _is_repository_controlled(path: str | Path, resolved: Path) -> bool:
     """True when the project config is content of a git repository."""
+    literal = Path(os.path.abspath(Path(path).expanduser()))
+    # A tracked link is repository content wherever it points. Checking the
+    # literal path first keeps a checkout from borrowing the grants in another
+    # workspace's config by committing a link into the operator's home state.
+    if literal != resolved and _tracked_by_git(literal):
+        return True
     home_state = (_home_dir() / ".anvil").resolve()
     if resolved.is_relative_to(home_state):
         return False  # home workspace: the operator's own file, never a checkout
-    literal = Path(os.path.abspath(Path(path).expanduser()))
-    candidates = [resolved] if literal == resolved else [literal, resolved]
-    return any(_tracked_by_git(candidate) for candidate in candidates)
+    return _tracked_by_git(resolved)
 
 
 def _drop_repository_controlled_keys(

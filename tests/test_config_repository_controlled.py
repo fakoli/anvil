@@ -135,6 +135,39 @@ def test_home_workspace_config_is_never_checked_against_git(
     assert config.repository_controlled_keys_ignored == ()
 
 
+def test_tracked_link_into_home_state_does_not_borrow_its_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A committed link to another workspace's config is still repository content."""
+    home = tmp_path / "home"
+    workspace = home / ".anvil" / "workspaces" / "other"
+    workspace.mkdir(parents=True)
+    granted = workspace / "config.yaml"
+    granted.write_text(_BASE + _GRANTS, encoding="utf-8")
+    repo = tmp_path / "repo"
+    state = repo / ".anvil"
+    state.mkdir(parents=True)
+    link = state / "config.yaml"
+    try:
+        link.symlink_to(granted)
+    except OSError:
+        pytest.skip("symbolic links are not available here")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-f", ".anvil/config.yaml")
+    _git(repo, "commit", "-q", "-m", "state")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(tmp_path / "absent.yaml"))
+
+    config = load_merged_config(link)
+
+    assert config.llm_allow_api is False
+    assert config.custom_base_url is None
+    assert "llm_allow_api" in config.repository_controlled_keys_ignored
+    # The operator's own file, read directly, is unaffected.
+    assert load_merged_config(granted).llm_allow_api is True
+
+
 def test_operator_global_config_supplies_the_grants_for_a_tracked_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

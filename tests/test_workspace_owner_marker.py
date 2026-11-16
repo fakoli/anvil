@@ -219,6 +219,51 @@ def test_adopt_refuses_a_workspace_bound_to_another_project(
     assert _resolve_state_dir(owner) == bare
 
 
+def test_owner_marker_is_never_replaced(home: Path, tmp_path: Path) -> None:
+    first = _project(tmp_path, "a", "app")
+    second = _project(tmp_path, "b", "app")
+    bare = _bare(home, "app")
+    write_workspace_owner(bare, _canonical_project_root(first))
+    before = (bare / WORKSPACE_OWNER_MARKER).read_bytes()
+
+    with pytest.raises(FileExistsError):
+        write_workspace_owner(bare, _canonical_project_root(second))
+
+    assert (bare / WORKSPACE_OWNER_MARKER).read_bytes() == before
+    assert sorted(p.name for p in bare.iterdir()) == [
+        "events.jsonl", "state.db", WORKSPACE_OWNER_MARKER,
+    ]
+
+
+def test_adopt_loses_cleanly_to_a_concurrent_adoption(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two same-named projects adopt at once: one owner, and the loser is told."""
+    import sys
+
+    # `anvil.cli.migrate_workspace` the attribute is the command function.
+    module = sys.modules["anvil.cli.migrate_workspace"]
+
+    winner = _project(tmp_path, "a", "app")
+    loser = _project(tmp_path, "b", "app")
+    bare = _bare(home, "app")
+    real_write = module.write_workspace_owner
+
+    def publish_after_the_winner(anvil_dir: Path, root: Path) -> None:
+        # The other adoption lands between this command's check and its write.
+        real_write(anvil_dir, _canonical_project_root(winner))
+        real_write(anvil_dir, root)
+
+    monkeypatch.setattr(module, "write_workspace_owner", publish_after_the_winner)
+
+    result = _migrate(loser, "--adopt-legacy", "--yes")
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]["code"] == "legacy_workspace_owned"
+    assert _resolve_state_dir(winner) == bare
+    assert _resolve_state_dir(loser) == _hashed(home, loser)
+
+
 def test_adopt_refuses_an_invalid_marker(home: Path, tmp_path: Path) -> None:
     project = _project(tmp_path, "app")
     bare = _bare(home, "app")
