@@ -202,8 +202,9 @@ jobs:
     if: ${{ always() }}
     name: test (python 3.11)
     runs-on: ubuntu-latest
-    # Single version: requires-python = ">=3.11". Re-add 3.12 when you
-    # actually target it (and fix the concurrency-test flake then).
+    # The one-entry matrix only keeps the check context name stable
+    # ("test (python 3.11) (3.11)"). To add a Python version, change the
+    # shards and `linux-static-checks`, which install 3.11 explicitly.
     strategy:
       matrix:
         python-version: ["3.11"]
