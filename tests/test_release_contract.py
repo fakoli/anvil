@@ -205,7 +205,7 @@ def test_ci_release_contract_jobs_fetch_tags() -> None:
     workflow = yaml.safe_load(
         (repo / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     )
-    for job_name in ("dependency-floor", "test"):
+    for job_name in ("dependency-floor", "linux-static-checks"):
         checkout = next(step for step in workflow["jobs"][job_name]["steps"]
                         if step.get("uses", "").startswith("actions/checkout@"))
         assert checkout["with"]["fetch-depth"] == 0

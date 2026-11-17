@@ -76,14 +76,21 @@ def test_every_partition_gates_stable_ci_and_publication_contexts():
     workflows = {name: yaml.safe_load((ROOT / f".github/workflows/{name}.yml").read_text())
                  for name in ("ci", "publish", "python-tests")}
     ci = workflows["ci"]["jobs"]
-    for aggregate, partition in (("test", "linux-python-tests"),
-                                 ("windows-contracts", "windows-delivery-tests")):
+    for aggregate, partition, checks in (
+        ("test", "linux-python-tests", "linux-static-checks"),
+        ("windows-contracts", "windows-delivery-tests", "windows-focused-checks"),
+    ):
         job = ci[aggregate]
-        assert job["needs"] == partition and "always()" in job["if"]
-        guard = job["steps"][0]
-        assert guard["run"] == 'test "$SHARDS_RESULT" = success'
-        assert guard["env"]["SHARDS_RESULT"] == "${{ needs." + partition + ".result }}"
+        assert job["needs"] == [partition, checks] and "always()" in job["if"]
+        # The gate only reads results: both jobs it needs run side by side, and
+        # either one failing, being cancelled or being skipped fails the gate.
+        shards_guard, checks_guard = job["steps"]
+        assert shards_guard["run"] == 'test "$SHARDS_RESULT" = success'
+        assert shards_guard["env"] == {"SHARDS_RESULT": "${{ needs." + partition + ".result }}"}
+        assert checks_guard["run"] == 'test "$CHECKS_RESULT" = success'
+        assert checks_guard["env"] == {"CHECKS_RESULT": "${{ needs." + checks + ".result }}"}
         assert ci[partition]["uses"] == "./.github/workflows/python-tests.yml"
+        assert "needs" not in ci[checks] and "if" not in ci[checks]
     assert ci["test"]["name"] == "test (python 3.11)"
     assert ci["test"]["strategy"]["matrix"] == {"python-version": ["3.11"]}
     assert ci["windows-contracts"]["name"] == "windows focused contracts"

@@ -77,19 +77,13 @@ jobs:
           tests/test_installed_wheel.py
           -q
 
-  windows-contracts:
-    needs: windows-delivery-tests
-    if: ${{ always() }}
-    name: windows focused contracts
+  # Runs alongside the Windows shards. The `windows-contracts` gate below
+  # reports the combined result, so nothing here waits for the shards.
+  windows-focused-checks:
+    name: windows focused contract checks
     runs-on: windows-latest
 
     steps:
-      - name: Require every Python shard to pass
-        shell: bash
-        env:
-          SHARDS_RESULT: ${{ needs.windows-delivery-tests.result }}
-        run: test "$SHARDS_RESULT" = success
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -132,25 +126,34 @@ jobs:
           -q
           --basetemp "${{ runner.temp }}/anvil-timing-harness"
 
-
-  test:
-    needs: linux-python-tests
+  # Stable gate context: it only reads results, so it adds seconds, not the
+  # minutes the contract checks take.
+  windows-contracts:
+    needs: [windows-delivery-tests, windows-focused-checks]
     if: ${{ always() }}
-    name: test (python 3.11)
+    name: windows focused contracts
     runs-on: ubuntu-latest
-    # Single version: requires-python = ">=3.11". Re-add 3.12 when you
-    # actually target it (and fix the concurrency-test flake then).
-    strategy:
-      matrix:
-        python-version: ["3.11"]
 
     steps:
       - name: Require every Python shard to pass
         shell: bash
         env:
-          SHARDS_RESULT: ${{ needs.linux-python-tests.result }}
+          SHARDS_RESULT: ${{ needs.windows-delivery-tests.result }}
         run: test "$SHARDS_RESULT" = success
 
+      - name: Require the focused contract checks to pass
+        shell: bash
+        env:
+          CHECKS_RESULT: ${{ needs.windows-focused-checks.result }}
+        run: test "$CHECKS_RESULT" = success
+
+  # Runs alongside the Linux shards. The `test` gate below reports the
+  # combined result, so lint, types and the benchmark do not wait for them.
+  linux-static-checks:
+    name: static checks (python 3.11)
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -165,8 +168,8 @@ jobs:
           # "the first job which starts uploading its cache will win").
           cache-suffix: ${{ github.job }}
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python 3.11
+        run: uv python install 3.11
 
       # Qualify native Responses and custom Chat Completions against the real
       # SDK using mock HTTP. These tests never require credentials or live calls.
@@ -192,6 +195,32 @@ jobs:
       - name: Coordination benchmark smoke
         working-directory: bin
         run: uv run python ../benchmarks/run_benchmark.py --scenarios overlapping_files --quick
+
+  # Stable gate context for the Linux suite.
+  test:
+    needs: [linux-python-tests, linux-static-checks]
+    if: ${{ always() }}
+    name: test (python 3.11)
+    runs-on: ubuntu-latest
+    # The one-entry matrix only keeps the check context name stable
+    # ("test (python 3.11) (3.11)"). To add a Python version, change the
+    # shards and `linux-static-checks`, which install 3.11 explicitly.
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - name: Require every Python shard to pass
+        shell: bash
+        env:
+          SHARDS_RESULT: ${{ needs.linux-python-tests.result }}
+        run: test "$SHARDS_RESULT" = success
+
+      - name: Require the static checks to pass
+        shell: bash
+        env:
+          CHECKS_RESULT: ${{ needs.linux-static-checks.result }}
+        run: test "$CHECKS_RESULT" = success
 
   docs:
     name: docs build
