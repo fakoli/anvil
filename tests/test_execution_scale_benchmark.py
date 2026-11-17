@@ -192,14 +192,15 @@ def test_denied_process_group_capability_refuses_before_constructing_a_child(tmp
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc stopped-process observation")
-@pytest.mark.parametrize("mode", ["coordinator", "worker"])
-def test_deadline_kills_term_ignoring_descendant_after_coordinator_exits(tmp_path, monkeypatch, mode):
+def test_deadline_kills_term_ignoring_descendant_after_coordinator_exits(tmp_path, monkeypatch):
+    # One case only: the stalled child never reads the proof-preparation mode,
+    # so a second mode would wait out the same ten-second minimum deadline twice.
     _require_process_group_control()
     output = tmp_path / "timeout.json"
     supervise = execution_scale._supervise
     monkeypatch.setattr(execution_scale, "_supervise", partial(supervise, child_target=_stalled_child))
     monkeypatch.setattr(sys, "argv", ["execution_scale", "--tasks", "1", "--workers", "1",
-                                     "--deadline", "10", "--proof-preparation", mode, "--output", str(output)])
+                                     "--deadline", "10", "--output", str(output)])
     assert execution_scale.main() == 1
     receipt = json.loads(output.read_text())
     assert receipt["timed_out"] and not receipt["validated"] and receipt["child_stopped"]

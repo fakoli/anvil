@@ -6,6 +6,22 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Changed
+
+- Every command that opens project state is faster. The isolated schema-probe
+  worker no longer imports the Pydantic models and the SQLite backend: its
+  byte-level readers moved to `anvil.state._schema_file_reader`, and
+  `anvil.state` loads `models` and `transitions` on first access. Worker start
+  drops from about 320 ms to about 30 ms (`anvil status`: 0.68 s to 0.49 s on
+  the reference machine).
+- Read-only Git probes return when Git exits; they no longer sleep a fixed
+  10 ms per call. A claim runs dozens of these probes.
+- The full test suite runs in about 40% of its previous time (259 s to 100 s
+  at 16 workers on Python 3.11). The marker-selection test now collects one
+  small module per pytest process and asserts set membership, so its totals no
+  longer need updating when tests are added; one duplicate deadline case that
+  waited out the same ten-second minimum twice is gone.
+
 ## [0.6.27] - 2026-11-16
 
 ### Security

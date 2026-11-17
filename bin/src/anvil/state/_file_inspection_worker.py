@@ -50,7 +50,7 @@ def _inspect(request: dict[str, object]) -> dict[str, object]:
 
     try:
         if set(request) == {"path"} and isinstance(request["path"], str):
-            from anvil.state.sqlite import _read_db_schema_version_in_worker
+            from anvil.state._schema_file_reader import _read_db_schema_version_in_worker
 
             return {"ok": True, "version": _read_db_schema_version_in_worker(request["path"])}
         operation = request.get("operation")

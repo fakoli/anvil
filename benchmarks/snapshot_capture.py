@@ -23,6 +23,7 @@ from tests.test_sqlite import (  # noqa: E402
     _setup_claimable_task,
 )
 
+import anvil.state._schema_file_reader as schema_reader  # noqa: E402
 import anvil.state.sqlite as sqlite_backend  # noqa: E402
 from anvil.clock import SystemClock  # noqa: E402
 from anvil.project_snapshot import captured_snapshot_transaction  # noqa: E402
@@ -48,7 +49,7 @@ def measure_capture(state: Path, expected_events: int) -> dict[str, object]:
     for _ in range(5):
         # Model a fresh web subprocess: the first schema probe is cold, and
         # its exact verified bytes can be reused by the under-lock confirmation.
-        sqlite_backend._WAL_SCHEMA_PREFIX_CACHE = None
+        schema_reader._WAL_SCHEMA_PREFIX_CACHE = None
         with (
             patch.object(sqlite_backend, "_append_lock_acquire_nb", timed_acquire),
             patch.object(sqlite_backend, "_append_lock_release", timed_release),
