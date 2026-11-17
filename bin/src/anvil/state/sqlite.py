@@ -1370,7 +1370,11 @@ class SqliteBackend:
 
             try:
                 with RootSetRegistry().locked(require_active=False) as registry:
-                    self._check_invalidation_root_custody(registry, payload)
+                    # The custody check reads the shared connection, so it
+                    # takes the in-process lock like every other pre-append
+                    # read. Order stays registry lock, then in-process lock.
+                    with self._proc_lock:
+                        self._check_invalidation_root_custody(registry, payload)
                     return self._append(draft, pre_log_check=pre_log_check)
             except RootSetError as exc:
                 raise EventRejected(f"{exc.code}: {exc}") from exc
@@ -1426,9 +1430,9 @@ class SqliteBackend:
         if draft.action == "claim.renewed" and isinstance(draft.payload_json, dict):
             claim_id = draft.payload_json.get("claim_id")
             if isinstance(claim_id, str):
-                row = conn.execute(
+                row = self._pre_append_fetchone(
                     "SELECT root_set FROM claims WHERE id = ?", (claim_id,)
-                ).fetchone()
+                )
                 if row is not None and row[0] is not None:
                     try:
                         require_root_set_lifecycle_authorization(
@@ -1443,11 +1447,11 @@ class SqliteBackend:
         if draft.action == "progress.noted" and isinstance(draft.payload_json, dict):
             task_id = draft.payload_json.get("task_id")
             if isinstance(task_id, str):
-                row = conn.execute(
+                row = self._pre_append_fetchone(
                     "SELECT root_set FROM claims WHERE task_id = ? AND status = 'active' "
                     "ORDER BY created_at DESC LIMIT 1",
                     (task_id,),
-                ).fetchone()
+                )
                 if row is not None and row[0] is not None:
                     try:
                         require_root_set_use_authorization(
@@ -1460,9 +1464,9 @@ class SqliteBackend:
         if draft.action == "progress.attested" and isinstance(draft.payload_json, dict):
             claim_id = draft.payload_json.get("claim_id")
             if isinstance(claim_id, str):
-                row = conn.execute(
+                row = self._pre_append_fetchone(
                     "SELECT root_set FROM claims WHERE id = ?", (claim_id,)
-                ).fetchone()
+                )
                 if row is not None and row[0] is not None:
                     try:
                         require_root_set_use_authorization(
@@ -1476,10 +1480,10 @@ class SqliteBackend:
             # Hooks do not carry a claim id. Conservatively block direct file
             # progress writes while any coordinated claim is active; supported
             # hook callers establish the binding context below.
-            row = conn.execute(
+            row = self._pre_append_fetchone(
                 "SELECT root_set FROM claims WHERE status = 'active' AND root_set IS NOT NULL "
                 "LIMIT 1"
-            ).fetchone()
+            )
             if row is not None and row[0] is not None:
                 try:
                     require_root_set_use_authorization(
@@ -1492,9 +1496,9 @@ class SqliteBackend:
         if draft.action == "evidence.submitted" and isinstance(draft.payload_json, dict):
             claim_id = draft.payload_json.get("claim_id")
             if isinstance(claim_id, str):
-                row = conn.execute(
+                row = self._pre_append_fetchone(
                     "SELECT root_set FROM claims WHERE id = ?", (claim_id,)
-                ).fetchone()
+                )
                 if row is not None and row[0] is not None:
                     try:
                         require_root_set_use_authorization(
@@ -5524,6 +5528,20 @@ class SqliteBackend:
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
+
+    def _pre_append_fetchone(self, sql: str, parameters: tuple[Any, ...] = ()) -> Any:
+        """Fetch one row for an authorization check that precedes the append lock.
+
+        These checks stay ahead of the event-log lock, but they share one
+        connection with every other thread of this process. Unserialized, they
+        overlap a concurrent append on that connection, which SQLite reports as
+        API misuse. The in-process lock serializes them against appends, which
+        hold it for their whole critical section. It does not cover the public
+        read methods: a caller that reads from several threads still takes
+        ``claim_operation_lock``.
+        """
+        with self._proc_lock:
+            return self._require_conn().execute(sql, parameters).fetchone()
 
     def _require_conn(self) -> sqlite3.Connection:
         """Return the open connection or raise if not initialised."""
