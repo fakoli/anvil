@@ -69,5 +69,5 @@ USER sandbox
 
 # ENTRYPOINT is the server module; CMD is empty so `docker run ... --help`
 # appends --help as an argument the entry point handles (print + exit 0).
-ENTRYPOINT ["python", "-m", "anvil.mcp_server"]
+ENTRYPOINT ["python", "-P", "-m", "anvil.mcp_server"]
 CMD []

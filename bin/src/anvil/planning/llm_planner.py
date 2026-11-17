@@ -184,6 +184,7 @@ def resolve_planner_provider(
         raise PlannerProviderUnavailable(
             f"API provider {chosen!r} requires explicit llm_allow_api: true. "
             "Use agent-sdk or codex for subscription execution."
+            + _ignored_keys_hint(config)
         )
 
     # Stage 2 — instantiate the chosen family with config-aware knobs.
@@ -233,6 +234,13 @@ def resolve_planner_provider(
     raise PlannerProviderUnavailable(  # pragma: no cover
         f"Unknown provider family {chosen!r} returned by resolver."
     )
+
+
+def _ignored_keys_hint(config: Config | None) -> str:
+    """Explain repository-controlled config keys that were not honoured."""
+    from anvil.config import repository_controlled_keys_hint
+
+    return repository_controlled_keys_hint(config)
 
 
 def _choose_provider_family(config: Config | None) -> str:
@@ -397,7 +405,7 @@ def _build_custom(
         # exception type so the CLI / MCP catch sites work uniformly.
         raise PlannerProviderUnavailable(
             "Custom endpoint provider misconfigured: "
-            f"{exc}\n\n"
+            f"{exc}{_ignored_keys_hint(config)}\n\n"
             "Set `custom_base_url:` in `.anvil/config.yaml` "
             "(or CUSTOM_LLM_BASE_URL in env) and `llm_model:` "
             "(or rely on the Sonnet tier default), then re-run."

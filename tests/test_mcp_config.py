@@ -44,7 +44,7 @@ def _assert_checkout_launcher(spec: dict) -> None:
     proj = Path(args[proj_idx + 1])
     assert proj.is_dir()
     assert proj.name == "bin"
-    assert args[-3:] == ["python", "-m", "anvil.mcp_server"]
+    assert args[-4:] == ["python", "-P", "-m", "anvil.mcp_server"]
 
 
 def _assert_checkout_argv(argv: list[str]) -> None:
@@ -96,6 +96,7 @@ def test_server_spec_uses_uv_run_in_windows_checkout(monkeypatch, tmp_path) -> N
         "--project",
         str(tmp_path),
         "python",
+        "-P",
         "-m",
         "anvil.mcp_server",
     ]
@@ -277,7 +278,7 @@ def test_codex_is_toml() -> None:
     spec = tomllib.loads(out)["mcp_servers"]["anvil"]
     assert spec["command"] == "uv"
     assert spec["args"][0:2] == ["run", "--quiet"]
-    assert spec["args"][-3:] == ["python", "-m", "anvil.mcp_server"]
+    assert spec["args"][-4:] == ["python", "-P", "-m", "anvil.mcp_server"]
     # Not JSON.
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
@@ -299,6 +300,7 @@ def test_codex_toml_uses_uv_launcher_on_windows(monkeypatch, tmp_path) -> None:
         "--project",
         str(tmp_path),
         "python",
+        "-P",
         "-m",
         "anvil.mcp_server",
     ]

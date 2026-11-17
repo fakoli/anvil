@@ -78,6 +78,51 @@ to keep buffer files small and JSONL-friendly. Truncated outputs are still
 useful for the sentinel — full output should be saved separately if the
 agent's flow needs the long form.
 
+### Secret redaction
+
+Buffer lines reach `events.jsonl` at submit, so the hook redacts recognizable
+secrets **before** it writes anything (`bin/src/anvil/redaction.py`). The
+value is replaced with `[REDACTED]` and the surrounding text is kept:
+
+- credential-named assignments and headers — `API_KEY=...`, `db.password = ...`,
+  `"token": "..."`, `X-Auth-Token: ...`, `?access_token=...` (names containing
+  api key / token / secret / password / passwd / credential);
+- command-line flags — `--token VALUE`, `--password=VALUE`, `--api-key VALUE`;
+- `Authorization: Bearer|Basic ...` and a bare `Bearer ...`;
+- URL passwords — `scheme://user:PASSWORD@host`;
+- provider token shapes (`sk-...`, `ghp_...`/`github_pat_...`, `glpat-...`,
+  `xox?-...`, `AKIA...`, `AIza...`, JWTs) and PEM private-key blocks.
+
+What is and is not redacted:
+
+- `command`, `stdout_excerpt` and `stderr_excerpt` are stored redacted. Text
+  with nothing to redact is stored exactly as before.
+- `output_sha256` is still the hash of the **raw** full output. A hash
+  discloses nothing and keeps identifying the run; it means the excerpt is
+  not, in general, a preimage of the hash.
+- `semantic_digest` binds the **stored** (redacted) command, so a redacted
+  line verifies at submit like any other.
+- One exception keeps the gate working: a command that the claimed task pins
+  verbatim as a command `required_proofs` entry is stored unredacted, because
+  the gate matches proofs to that requirement by exact equality and the text
+  is already durable, operator-approved state. Avoid pinning a verification
+  command that embeds a credential; pass the credential through the
+  environment instead. Any other command that redaction changes (for example
+  an ad-hoc `TOKEN=... pytest`) no longer equals a pinned command and so does
+  not satisfy a command requirement — run the pinned command as written.
+
+Redaction is pattern matching and therefore best effort: a secret in a shape
+not listed above is stored as-is. The directory is created owner-only
+(`0700`, and an existing one is tightened) and buffer files are `0600`.
+
+### Turning capture off
+
+`capture_evidence: false` in `config.yaml` (project or global) makes the hook
+record nothing. The default is `true`. With capture off, a task that declares
+command `required_proofs` can only be satisfied by importing a claim-bound
+command-proof artifact (see below). A config that cannot be loaded never
+disables capture.
+
 ## Lifecycle
 
 | Step | Who | Effect |

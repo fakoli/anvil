@@ -1200,12 +1200,32 @@ def install(
         # user never had, and rollback can only unlink the link — leaving the
         # created target as an un-removable footprint. A *valid* symlink is fine
         # (write + restore both pass through it faithfully). Remove the link + re-run.
-        for label, act in (("MCP config", mcp), ("instruction", instr)):
+        #
+        # Also refuse a PROJECT-scoped dest that resolves outside the project
+        # root (a link at the leaf or at a parent such as ``.vscode``). Project
+        # files can be repository content somebody else committed; following
+        # such a link would modify a file elsewhere on disk and copy its
+        # original bytes into the project as ``.anvil-bak``. Links that stay
+        # inside the project (``AGENTS.md -> CLAUDE.md``) and home-scoped
+        # links (dotfile managers) keep working.
+        project_root = _project_root().resolve()
+        for label, act, scope in (
+            ("MCP config", mcp, h.mcp_scope),
+            ("instruction", instr, h.instr_scope),
+        ):
             p = act.get("path")
             if act.get("action") in ("wrote", "merged") and p:
                 pp = Path(p)
+                msg = None
                 if pp.is_symlink() and not pp.exists():
                     msg = f"{label} target {p} is a broken symlink; refusing to write."
+                elif scope == "project" and not pp.resolve().is_relative_to(project_root):
+                    msg = (
+                        f"{label} target {p} resolves outside the project "
+                        f"({pp.resolve()}) through a symlink; refusing to write. "
+                        "Replace the link with a regular file and re-run."
+                    )
+                if msg is not None:
                     if json_output:
                         fail(_COMMAND, msg, code="bad_request", exit_code=2)
                     typer.echo(f"Error: {msg}", err=True)

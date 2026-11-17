@@ -34,7 +34,7 @@ form. Dash-leading uv flags are emitted as `--arg=<value>` so OpenClaw treats
 them as MCP server arguments:
 
 ```bash
-openclaw mcp add anvil --no-probe --command uv --arg=run --arg=--quiet --arg=--project --arg=<anvil>/bin --arg=python --arg=-m --arg=anvil.mcp_server
+openclaw mcp add anvil --no-probe --command uv --arg=run --arg=--quiet --arg=--project --arg=<anvil>/bin --arg=python --arg=-P --arg=-m --arg=anvil.mcp_server
 ```
 
 If the `openclaw` CLI isn't on PATH, the commands are printed for you to run.

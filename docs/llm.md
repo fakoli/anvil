@@ -33,6 +33,17 @@ endpoint, or AWS configuration does not grant permission. Legacy environment
 auto-detection additionally requires `llm_fallback: true`. Existing API users
 must add the new permission flag explicitly when upgrading.
 
+**A committed project config cannot grant this.** When the project
+`config.yaml` is tracked by git (in-repo state with `ANVIL_STATE_LAYOUT=local`
+or `ANVIL_ROOT`, with `.anvil/config.yaml` committed), Anvil ignores
+`llm_allow_api: true`, `custom_base_url`, and `custom_api_key_env` from that
+file: a repository you cloned must not be able to authorize API calls, choose
+where they go, or name the environment variable sent as the credential. Set
+those three in your global config (`~/.config/anvil/config.yaml`) or the
+environment (`CUSTOM_LLM_BASE_URL`, `CUSTOM_LLM_API_KEY`) instead. An untracked
+project config (the default — `.anvil/` is gitignored) and the HOME workspace
+config are unaffected, and a committed `llm_allow_api: false` still restricts.
+
 Find the active config directory from `anvil status`; it may live in the HOME
 workspace shared across worktrees rather than inside the checkout.
 

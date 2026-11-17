@@ -72,7 +72,8 @@ def load_or_create_signer(
     PKCS8/PEM with ``0o600`` permissions. Idempotent: a second call loads it.
     """
     d = directory or keys_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    # A newly created keys directory is private; an existing one is left as is.
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
     priv_path = d / _PRIV_FILENAME
     if priv_path.exists():
         private_key = serialization.load_pem_private_key(
@@ -87,9 +88,11 @@ def load_or_create_signer(
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
-        # Write 0600 from the start: create with restrictive mode, then write.
-        priv_path.touch(mode=0o600, exist_ok=True)
-        priv_path.write_bytes(pem)
+        # Create exclusively with 0600 and never through a link: a dangling
+        # symlink at this name must not send the private key somewhere else.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(priv_path, flags, 0o600), "wb") as handle:
+            handle.write(pem)
         priv_path.chmod(0o600)
     pub_hex = public_key_to_hex(private_key.public_key())
     return private_key, pub_hex, fingerprint(pub_hex)

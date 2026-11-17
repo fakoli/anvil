@@ -6,6 +6,73 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.27] - 2026-11-16
+
+### Security
+
+- **Behaviour change:** a project `config.yaml` that is tracked by git can no
+  longer grant `llm_allow_api: true`, set `custom_base_url`, or set
+  `custom_api_key_env`. Previously, with in-repo state, a cloned repository's
+  own config could authorize API planning and send any named environment secret
+  to a URL it chose. Set these in the global config or the environment; an
+  untracked project config and the HOME workspace config are unaffected. See
+  `docs/llm.md`.
+- **Behaviour change:** new claims (single and bundle) are refused while a PRD's
+  task graph predates its current revision. `anvil prd parse` records a revision
+  but only `anvil plan` rebuilds tasks, so an approved edit used to leave the
+  previous revision's tasks claimable and recorded as bound to the new one. Run
+  `anvil plan` after a material PRD change. Title-only revisions, existing
+  claims, and graphs that were never written by a planning batch are unaffected.
+- **Behaviour change:** a legacy bare-name home workspace
+  (`~/.anvil/workspaces/<project-name>`) is honoured only when its owner marker
+  names the project. Before, any checkout with the same directory name resolved
+  to that workspace's state. `anvil migrate-workspace --adopt-legacy --yes` binds
+  an existing one; the "not initialized" messages point to it. Hashed-key
+  workspaces (the default since the home layout shipped) are unaffected.
+- **Behaviour change:** the wired `hook dispatch capture-evidence` hook now
+  records verification commands; a missing argument made it record nothing.
+  Captured command lines and output excerpts are secret-redacted before they are
+  stored (`output_sha256` still covers the raw output), the buffer directory is
+  `0700`, and `capture_evidence: false` turns capture off. A command a task pins
+  verbatim as a required proof is stored as written so the proof still matches.
+- Evidence can no longer land on a claim that stopped holding its task between
+  the CLI/MCP lookup and the append: the engine re-checks, under the append lock,
+  that the claim is active and its lease has not expired. An exact resubmission
+  of recorded evidence stays an idempotent replay.
+- Plugin hooks, the plugin and Codex MCP manifests, `bin/anvil`, `bin/anvil-mcp`,
+  the generated `uv run` MCP spec, and the Docker entry point now start Python in
+  safe-path mode (`python -P -m ...`), so a `typer.py` or `anvil/` package in the
+  project you opened can no longer be imported in place of anvil.
+- The event and audit logs are never appended through a symbolic link at
+  `events.jsonl` / `audit.jsonl`. This matters for in-repo state
+  (`ANVIL_STATE_LAYOUT=local`), where `.anvil/` can be repository content.
+- `anvil install --write` refuses a project-scoped destination that resolves
+  outside the project through a link. Links that stay inside the project
+  (`AGENTS.md -> CLAUDE.md`) and home-scoped links keep working.
+- `anvil scan` / `anvil init --from-repo` leave file and directory names that
+  contain control characters out of the seed PRD, so a newline in a file name can
+  no longer add PRD fields such as a verification command.
+- MCP `apply_review_decision` now refuses a verifiably stale branch under
+  `merge_check: strict`, and refuses a strict-verified approval when the merge
+  probe cannot run, matching `anvil apply --approve`. Advisory (default) and
+  `off` are unchanged.
+- GitHub sync never follows a pagination link to a host other than the configured
+  API host, and keeps the next-page query string.
+- A newly created signing-keys directory is `0700`, and the private key is created
+  exclusively without following a link.
+- `anvil run-workflow` rejects a workflow name that is a path.
+- CI runs with a read-only default token; `.gitignore` covers `.env*`, `*.pem`,
+  and `*.key`.
+- The `resolve-loop` maintainer skill acts only on review input from trusted
+  authors, treats review text as data, and binds its merge step to checks on the
+  exact head commit.
+
+### Changed
+
+- Tests and docs no longer contain machine-specific paths or personal
+  infrastructure names; the pi extension tests locate the harness next to the
+  `node` on `PATH` (or `PI_INSTALL_DIR`).
+
 ## [0.6.26] - 2026-11-13
 
 ### Fixed
@@ -918,7 +985,7 @@ are live across CLI/MCP.
 ### Documented
 
 - **Live OpenClaw weak-runner validation captured.** The v0.4.0 docs include
-  the Fakoli mini gateway run proving `activePrd` propagation, risk-ceiling
+  the gateway run proving `activePrd` propagation, risk-ceiling
   withholding, weak-agent guidance injection, and claim/evidence/submit flow.
 - User-facing version references were refreshed for `0.4.0` across the README,
   getting-started guide, CLI reference, architecture notes, and OpenClaw README.

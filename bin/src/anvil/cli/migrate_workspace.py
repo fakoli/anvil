@@ -18,19 +18,39 @@ SAFE-FIRST (the #1 invariant — state is never lost or clobbered):
   an interrupted copy can never leave a half-populated workspace.
 * **Whole-tree** — copies the entire ``.anvil/`` (state.db + ``-wal``/``-shm``
   sidecars, events.jsonl, config, prd, packets/, .evidence-buffer/).
+
+``--adopt-legacy`` (B44-1) is a separate, explicit binding step for the other
+kind of legacy state: a BARE-NAME home workspace (``~/.anvil/workspaces/<name>``)
+left by the original #42 code. Such a directory is keyed on the basename
+alone, so anvil no longer honours it for whichever same-named checkout asks
+first. Adoption writes an owner marker naming THIS project's canonical root —
+dry-run by default, ``--yes`` to apply, and it copies or moves nothing.
 """
 
 from __future__ import annotations
 
+import datetime
 import os
 import shutil
+import stat
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from anvil.cli._helpers import _canonical_project_root, _home_workspace_base
+from anvil.cli._helpers import (
+    _STATE_DIR_NAME,
+    WORKSPACE_OWNER_MARKER,
+    _canonical_project_root,
+    _home_workspace_base,
+    _legacy_workspace_base,
+    _workspace_key,
+    read_workspace_owner,
+    unclaimed_legacy_workspace,
+    workspace_owner_matches,
+    write_workspace_owner,
+)
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.state.backend import SchemaProbeFailed
 from anvil.state.file_inspection import BoundedFileInspection
@@ -57,6 +77,15 @@ def migrate_workspace(
         "--yes",
         help="Apply the migration. Without this it is a dry run (reports, writes nothing).",
     ),
+    adopt_legacy: bool = typer.Option(  # noqa: B008
+        False,
+        "--adopt-legacy",
+        help=(
+            "Bind an unclaimed legacy bare-name home workspace "
+            "(~/.anvil/workspaces/<project-name>) to this project instead of "
+            "copying in-repo state. Dry run unless --yes is also given."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -69,11 +98,33 @@ def migrate_workspace(
 
     Dry-run by default (re-run with ``--yes``). Never clobbers an existing home
     workspace, and copies (never moves) so the legacy dir survives as a fallback.
+
+    With ``--adopt-legacy``, bind an unclaimed bare-name home workspace to this
+    project instead (also dry-run by default).
     """
     loc = cwd or Path.cwd()
     root = _canonical_project_root(loc)
+    if adopt_legacy:
+        _adopt_legacy_workspace(loc, root, yes=yes, json_output=json_output)
+        return
     target_base = _home_workspace_base(loc)
     target_anvil = target_base / ".anvil"
+    # A bare-name workspace is never honoured implicitly; make it discoverable
+    # from the verb a pre-#42 user is most likely to reach for.
+    adoptable = unclaimed_legacy_workspace(loc)
+
+    def _report(json_flag: bool, data: dict[str, Any]) -> None:
+        if adoptable is not None:
+            data = {
+                **data,
+                "adoptable_legacy_workspace": _display_path(adoptable),
+                "message": (
+                    f"{data['message']} Note: an unclaimed legacy workspace exists at "
+                    f"{_display_path(adoptable)}; run `anvil migrate-workspace "
+                    "--adopt-legacy` if it belongs to this project."
+                ),
+            }
+        _emit_report(json_flag, data)
 
     # No-clobber: an existing home workspace is authoritative — skip entirely.
     if target_anvil.exists():
@@ -198,8 +249,164 @@ def migrate_workspace(
     })
 
 
-def _report(json_output: bool, data: dict[str, Any]) -> None:
+def _emit_report(json_output: bool, data: dict[str, Any]) -> None:
     if json_output:
         emit_success(_COMMAND, data)
     else:
         typer.echo(data["message"])
+
+
+def _adopt_refused(json_output: bool, message: str, code: str) -> None:
+    if json_output:
+        fail(_COMMAND, message, code=code)
+    typer.echo(f"Error: {message}", err=True)
+    raise typer.Exit(code=1)
+
+
+def _mtime_iso(path: Path) -> str | None:
+    """A cheap "is this the history I expect" detail for the dry-run report."""
+    try:
+        entry = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(entry.st_mode):
+        return None
+    return datetime.datetime.fromtimestamp(entry.st_mtime, datetime.UTC).isoformat(
+        timespec="seconds"
+    )
+
+
+def _adopt_legacy_workspace(
+    loc: Path, root: Path, *, yes: bool, json_output: bool
+) -> None:
+    """Bind an unclaimed bare-name home workspace to ``root`` (B44-1).
+
+    The only writer of the owner marker. Nothing is copied or moved: the
+    workspace keeps its path and, once bound, resolves for this project only.
+    """
+    legacy = _legacy_workspace_base(root)
+    legacy_anvil = legacy / _STATE_DIR_NAME
+    hashed_anvil = (legacy.parent / _workspace_key(root)) / _STATE_DIR_NAME
+    base: dict[str, Any] = {
+        "legacy_workspace": _display_path(legacy),
+        "canonical_root": _display_path(root),
+        "applied": False,
+    }
+
+    if not (legacy_anvil / "state.db").exists():
+        _emit_report(json_output, {
+            **base,
+            "status": "no_legacy_workspace",
+            "message": (
+                f"No legacy bare-name workspace with a state.db at "
+                f"{_display_path(legacy)}; nothing to adopt."
+            ),
+        })
+        return
+
+    try:
+        anvil_entry = legacy_anvil.lstat()
+    except OSError as exc:
+        _adopt_refused(json_output, f"cannot inspect {_display_path(legacy_anvil)}: {exc}",
+                       "adoption_failed")
+        return
+    if not stat.S_ISDIR(anvil_entry.st_mode) or getattr(
+        anvil_entry, "st_file_attributes", 0
+    ) & 0x400:
+        _adopt_refused(
+            json_output,
+            f"{_display_path(legacy_anvil)} is not a real directory; refusing to adopt it.",
+            "adoption_failed",
+        )
+
+    owner_state, owner = read_workspace_owner(legacy_anvil)
+    if owner_state == "valid" and owner is not None:
+        if workspace_owner_matches(owner, root):
+            _emit_report(json_output, {
+                **base,
+                "status": "already_adopted",
+                "message": (
+                    f"Legacy workspace {_display_path(legacy)} is already bound to "
+                    f"{_display_path(root)}; nothing to do."
+                ),
+            })
+            return
+        _adopt_refused(
+            json_output,
+            f"legacy workspace {_display_path(legacy)} is bound to a different project "
+            f"({owner}); it cannot be adopted by {_display_path(root)}. Run "
+            "`anvil init` to start a separate workspace for this project.",
+            "legacy_workspace_owned",
+        )
+    if owner_state == "invalid":
+        _adopt_refused(
+            json_output,
+            f"{_display_path(legacy_anvil / WORKSPACE_OWNER_MARKER)} exists but is not a "
+            "valid owner marker (a link, an oversized file, or malformed content). "
+            "Inspect it and remove it before adopting this workspace.",
+            "legacy_marker_invalid",
+        )
+
+    # No silent winner between two real workspaces: the operator decides.
+    if hashed_anvil.exists():
+        _adopt_refused(
+            json_output,
+            f"this project already has a workspace at {_display_path(hashed_anvil)}, and "
+            f"an unclaimed legacy workspace exists at {_display_path(legacy_anvil)}. "
+            "Anvil will not choose between them: keep the current one (leave the legacy "
+            "directory alone or archive it), or move the current one aside and re-run "
+            "this command to adopt the legacy workspace.",
+            "workspace_conflict",
+        )
+
+    detail = {
+        "events_modified_at": _mtime_iso(legacy_anvil / "events.jsonl"),
+        "state_modified_at": _mtime_iso(legacy_anvil / "state.db"),
+    }
+    seen = detail["events_modified_at"] or detail["state_modified_at"] or "unknown"
+    if not yes:
+        _emit_report(json_output, {
+            **base,
+            **detail,
+            "status": "adopt_dry_run",
+            "message": (
+                f"Would bind legacy workspace {_display_path(legacy)} (last written "
+                f"{seen}) to project root {_display_path(root)}. A bare-name workspace "
+                "is keyed on the directory name alone — confirm this history belongs "
+                "to this project. Dry run — nothing written. Re-run with "
+                "--adopt-legacy --yes to apply."
+            ),
+        })
+        return
+
+    try:
+        write_workspace_owner(legacy_anvil, root)
+    except FileExistsError:
+        # Another adoption published its marker after the check above. The
+        # marker is never replaced, so the published owner decides.
+        raced_state, raced_owner = read_workspace_owner(legacy_anvil)
+        if not (
+            raced_state == "valid"
+            and raced_owner is not None
+            and workspace_owner_matches(raced_owner, root)
+        ):
+            _adopt_refused(
+                json_output,
+                f"legacy workspace {_display_path(legacy)} was bound to another "
+                f"project while this command ran; it cannot be adopted by "
+                f"{_display_path(root)}. Run `anvil init` to start a separate "
+                "workspace for this project.",
+                "legacy_workspace_owned",
+            )
+    except OSError as exc:
+        _adopt_refused(json_output, f"adoption failed: {exc}", "adoption_failed")
+    _emit_report(json_output, {
+        **base,
+        **detail,
+        "status": "adopted",
+        "applied": True,
+        "message": (
+            f"Bound legacy workspace {_display_path(legacy)} to project root "
+            f"{_display_path(root)}. It now resolves for this project only."
+        ),
+    })

@@ -12280,7 +12280,10 @@ class TestReplayNoAuditSideEffects:
                 target_id="T001",
             ))
             # Submit evidence — claim C001 is already released, so auto-release
-            # skips and writes ONE warn line to audit.jsonl.
+            # skips and writes ONE warn line to audit.jsonl. Current engines
+            # refuse this at append; the log shape is what an older engine wrote,
+            # so the guard is lifted for this one historical-shaped append.
+            b._require_live_claim_for_first_evidence = lambda conn, claim_id: None  # type: ignore[method-assign]
             b.append(_make_draft(
                 "evidence.submitted",
                 {

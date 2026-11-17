@@ -34,6 +34,7 @@ from anvil.actors import ACTOR_AUTH_NOTICE
 from anvil.cli._actor_output import actor_flag_for_human, safe_actor_label
 from anvil.cli._helpers import (
     _resolve_state_dir,
+    legacy_workspace_hint,
     resolve_actor,
 )
 from anvil.naming import session_discriminator, task_claim_buffer_path
@@ -756,6 +757,19 @@ def _emit_session_start_context(text: str) -> None:
     )
 
 
+def _session_start_legacy_workspace_hint(cwd: Path | None) -> str:
+    """Adoption hint for an unclaimed bare-name workspace, or ``""``.
+
+    Resolution no longer honours a bare-name workspace without an owner
+    marker; say so once at SessionStart rather than presenting a pre-#42
+    project as silently empty.
+    """
+    try:
+        return legacy_workspace_hint(_resolve_state_dir(cwd))
+    except Exception:  # noqa: BLE001 - a hint must never break SessionStart
+        return ""
+
+
 def _dispatch_detect_state(payload: dict[str, object], cwd: Path | None) -> None:
     language = _language_for_cwd(cwd)
     root = _project_cwd(cwd)
@@ -784,6 +798,7 @@ def _dispatch_detect_state(payload: dict[str, object], cwd: Path | None) -> None
         else:
             _emit_session_start_context(
                 "[anvil] not initialized in this project — run `anvil init` to start"
+                + _session_start_legacy_workspace_hint(cwd)
             )
         return
     reason = status_line or f"status check returned exit {status_exit}"
@@ -854,6 +869,11 @@ def _dispatch_capture_evidence(payload: dict[str, object], cwd: Path | None) -> 
             exit_code=exit_code,
             stdout_file=stdout_path,
             stderr_file=stderr_path,
+            # Called programmatically (no Click context): every Typer Option
+            # must be passed explicitly. Omitting ``output_sha256`` leaked the
+            # OptionInfo sentinel into the digest check, which raised and was
+            # swallowed — the dispatcher path then recorded nothing at all.
+            output_sha256=None,
             actor=_payload_actor(payload),
             cwd=cwd,
         )
@@ -1106,6 +1126,63 @@ def _capture_windows_directory(path: Path) -> int:
         raise
 
 
+_EVIDENCE_EXCERPT_CHARS = 4000
+# Redact a little past the excerpt boundary so a secret that straddles it is
+# still recognized before the text is cut.
+_EVIDENCE_EXCERPT_REDACTION_MARGIN = 1024
+
+
+def _redacted_excerpt(raw: str) -> str:
+    """The stored, secret-redacted head of one output stream.
+
+    Output with nothing to redact yields exactly ``raw[:4000]``.
+    """
+    from anvil.redaction import redact_secrets
+
+    window = raw[: _EVIDENCE_EXCERPT_CHARS + _EVIDENCE_EXCERPT_REDACTION_MARGIN]
+    return redact_secrets(window)[:_EVIDENCE_EXCERPT_CHARS]
+
+
+def _capture_evidence_enabled(state_dir: Path) -> bool:
+    """Config switch ``capture_evidence`` (default on).
+
+    A missing or unreadable config never disables — or breaks — the hook.
+    """
+    config_path = state_dir / "config.yaml"
+    try:
+        if not config_path.is_file():
+            return True
+        from anvil.config import load_merged_config
+
+        return bool(load_merged_config(config_path).capture_evidence)
+    except Exception:  # noqa: BLE001 - hook must never break the session
+        return True
+
+
+def _restrict_evidence_buffer_dir(buffer_dir: Path) -> None:
+    """Best-effort: keep an existing ``.evidence-buffer`` owner-only (POSIX)."""
+    if os.name == "nt":
+        return
+    try:
+        info = buffer_dir.lstat()
+        if stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) & 0o077:
+            os.chmod(buffer_dir, 0o700)
+    except OSError:
+        pass
+
+
+def _is_pinned_proof_command(task: object, command: str) -> bool:
+    """True when ``task`` pins exactly ``command`` as a required command proof."""
+    try:
+        return any(
+            getattr(requirement.kind, "value", requirement.kind) == "command"
+            and requirement.command == command
+            for requirement in getattr(task, "required_proofs", None) or ()
+        )
+    except Exception:  # noqa: BLE001 - never let a malformed task break capture
+        return False
+
+
 @hook_app.command("capture-evidence")
 def hook_capture_evidence(
     command: str = typer.Option(..., "--command", help="Full bash command string that was run."),  # noqa: B008
@@ -1147,8 +1224,12 @@ def hook_capture_evidence(
         state_dir = _resolve_state_dir(cwd)
         if not state_dir.exists():
             raise typer.Exit(code=0)
+        if not _capture_evidence_enabled(state_dir):
+            raise typer.Exit(code=0)
 
         import hashlib
+
+        from anvil.redaction import redact_secrets
 
         # Read FULL stdout/stderr from temp files. The output hash is over the
         # full output (before truncation) so output_sha256 records what actually
@@ -1178,21 +1259,30 @@ def hook_capture_evidence(
         # Build the evidence record — a CommandProof-shaped buffer line that
         # ``anvil submit`` reconciles into Evidence.proofs. ``kind`` +
         # ``output_sha256`` are what make it a typed, observed proof.
+        #
+        # Secrets are redacted BEFORE anything is persisted: buffer lines reach
+        # ``events.jsonl`` at submit. ``output_sha256`` stays over the raw
+        # output (a hash discloses nothing and still identifies the run); the
+        # stored command and excerpts are the redacted text. ``stored_command``
+        # is also what the semantic digest binds, so a buffer line always
+        # verifies against the command it carries.
         now = datetime.datetime.now(datetime.UTC)
+        stored_command = redact_secrets(command)
         record: dict[str, object] = {
             "kind": "command",
             "timestamp": now.isoformat(),
-            "command": command,
+            "command": stored_command,
             "exit_code": exit_code,
             "output_sha256": output_sha256,
-            "stdout_excerpt": stdout_raw[:4000],
-            "stderr_excerpt": stderr_raw[:4000],
+            "stdout_excerpt": _redacted_excerpt(stdout_raw),
+            "stderr_excerpt": _redacted_excerpt(stderr_raw),
             "actor": actor,
         }
 
         # Determine which buffer file to append to by looking up the active claim.
         buffer_dir = state_dir / ".evidence-buffer"
-        buffer_dir.mkdir(exist_ok=True)
+        buffer_dir.mkdir(mode=0o700, exist_ok=True)
+        _restrict_evidence_buffer_dir(buffer_dir)
 
         with contextlib.ExitStack() as capture_scope:
             matched_claim = None
@@ -1238,9 +1328,21 @@ def hook_capture_evidence(
                         if task is not None
                         else None
                     )
+                    if stored_command != command and _is_pinned_proof_command(
+                        task, command
+                    ):
+                        # A command the task itself pins as a required proof is
+                        # already durable, operator-approved state, and the gate
+                        # matches proofs to it by exact equality. Redacting it
+                        # would disclose nothing less and make the requirement
+                        # unsatisfiable, so it is stored verbatim.
+                        stored_command = command
+                        record["command"] = command
             except Exception:  # noqa: BLE001
                 capture_scope.close()
                 matched_claim = project = task = prd = None
+                stored_command = redact_secrets(command)
+                record["command"] = stored_command
                 # If the native boundary is unavailable, only descriptive orphan capture is allowed.
 
             context = (
@@ -1283,7 +1385,7 @@ def hook_capture_evidence(
                 )
                 semantic_digest = hook_command_semantic_digest(
                     attribution=attribution,
-                    command=command,
+                    command=stored_command,
                     exit_code=exit_code,
                     output_sha256=output_sha256,
                     captured_at=now,

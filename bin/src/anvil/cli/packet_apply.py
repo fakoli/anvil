@@ -836,6 +836,7 @@ def submit(
     import uuid
 
     from anvil.clock import SystemClock
+    from anvil.state.backend import EventRejected
 
     resolved_actor = resolve_actor(actor)
 
@@ -1104,6 +1105,14 @@ def submit(
         except CommandProofImportOverflow as exc:
             if json_output:
                 fail("submit", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except EventRejected as exc:
+            # The engine re-judges the claim under the append lock, so a claim
+            # released, reaped, or expired after the lookup above is refused
+            # here rather than receiving evidence.
+            if json_output:
+                fail("submit", str(exc), code="event_rejected")
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 

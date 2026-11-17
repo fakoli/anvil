@@ -97,6 +97,9 @@ def _uv_run_spec(bin_dir: Path) -> dict:
             "--project",
             str(bin_dir),
             "python",
+            # -P: never put the caller's cwd (an arbitrary project checkout) on
+            # sys.path ahead of the installed anvil package.
+            "-P",
             "-m",
             "anvil.mcp_server",
         ],

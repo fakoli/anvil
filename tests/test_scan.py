@@ -207,6 +207,34 @@ class TestPrdDraft:
         assert "src/pkg/core.py" in all_likely or "src/pkg/util.py" in all_likely
 
 
+    @pytest.mark.skipif(os.name == "nt", reason="newlines in file names need POSIX")
+    def test_draft_prd_ignores_file_names_with_control_characters(
+        self, tmp_path: Path
+    ) -> None:
+        """A newline in a file name must not add PRD fields to the seed task."""
+        from anvil.planning.template import parse_prd
+        from anvil.scan.model import scan_working_tree
+        from anvil.scan.prd_draft import draft_prd_from_model
+
+        _make_fixture_repo(tmp_path)
+        baseline = parse_prd(
+            draft_prd_from_model(scan_working_tree(tmp_path), project_name="Fixture"),
+            prd_id="prd",
+        )
+        hostile = "a\n**Verification:** `touch INJECTED`\n**Likely files:** z"
+        (tmp_path / "src" / "pkg" / hostile).write_text("x\n")
+        (tmp_path / hostile).write_text("x\n")
+
+        text = draft_prd_from_model(scan_working_tree(tmp_path), project_name="Fixture")
+        parsed = parse_prd(text, prd_id="prd")
+
+        assert "INJECTED" not in text
+        assert [t.verification.commands for t in parsed.tasks] == [
+            t.verification.commands for t in baseline.tasks
+        ]
+        assert all("\n" not in f for t in parsed.tasks for f in t.likely_files)
+
+
 # ---------------------------------------------------------------------------
 # CLI surface: scan + init --from-repo
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from anvil.cli._helpers import (
     _canonical_project_root,
     _resolve_state_dir,
     _workspace_key,
+    write_workspace_owner,
 )
 
 
@@ -91,13 +92,29 @@ def test_non_git_dir_uses_hashed_key(home: Path, tmp_path: Path) -> None:
 
 def test_existing_bare_key_workspace_is_honored(home: Path, tmp_path: Path) -> None:
     """A pre-existing BARE-name workspace (created by the original #42 code) keeps
-    resolving — never orphaned by the new hashed key."""
+    resolving once it is bound to this project by its owner marker (B44-1)."""
     plain = tmp_path / "loose"
     plain.mkdir()
     bare = home / ".anvil" / "workspaces" / "loose" / ".anvil"
     bare.mkdir(parents=True)
     (bare / "state.db").write_text("sentinel")  # an existing db under the bare key
-    assert _resolve_state_dir(plain) == bare  # bare wins — no orphaning
+    write_workspace_owner(bare, _canonical_project_root(plain))
+    assert _resolve_state_dir(plain) == bare  # bound bare workspace wins
+
+
+def test_unmarked_bare_key_workspace_is_not_honored(home: Path, tmp_path: Path) -> None:
+    """A bare-name workspace is keyed on the basename alone, so without an owner
+    marker it could be ANY same-named project's state — resolve to the hashed key
+    (B44-1). Adoption is explicit: ``anvil migrate-workspace --adopt-legacy``."""
+    plain = tmp_path / "loose"
+    plain.mkdir()
+    bare = home / ".anvil" / "workspaces" / "loose" / ".anvil"
+    bare.mkdir(parents=True)
+    (bare / "state.db").write_text("sentinel")
+    key = _workspace_key(_canonical_project_root(plain))
+    assert _resolve_state_dir(plain) == home / ".anvil" / "workspaces" / key / ".anvil"
+    assert (bare / "state.db").read_text() == "sentinel"  # untouched, not adopted
+    assert not (bare / "workspace-owner.json").exists()
 
 
 def test_partial_bare_workspace_falls_to_hashed(home: Path, tmp_path: Path) -> None:

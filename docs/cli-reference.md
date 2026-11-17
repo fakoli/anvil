@@ -150,7 +150,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.26 (schema 26)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.27 (schema 26)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -883,6 +883,12 @@ exact current persisted revision, source digest, canonical material digest,
 and content event. If the source changed, run `anvil prd parse`, review, and
 approve again before claiming. This gate does not revoke an existing active
 claim.
+
+New claims are also refused while the PRD's task graph predates its current
+revision: `anvil prd parse` records a revision, but only `anvil plan` rebuilds
+features and tasks. After a material PRD change, run `anvil plan` before
+claiming. A title-only revision keeps the graph current, and a project whose
+tasks were never written by a planning batch is not checked.
 
 **Positional arguments:**
 
@@ -2073,7 +2079,9 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
 - `anvil migrate-workspace` — One-time copy of legacy in-repo `.anvil/`
   state into the HOME-workspace layout; never clobbers an existing
   workspace, copies rather than moves (dry-run by default; `--yes` applies;
-  `--json`).
+  `--json`). `--adopt-legacy` instead binds an unclaimed bare-name HOME
+  workspace (`~/.anvil/workspaces/<name>/`) to this project by writing its
+  owner marker; such a workspace is never honored without one.
 
 **Proof verification**
 

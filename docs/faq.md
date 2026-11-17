@@ -203,7 +203,7 @@ The five hooks are wired in
 `PreToolUse`, and `PostToolUse` events — including `heartbeat`, which
 fires at `PostToolUse` on Edit/Write/NotebookEdit and Bash and renews the
 active lease. Every entry's `command` runs the shell-free dispatcher —
-`uv run --project bin python -m anvil.cli hook dispatch <name>` — there is
+`uv run --project bin python -P -m anvil.cli hook dispatch <name>` — there is
 no `.sh` script file for the manifest to resolve.
 
 To disable one hook without uninstalling the plugin, delete or comment out
@@ -220,7 +220,7 @@ way. See [`design.md` § Why hooks are non-blocking](design.md).
 
 To debug a hook that is misbehaving, run the dispatcher directly with a
 sample payload on stdin to inspect its stderr:
-`echo '{}' | uv run --project bin python -m anvil.cli hook dispatch <name>`.
+`echo '{}' | uv run --project bin python -P -m anvil.cli hook dispatch <name>`.
 A `ANVIL_HOOK_DEBUG=1` env var that redirects hook stderr to
 `.anvil/.hook-debug.log` is tracked as a Phase 11 backlog item
 ([P11-HK-C2](roadmap.md)) but does not ship today.

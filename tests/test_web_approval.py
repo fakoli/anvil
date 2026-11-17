@@ -97,6 +97,9 @@ def test_new_attempt_between_preview_check_and_append_cannot_replace_it(
     arguments = _preview_arguments(backend)
 
     def resubmit_during_gate(task_id, active_backend, state_dir, cwd):
+        # The fixture's claims are dated at the frozen fixture time; judge the
+        # new attempt's lease against that clock, as a live submit would be.
+        active_backend._clock = backend._clock
         _reclaim(active_backend)
         _submit(active_backend, evidence_id="EV002", claim_id="C002")
         return "off", None

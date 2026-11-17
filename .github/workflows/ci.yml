@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: jobs only read the repository. Do not depend on the
+# repository-level default token scope.
+permissions:
+  contents: read
+
 # Cancel superseded PR runs to save cost.
 concurrency:
   group: ci-${{ github.ref }}
