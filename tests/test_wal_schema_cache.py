@@ -8,13 +8,14 @@ from pathlib import Path
 
 import pytest
 
+import anvil.state._schema_file_reader as schema_reader
 import anvil.state.sqlite as sqlite_backend
 from anvil.state.backend import SchemaProbeFailed
 
 
 @pytest.fixture
 def live_wal(tmp_path, monkeypatch):
-    monkeypatch.setattr(sqlite_backend, "_WAL_SCHEMA_PREFIX_CACHE", None)
+    monkeypatch.setattr(schema_reader, "_WAL_SCHEMA_PREFIX_CACHE", None)
     database = tmp_path / "state.db"
     connection = sqlite3.connect(database)
     connection.execute("PRAGMA journal_mode = WAL")
@@ -33,23 +34,23 @@ def _captured_database_and_wal(database):
     # Keep parser/cache assertions in this process, but never raw-open a live
     # database beside its retained SQLite connection.
     with sqlite_backend._stable_database_copy(database) as snapshot:
-        return sqlite_backend._read_stable_database_and_wal(snapshot)
+        return schema_reader._read_stable_database_and_wal(snapshot)
 
 
 def _schema_from_captured_bytes(database):
     header, wal = _captured_database_and_wal(database)
-    return sqlite_backend._schema_version_from_wal(header, wal)
+    return schema_reader._schema_version_from_wal(header, wal)
 
 
 def _observe_checksum_bytes(monkeypatch):
     checksummed = []
-    original = sqlite_backend._wal_checksum
+    original = schema_reader._wal_checksum
 
     def observe(content, **kwargs):
         checksummed.append(len(content))
         return original(content, **kwargs)
 
-    monkeypatch.setattr(sqlite_backend, "_wal_checksum", observe)
+    monkeypatch.setattr(schema_reader, "_wal_checksum", observe)
     return checksummed
 
 
@@ -95,14 +96,14 @@ def test_changed_bytes_invalidate_prefix_even_with_restored_mtime(
     if mutation in {"header", "salts"}:
         with pytest.raises(SchemaProbeFailed):
             _schema_from_captured_bytes(database)
-        assert sqlite_backend._WAL_SCHEMA_PREFIX_CACHE is None
+        assert schema_reader._WAL_SCHEMA_PREFIX_CACHE is None
     else:
         checksummed = _observe_checksum_bytes(monkeypatch)
         cached_result = _schema_from_captured_bytes(database)
         assert cached_result == 0
         if mutation == "rewrite":
             assert sum(checksummed) > 24
-        monkeypatch.setattr(sqlite_backend, "_WAL_SCHEMA_PREFIX_CACHE", None)
+        monkeypatch.setattr(schema_reader, "_WAL_SCHEMA_PREFIX_CACHE", None)
         assert _schema_from_captured_bytes(database) == cached_result
 
 
@@ -110,7 +111,7 @@ def test_changed_bytes_invalidate_prefix_even_with_restored_mtime(
 def test_invalid_tail_does_not_poison_checksum_seed(live_wal, monkeypatch, invalid_tail):
     database, connection = live_wal
     header, original_wal = _captured_database_and_wal(database)
-    assert sqlite_backend._schema_version_from_wal(header, original_wal) == 7
+    assert schema_reader._schema_version_from_wal(header, original_wal) == 7
     connection.execute("PRAGMA user_version = 8")
     connection.commit()
     _header, extended_wal = _captured_database_and_wal(database)
@@ -122,20 +123,20 @@ def test_invalid_tail_does_not_poison_checksum_seed(live_wal, monkeypatch, inval
         damaged[-1] ^= 1
     else:
         damaged[len(original_wal) + 8] ^= 1
-    assert sqlite_backend._schema_version_from_wal(header, bytes(damaged)) == 7
-    assert sqlite_backend._WAL_SCHEMA_PREFIX_CACHE.content == original_wal
+    assert schema_reader._schema_version_from_wal(header, bytes(damaged)) == 7
+    assert schema_reader._WAL_SCHEMA_PREFIX_CACHE.content == original_wal
     # Completing or repairing the tail validates from the last good checksum.
-    assert sqlite_backend._schema_version_from_wal(header, extended_wal) == 8
-    monkeypatch.setattr(sqlite_backend, "_WAL_SCHEMA_PREFIX_CACHE", None)
-    assert sqlite_backend._schema_version_from_wal(header, extended_wal) == 8
+    assert schema_reader._schema_version_from_wal(header, extended_wal) == 8
+    monkeypatch.setattr(schema_reader, "_WAL_SCHEMA_PREFIX_CACHE", None)
+    assert schema_reader._schema_version_from_wal(header, extended_wal) == 8
 
 
 def test_cache_ceiling_does_not_skip_validation(live_wal, monkeypatch):
     database, _connection = live_wal
-    monkeypatch.setattr(sqlite_backend, "_WAL_SCHEMA_PREFIX_CACHE_MAX_BYTES", 32)
+    monkeypatch.setattr(schema_reader, "_WAL_SCHEMA_PREFIX_CACHE_MAX_BYTES", 32)
     checksummed = _observe_checksum_bytes(monkeypatch)
     assert _schema_from_captured_bytes(database) == 7
-    assert sqlite_backend._WAL_SCHEMA_PREFIX_CACHE is None
+    assert schema_reader._WAL_SCHEMA_PREFIX_CACHE is None
     first_bytes = sum(checksummed)
     checksummed.clear()
     assert _schema_from_captured_bytes(database) == 7
@@ -148,8 +149,8 @@ def test_main_header_is_not_cached_when_wal_has_no_page_one(live_wal):
     connection.execute("UPDATE sentinel SET value = 'later'")
     connection.commit()
     header, content = _captured_database_and_wal(database)
-    assert sqlite_backend._schema_version_from_wal(header, content) == 7
-    assert sqlite_backend._WAL_SCHEMA_PREFIX_CACHE.committed_page_one is None
+    assert schema_reader._schema_version_from_wal(header, content) == 7
+    assert schema_reader._WAL_SCHEMA_PREFIX_CACHE.committed_page_one is None
     replacement_header = bytearray(header)
     replacement_header[60:64] = (9).to_bytes(4, "big")
-    assert sqlite_backend._schema_version_from_wal(bytes(replacement_header), content) == 9
+    assert schema_reader._schema_version_from_wal(bytes(replacement_header), content) == 9

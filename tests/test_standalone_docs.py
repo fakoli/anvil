@@ -23,6 +23,7 @@ root with ``--project bin`` so dependency and test-root resolution are explicit.
 from __future__ import annotations
 
 import ast
+import functools
 import re
 import shlex
 from pathlib import Path
@@ -134,8 +135,13 @@ def test_published_prd_pytest_commands_reference_existing_test_files() -> None:
     )
 
 
-def _declared_test_nodes(test_path: Path) -> list[str]:
-    """Return the pytest-style node names declared in one Python test module."""
+@functools.cache
+def _declared_test_nodes(test_path: Path) -> tuple[str, ...]:
+    """Return the pytest-style node names declared in one Python test module.
+
+    Cached: commands without an explicit file select every test module, and
+    reparsing the whole suite per command dominated this file's runtime.
+    """
     relative = test_path.relative_to(_repo_root()).as_posix()
     module = ast.parse(test_path.read_text(encoding="utf-8"), filename=str(test_path))
     nodes: list[str] = []
@@ -149,7 +155,7 @@ def _declared_test_nodes(test_path: Path) -> list[str]:
                     child, (ast.FunctionDef, ast.AsyncFunctionDef)
                 ) and child.name.startswith("test"):
                     nodes.append(f"{relative}::{item.name}::{child.name}")
-    return nodes
+    return tuple(nodes)
 
 
 def _selector_matches(selector: str, node_id: str) -> bool:
