@@ -188,3 +188,78 @@ def test_concurrent_evidence_submission_loses_nothing(tmp_path: Path) -> None:
     assert not errors, f"concurrent submit raised: {errors}"
     ev_task_ids = {e.task_id for e in b.list_evidence() if e.task_id in set(task_ids)}
     assert ev_task_ids == set(task_ids), "evidence rows were lost under concurrency"
+
+
+class _OwnerTrackingLock:
+    """A reentrant lock that can say whether the calling thread holds it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._owner: int | None = None
+        self._depth = 0
+
+    def __enter__(self) -> _OwnerTrackingLock:
+        self._lock.acquire()
+        self._owner = threading.get_ident()
+        self._depth += 1
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+        self._lock.release()
+
+    def held_by_caller(self) -> bool:
+        return self._owner == threading.get_ident()
+
+
+class _LockCheckedConnection:
+    """Record every statement run on the shared connection without the lock."""
+
+    def __init__(self, conn: Any, lock: _OwnerTrackingLock, unlocked: list[str]) -> None:
+        self._conn = conn
+        self._lock = lock
+        self._unlocked = unlocked
+
+    def execute(self, sql: str, *parameters: Any) -> Any:
+        if not self._lock.held_by_caller():
+            self._unlocked.append(sql)
+        return self._conn.execute(sql, *parameters)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def test_evidence_append_runs_every_statement_under_the_process_lock(tmp_path: Path) -> None:
+    """append() serializes its own pre-lock authorization reads on the connection.
+
+    Those reads ran outside the in-process lock, so concurrent submitters
+    overlapped on one sqlite3 connection. Python 3.14 reported the overlap as
+    ``InterfaceError`` in roughly one run in seven; 3.11 tolerated it, so the
+    stress test above could not catch it there. Checking lock ownership on each
+    statement fails on every version.
+    """
+    b = _make_backend(tmp_path)
+    _setup_prd(b)
+    clock = SystemClock()
+    task_id = create_workflow_task(
+        b, title="t", description="d", actor="setup", clock=clock, likely_files=["f.py"],
+    )
+    claim = ClaimManager(b, clock, actor="agent").claim(task_id, expected_files=["f.py"]).claim
+
+    lock = _OwnerTrackingLock()
+    unlocked: list[str] = []
+    real_conn = b._conn
+    b._proc_lock = lock  # type: ignore[assignment]
+    b._conn = _LockCheckedConnection(real_conn, lock, unlocked)  # type: ignore[assignment]
+    try:
+        submit_workflow_evidence(
+            b, task_id=task_id, claim_id=claim.id, actor="agent", clock=clock,
+            commands=["check"], files_changed=["f.py"],
+        )
+    finally:
+        b._conn = real_conn
+
+    assert unlocked == []
+    assert [e.task_id for e in b.list_evidence()] == [task_id]
