@@ -9,14 +9,18 @@ submission across distinct items loses nothing. Mirrors the rigor of
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from anvil.claims.manager import ClaimError, ClaimManager
 from anvil.clock import SystemClock
+from anvil.state.backend import EventRejected
 from anvil.state.models import EventDraft
 from anvil.state.sqlite import SqliteBackend
 from anvil.workflows.tasks import create_workflow_task, submit_workflow_evidence
@@ -215,14 +219,18 @@ class _OwnerTrackingLock:
 
 
 class _LockCheckedConnection:
-    """Record every statement run on the shared connection without the lock."""
+    """Record every statement on the shared connection and who ran it unlocked."""
 
-    def __init__(self, conn: Any, lock: _OwnerTrackingLock, unlocked: list[str]) -> None:
+    def __init__(
+        self, conn: Any, lock: _OwnerTrackingLock, seen: list[str], unlocked: list[str]
+    ) -> None:
         self._conn = conn
         self._lock = lock
+        self._seen = seen
         self._unlocked = unlocked
 
     def execute(self, sql: str, *parameters: Any) -> Any:
+        self._seen.append(sql)
         if not self._lock.held_by_caller():
             self._unlocked.append(sql)
         return self._conn.execute(sql, *parameters)
@@ -231,14 +239,70 @@ class _LockCheckedConnection:
         return getattr(self._conn, name)
 
 
-def test_evidence_append_runs_every_statement_under_the_process_lock(tmp_path: Path) -> None:
-    """append() serializes its own pre-lock authorization reads on the connection.
+def _invalidation_payload(task_id: str, claim_id: str) -> dict[str, Any]:
+    # Typed-valid only: append() validates the shape, runs the custody read
+    # under test, and then rejects the decision because nothing was accepted.
+    return {
+        "task_id": task_id,
+        "reviewer": "agent",
+        "decision": "rejected",
+        "schema_version": 1,
+        "notes": "r",
+        "rejection": {
+            "category": "evidence_resubmission",
+            "reason_code": "evidence_incomplete",
+            "claim_id": claim_id,
+            "review_attempt_id": "EV00000001",
+            "supporting_evidence_digest": "c" * 64,
+            "counts_toward_accept_rate": False,
+        },
+        "invalidation": {
+            "accepted_event_id": "E000001",
+            "binding_digest": "a" * 64,
+            "decision_id": "D1",
+            "reason": "r",
+            "evidence_gap_reference": "g",
+            "evidence_gap_sha256": "b" * 64,
+            "evidence_gap_reviewed_by": "agent",
+            "confirmed": True,
+        },
+    }
+
+
+# One entry per read that append() makes before it takes its lock: the action,
+# its payload, and a fragment of the statement that read must run.
+_PRE_LOCK_READS = [
+    ("claim.renewed", lambda _task, claim: {"claim_id": claim}, "SELECT root_set FROM claims"),
+    ("progress.noted", lambda task, _claim: {"task_id": task}, "SELECT root_set FROM claims"),
+    ("progress.attested", lambda _task, claim: {"claim_id": claim}, "SELECT root_set FROM claims"),
+    ("file_changed", lambda _task, _claim: {}, "SELECT root_set FROM claims"),
+    (
+        "evidence.submitted",
+        lambda task, claim: {"task_id": task, "claim_id": claim},
+        "SELECT root_set FROM claims",
+    ),
+    ("task.applied", _invalidation_payload, "$.invalidation.accepted_event_id"),
+]
+
+
+@pytest.mark.parametrize(
+    ("action", "payload", "expected_read"),
+    _PRE_LOCK_READS,
+    ids=[case[0] for case in _PRE_LOCK_READS],
+)
+def test_append_runs_every_statement_under_the_process_lock(
+    tmp_path: Path, action: str, payload: Any, expected_read: str
+) -> None:
+    """append() serializes its own pre-lock reads on the shared connection.
 
     Those reads ran outside the in-process lock, so concurrent submitters
     overlapped on one sqlite3 connection. Python 3.14 reported the overlap as
     ``InterfaceError`` in roughly one run in seven; 3.11 tolerated it, so the
     stress test above could not catch it there. Checking lock ownership on each
     statement fails on every version.
+
+    The drafts are deliberately minimal: the read under test precedes
+    validation, so a later rejection does not matter.
     """
     b = _make_backend(tmp_path)
     _setup_prd(b)
@@ -249,17 +313,21 @@ def test_evidence_append_runs_every_statement_under_the_process_lock(tmp_path: P
     claim = ClaimManager(b, clock, actor="agent").claim(task_id, expected_files=["f.py"]).claim
 
     lock = _OwnerTrackingLock()
+    seen: list[str] = []
     unlocked: list[str] = []
     real_conn = b._conn
     b._proc_lock = lock  # type: ignore[assignment]
-    b._conn = _LockCheckedConnection(real_conn, lock, unlocked)  # type: ignore[assignment]
+    b._conn = _LockCheckedConnection(real_conn, lock, seen, unlocked)  # type: ignore[assignment]
     try:
-        submit_workflow_evidence(
-            b, task_id=task_id, claim_id=claim.id, actor="agent", clock=clock,
-            commands=["check"], files_changed=["f.py"],
-        )
+        with contextlib.suppress(EventRejected):
+            b.append(
+                EventDraft(
+                    timestamp=_T0, actor="agent", action=action, target_kind="task",
+                    target_id=task_id, payload_json=payload(task_id, claim.id),
+                )
+            )
     finally:
         b._conn = real_conn
 
+    assert any(expected_read in sql for sql in seen), seen
     assert unlocked == []
-    assert [e.task_id for e in b.list_evidence()] == [task_id]

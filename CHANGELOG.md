@@ -8,11 +8,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
-- Threads of one process that append events concurrently no longer fail with
-  `sqlite3.InterfaceError: bad parameter or other API misuse`. The root-set
-  authorization reads that `append()` makes ahead of its lock ran unserialized
-  on the shared connection; they now hold the in-process lock. Python 3.14
-  surfaced the overlap in about one of seven concurrent evidence submissions.
+- Concurrent `append()` calls from threads sharing one backend no longer fail
+  with `sqlite3.InterfaceError: bad parameter or other API misuse`. The
+  root-set authorization and invalidation-custody reads that `append()` makes
+  ahead of its lock ran unserialized on the shared connection; they now hold
+  the in-process lock. Python 3.14 surfaced the overlap in about one of seven
+  concurrent evidence submissions. Backend read methods called directly from
+  several threads still need `claim_operation_lock`.
 
 ## [0.6.27] - 2026-11-16
 

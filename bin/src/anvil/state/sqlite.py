@@ -1590,7 +1590,11 @@ class SqliteBackend:
 
             try:
                 with RootSetRegistry().locked(require_active=False) as registry:
-                    self._check_invalidation_root_custody(registry, payload)
+                    # The custody check reads the shared connection, so it
+                    # takes the in-process lock like every other pre-append
+                    # read. Order stays registry lock, then in-process lock.
+                    with self._proc_lock:
+                        self._check_invalidation_root_custody(registry, payload)
                     return self._append(draft, pre_log_check=pre_log_check)
             except RootSetError as exc:
                 raise EventRejected(f"{exc.code}: {exc}") from exc
@@ -5751,8 +5755,10 @@ class SqliteBackend:
         These checks stay ahead of the event-log lock, but they share one
         connection with every other thread of this process. Unserialized, they
         overlap a concurrent append on that connection, which SQLite reports as
-        API misuse. The in-process lock is enough: it is the lock an appending
-        thread holds for its whole critical section.
+        API misuse. The in-process lock serializes them against appends, which
+        hold it for their whole critical section. It does not cover the public
+        read methods: a caller that reads from several threads still takes
+        ``claim_operation_lock``.
         """
         with self._proc_lock:
             return self._require_conn().execute(sql, parameters).fetchone()
