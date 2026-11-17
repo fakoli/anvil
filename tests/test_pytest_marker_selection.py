@@ -16,7 +16,9 @@ _LIVE_SELECTOR = runpy.run_path(str(_REPO_ROOT / "tests" / "conftest.py"))[
 ]
 # Every collection below is a fresh pytest process, so its cost is whatever
 # these targets import. One small module holding both slow-marked and unmarked
-# tests, plus the live module, exercises every selection path.
+# tests, plus the live module, reaches every branch of the conftest selection
+# logic. This is not an inventory of which tests carry ``slow``: dropping that
+# marker from a Git-heavy class only slows the optional ``-m "not slow"`` lane.
 _PARTITION_TARGETS = (
     "tests/test_state_workspace.py",
     "tests/test_github_issues_live.py",
