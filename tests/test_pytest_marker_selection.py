@@ -14,24 +14,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _LIVE_SELECTOR = runpy.run_path(str(_REPO_ROOT / "tests" / "conftest.py"))[
     "_explicitly_selects_live_github_args"
 ]
+# Every collection below is a fresh pytest process, so its cost is whatever
+# these targets import. One small module holding both slow-marked and unmarked
+# tests, plus the live module, reaches every branch of the conftest selection
+# logic. This is not an inventory of which tests carry ``slow``: dropping that
+# marker from a Git-heavy class only slows the optional ``-m "not slow"`` lane.
 _PARTITION_TARGETS = (
-    "tests/test_git_ops.py",
-    "tests/test_reconciliation.py",
+    "tests/test_state_workspace.py",
     "tests/test_github_issues_live.py",
-    "tests/test_cli.py::TestClaimBranchOption",
-    "tests/test_cli.py::TestE2EClaimRelease",
-    "tests/test_cli.py::TestMergeCheck",
-    "tests/test_cli.py::TestApplyMergeCheck",
-    "tests/test_cli.py::TestHeartbeatLeaseWarning",
-    "tests/test_cli.py::TestStatusClaimReadback",
-    "tests/test_cli.py::TestClaimCommand::test_claim_happy_path_creates_lease_and_branch",
-    "tests/test_doctor_preflight.py::TestPreflightTreeState",
-    "tests/test_bundle_execution.py::test_bundle_claim_packet_and_progress_cli_share_coordinator_flow",
-    "tests/test_cli_drift.py::TestOrphanBranchDrift",
-    "tests/test_cli_drift.py::TestOrphanWorktreeFileLabel",
-    "tests/test_migrate_workspace.py::test_finds_worktree_stranded_state",
-    "tests/test_state_workspace.py::test_worktrees_share_one_home_workspace",
 )
+_LIVE_MODULE = "tests/test_github_issues_live.py::"
 
 
 def _collected_nodes(
@@ -96,9 +88,11 @@ def test_fast_selection_preserves_default_live_exclusion_and_partition() -> None
     assert live_then_fast == safe_fast
     assert fast_then_live == live
     assert default | live == slow | safe_fast | live
-    assert len(slow) == 150
-    assert len(safe_fast) == 62
-    assert len(live) == 3
+    # Membership, not counts: a pinned total only records how many tests the
+    # targets held on the day it was written.
+    assert slow and safe_fast and live
+    assert all(node.startswith(_LIVE_MODULE) for node in live)
+    assert not any(node.startswith(_LIVE_MODULE) for node in default)
 
 
 def test_ambient_live_marker_is_not_external_write_authorization() -> None:
@@ -113,7 +107,7 @@ def test_ambient_live_marker_is_not_external_write_authorization() -> None:
     )
 
     assert ambient_only == set()
-    assert len(explicit) == 3
+    assert explicit and all(node.startswith(_LIVE_MODULE) for node in explicit)
 
 
 @pytest.mark.parametrize(

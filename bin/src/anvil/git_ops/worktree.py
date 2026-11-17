@@ -207,7 +207,12 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | N
                     process.kill()
                     process.wait()
                     return None
-                time.sleep(_GIT_OBSERVATION_POLL_SECONDS)
+                # Return as soon as Git exits; a fixed sleep made every probe
+                # cost a full poll interval although Git finishes much sooner.
+                try:
+                    process.wait(timeout=_GIT_OBSERVATION_POLL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
             total = os.fstat(stdout_file.fileno()).st_size + os.fstat(
                 stderr_file.fileno()
             ).st_size

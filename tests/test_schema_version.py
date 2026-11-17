@@ -277,7 +277,7 @@ def test_schema_probe_retries_checkpoint_removed_wal_and_rereads_header(
     """Last-close checkpoint can remove WAL before or after its existence check."""
     import sqlite3
 
-    from anvil.state.sqlite import _read_db_schema_version_in_worker
+    from anvil.state._schema_file_reader import _read_db_schema_version_in_worker
     from tests.test_cli import _recursive_file_manifest
 
     database = tmp_path / "state.db"
@@ -328,8 +328,8 @@ def test_schema_probe_retries_checkpoint_removed_wal_and_rereads_header(
 def test_schema_probe_exhausts_bounded_io_retries_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[OSError],
 ) -> None:
+    from anvil.state._schema_file_reader import _read_db_schema_version_in_worker
     from anvil.state.backend import SchemaProbeFailed
-    from anvil.state.sqlite import _read_db_schema_version_in_worker
 
     state_dir = _copy_live_wal_fixture(
         tmp_path, version=SCHEMA_VERSION + 1, include_shm=False,
