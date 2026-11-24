@@ -60,19 +60,24 @@ See [`llm.md`](llm.md) for the full augmentation contract.
 
 ### Which agent runtimes does anvil work with?
 
-Any MCP-compatible runtime. The plugin is built first for Claude Code (where
-the skills, agents, and hooks compose natively), but the CLI and FastMCP
-stdio server are runtime-neutral. anvil is documented as working with
-Claude Code, Codex, Cursor, OpenHands, and Copilot.
+Any MCP-compatible runtime, and any agent that can run a shell command. The
+plugin is built first for Claude Code (where the skills, agents, and hooks
+compose natively), but the CLI and FastMCP stdio server are runtime-neutral.
+Claude Code, Codex, OpenClaw, and Pi get a native integration; Cursor,
+VS Code / Copilot, Windsurf, Zed, Amp, OpenCode, Roo, Cline, Continue, Goose,
+Gemini CLI, and OpenHands connect over MCP.
+[Using anvil on any harness](how-to/using-anvil-on-any-harness.md) has the
+per-harness setup.
 
 Two surfaces are always available:
 
 - **CLI** (`anvil <cmd>`) — runtime-agnostic; any shell-capable agent
   can call it via Bash, and humans use it directly.
-- **MCP server** — 38 registered tools over FastMCP stdio; the lean
-  execution default serves 26 on the wire (set `ANVIL_MCP_PLANNING=1` to
-  add the 12 planning tools). Any MCP client connects; tool responses are
-  structured JSON with explicit error envelopes.
+- **MCP server** — FastMCP over stdio; the lean default serves the
+  execution tools on the wire (set `ANVIL_MCP_PLANNING=1` to add the
+  planning tools; the [MCP reference](mcp.md) lists every tool). Any MCP
+  client connects; tool responses are structured JSON with explicit error
+  envelopes.
 
 When a runtime cannot speak MCP (Cursor has no shell, some Copilot modes
 have no stdio), the CLI surface is the fallback. Hooks are Claude
@@ -135,8 +140,11 @@ pre-claim conflict check. See
 
 ### Does `--use-llm` cost money?
 
-Yes — Anthropic charges per token. The deterministic path is free and
-always available. The LLM layer is opt-in per command.
+It depends on the provider. The default rides your existing Claude
+subscription login, so there is no per-token bill; pointing anvil at an API
+key, Bedrock, or another endpoint is metered by that provider (see
+[LLM integration](llm.md)). The deterministic path is free and always
+available, and the LLM layer is opt-in per command.
 
 Cost-shaping defaults are in place: `temperature=0.0` for repeatability,
 and prompt caching is on by default (every Anthropic call sends the system
@@ -417,21 +425,19 @@ in the same Next bucket.
 ### How do I contribute?
 
 Open a pull request against
-[github.com/fakoli/anvil](https://github.com/fakoli/anvil).
-No dedicated `CONTRIBUTING.md` currently ships; use the README's "Status"
-section and the
-[`roadmap.md`](roadmap.md) item taxonomy (Phase 11 backlog items
-prefixed `P11-XX-XN`, Phase 9 carry-forward items prefixed `P9B-N`).
+[github.com/fakoli/anvil](https://github.com/fakoli/anvil). The
+[contributing guide](contributing.md) covers the test workflow, and the
+[roadmap](roadmap.md) and [backlog](backlog/anvil-backlog.md) list what is
+planned and what is open.
 
 Three contribution shapes most appreciated right now:
 
 - **Sync providers.** Linear / Monday providers are on the roadmap but
   community implementations are welcome. Follow
   [`sync-providers.md`](sync-providers.md).
-- **Phase 11 backlog batches.** 56 SHOULD FIX / CONSIDER / NIT items
-  tracked in [`phase-11-backlog.md`](archive/phase-11-backlog.md); the
-  cross-cutting themes in `roadmap.md` indicate which items batch
-  cleanly.
+- **Backlog items.** The [prioritized backlog](backlog/anvil-backlog.md)
+  and the [tech-debt backlog](tech-debt-backlog.md) hold scoped items; the
+  cross-cutting themes in `roadmap.md` indicate which batch cleanly.
 - **Test coverage.** Keep the local pytest suite and live-test documentation
   current when adding a surface or provider; [`live-tests.md`](live-tests.md)
   describes the nightly workflow.

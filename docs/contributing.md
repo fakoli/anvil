@@ -31,6 +31,39 @@ same pytest selection. The four partitions are disjoint and cover that entire
 selection. A single partition is partial verification. Do not put this option
 in inherited `PYTEST_ADDOPTS`, where it could silently narrow nested test runs.
 
+## Working on the docs site
+
+The site is MkDocs Material, built from `docs/` and `mkdocs.yml`. CI builds it
+with `--strict`, so a broken relative link fails the build. Preview locally:
+
+```sh
+uvx --with-requirements docs/requirements.txt mkdocs serve
+```
+
+| What | Where |
+| --- | --- |
+| Landing page copy | `docs/index.md` (raw HTML sections) |
+| Landing page shell and site-wide template | `overrides/home.html`, `overrides/main.html` |
+| Colour tokens, theme mapping, docs reading styles | `docs/stylesheets/anvil.css` |
+| Landing page styles | `docs/stylesheets/home.css` |
+| Terminal replay player | `docs/javascripts/terminal-demo.js` |
+| Recorded session the replay plays | `docs/demo/session.json`, `docs/demo/strict-gate.json` |
+| Search scope (what the site search ranks or skips) | `scripts/mkdocs_hooks.py` |
+
+Three rules keep the landing page honest:
+
+- **Check every claim against the code.** State the limit next to the strength;
+  `docs/_positioning.md` is the voice guide.
+- **Do not put version numbers or counts of tools, commands, or tests on it.**
+  They go stale. Link to the reference page that owns the number.
+- **Never edit the recorded session by hand.** `scripts/record-site-demo.sh`
+  runs every command for real in a throwaway project and rewrites both JSON
+  files. Re-record when CLI output changes, and update the output quoted in
+  `docs/index.md` from the new files.
+
+Links inside the landing page's raw HTML are not validated by MkDocs. After
+changing one, build the site and confirm the target exists.
+
 ## Test workflows on Windows
 
 Run these commands from the repository root. They work in PowerShell and keep

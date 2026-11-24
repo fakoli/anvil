@@ -1,0 +1,35 @@
+{#-
+  Landing-page shell, selected by `template: home.html` in docs/index.md.
+
+  The page copy stays in docs/index.md (so it is searchable and editable like
+  any other page); this template only removes the article column so sections
+  can run full width, loads the landing stylesheet and the terminal demo, and
+  supplies the skip link that Material derives from the table of contents on
+  ordinary pages.
+-#}
+{% extends "main.html" %}
+
+{% block htmltitle %}
+  <title>{{ page.meta.title | d(config.site_name, true) }}</title>
+{% endblock %}
+
+{% block extrahead %}
+  {{ super() }}
+  <link rel="stylesheet" href="{{ 'stylesheets/home.css' | url }}">
+{% endblock %}
+
+{% block header %}
+  <a href="#main-content" class="md-skip">Skip to content</a>
+  {{ super() }}
+{% endblock %}
+
+{% block container %}
+  <div class="md-content anvil-home" data-md-component="content" id="main-content" tabindex="-1">
+    {{ page.content }}
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script src="{{ 'javascripts/terminal-demo.js' | url }}" defer></script>
+{% endblock %}

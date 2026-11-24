@@ -13,6 +13,8 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "overrides/**"
+      - "scripts/mkdocs_hooks.py"
       - "mkdocs.yml"
       - ".github/workflows/docs-pages.yml"
   workflow_dispatch: {}

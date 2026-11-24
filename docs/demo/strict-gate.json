@@ -1,0 +1,18 @@
+[
+  {
+    "act": "Prove",
+    "label": "Submit without the proof",
+    "comment": "agent-a submits without running the tests: accepted for review, but the gate reports the missing proof",
+    "cmd": "anvil submit T001 --commands \"pytest -q\" --files-changed shortener.py --files-changed test_shortener.py --actor agent-a",
+    "exit": 0,
+    "output": "Evidence submitted for task 'T001'.\n  Evidence ID:  EVE7EAABC7\n  Claim ID:     CFBBCF72F (auto-released)\n  Submitted by: 'agent-a'\n  Commands:     ['pytest -q']\n  Files:        ['shortener.py', 'test_shortener.py']\n\nTask 'T001' status → needs_review.\nRun `anvil apply T001` when ready for human review.\nEvidence gate: INCOMPLETE\n  Missing typed required_proofs:\n    - `pytest -q` exits 0\n  --output-file is descriptive only and cannot satisfy typed proofs.\n  Actor:        'agent-a'\n  Actor identity is local coordination and audit attribution, not cryptographic authentication.\n  Pin for continuation: `export ANVIL_ACTOR=agent-a`"
+  },
+  {
+    "act": "Prove",
+    "label": "Strict approval is refused",
+    "comment": "With the strict evidence gate on, approval is refused until the proof exists",
+    "cmd": "anvil apply T001 --approve --strict --reviewer human",
+    "exit": 1,
+    "output": "Error: strict evidence gate REFUSED approval of task 'T001': required evidence is missing. Task remains in needs_review.\n  - `pytest -q` exits 0\nSubmit the missing evidence and re-run, or use --no-strict to override for this invocation."
+  }
+]

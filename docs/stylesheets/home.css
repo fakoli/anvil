@@ -1,0 +1,1699 @@
+/*
+ * Anvil — landing page.
+ *
+ * Loaded only by overrides/home.html, so the few rules that reach outside
+ * .anvil-home (to release Material's article column) cannot affect any other
+ * page. Colour comes from the semantic tokens in anvil.css; this file adds no
+ * new colours except inside the terminal, which is always dark.
+ *
+ * Sizes are in rem. Material sets the root font size to 125 %, so 1rem = 20px
+ * at the default browser setting and 0.8rem is 16px body text.
+ */
+
+/* ---------------------------------------------------------------------------
+ * Release the docs layout: no sidebars, no 61rem article column.
+ * The primary sidebar stays in the DOM below 76.25em because it is the
+ * mobile navigation drawer.
+ * ------------------------------------------------------------------------ */
+.md-main__inner.md-grid {
+  display: block;
+  max-inline-size: none;
+  margin: 0;
+}
+
+.md-content {
+  max-inline-size: none;
+}
+
+.md-sidebar--secondary {
+  display: none;
+}
+
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--primary {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Base
+ * ------------------------------------------------------------------------ */
+.anvil-home {
+  --wrap: 61rem;
+  --gutter: clamp(0.8rem, 4vw, 1.6rem);
+  --band-pad: clamp(3rem, 7vw, 5.5rem);
+
+  --fs-display: clamp(1.75rem, 0.9rem + 4.4vw, 3.5rem);
+  --fs-h2: clamp(1.5rem, 1.15rem + 1.4vw, 2.1rem);
+  --fs-h3: 0.9rem;
+  --fs-lede: clamp(0.9rem, 0.84rem + 0.25vw, 1rem);
+  --fs-body: 0.8rem;
+  --fs-small: 0.7rem;
+  --fs-label: 0.62rem;
+  --fs-term: 0.65rem;
+
+  background: var(--anvil-bg);
+  color: var(--anvil-text);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  outline: none; /* focus target of the skip link; it is not a control */
+}
+
+/* Bands that stay dark in both schemes: hero, proof, closing call to action. */
+.anvil-ink {
+  --anvil-bg: var(--ink-950);
+  --anvil-bg-alt: var(--ink-900);
+  --anvil-surface: var(--ink-900);
+  --anvil-surface-sunken: var(--ink-950);
+  --anvil-border: var(--ink-800);
+  --anvil-border-strong: var(--ink-700);
+  --anvil-control-border: var(--ink-500);
+  --anvil-text: var(--ink-100);
+  --anvil-text-muted: var(--ink-400);
+  --anvil-accent-text: var(--teal-300);
+  --anvil-accent-solid: var(--teal-400);
+  --anvil-accent-solid-hover: var(--teal-300);
+  --anvil-on-accent: var(--ink-950);
+  --anvil-accent-wash: rgb(65 207 203 / 0.1);
+  --anvil-proof-text: var(--ember-300);
+  --anvil-proof-wash: rgb(248 172 61 / 0.1);
+  --anvil-ok-text: var(--ok-300);
+  --anvil-bad-text: var(--bad-300);
+  --anvil-focus: var(--teal-300);
+  --anvil-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 40px rgb(0 0 0 / 0.45);
+}
+
+.anvil-home :where(h1, h2, h3, h4, p, ul, ol, dl, dt, dd, figure, pre) {
+  margin: 0;
+  padding: 0;
+}
+
+.anvil-home :where(ul, ol) {
+  list-style: none;
+}
+
+.anvil-home :where(h1, h2, h3, h4) {
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+.anvil-home :where(p, li, dd) {
+  text-wrap: pretty;
+}
+
+.anvil-home :where(a) {
+  color: var(--anvil-accent-text);
+  text-decoration-line: underline;
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.18em;
+}
+
+.anvil-home :where(a, button, [tabindex="0"]):focus-visible {
+  outline: 2px solid var(--anvil-focus);
+  outline-offset: 2px;
+  border-radius: 0.15rem;
+}
+
+.anvil-home :where(code, kbd, pre) {
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-variant-ligatures: none;
+}
+
+.anvil-home :where(p, li, dd, h3) > code {
+  padding: 0.08em 0.32em;
+  border-radius: 0.2rem;
+  background: var(--anvil-accent-wash);
+  font-size: 0.9em;
+  overflow-wrap: break-word;
+}
+
+.anvil-home ::selection {
+  background: var(--teal-400);
+  color: var(--ink-950);
+}
+
+.sr-only {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * Layout primitives
+ * ------------------------------------------------------------------------ */
+
+/* A grid with no declared columns sizes its one track to the widest child,
+   so a long command would push the whole column past a 320px viewport.
+   minmax(0, 1fr) lets the track shrink and the child wrap instead. */
+.head,
+.hero__intro,
+.stage__head,
+.split,
+.stack,
+.grid,
+.points,
+.loop,
+.lanes,
+.stats,
+.terms,
+.tier,
+.flow,
+.close__inner {
+  grid-template-columns: minmax(0, 1fr);
+}
+.band {
+  background: var(--anvil-bg);
+  color: var(--anvil-text);
+  padding-block: var(--band-pad);
+}
+
+.band--alt {
+  background: var(--anvil-bg-alt);
+}
+
+.band--rule {
+  border-block-start: 1px solid var(--anvil-border);
+}
+
+.wrap {
+  max-inline-size: var(--wrap);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+/* Section heading block: kicker, title, lede. */
+.head {
+  display: grid;
+  gap: 0.7rem;
+  max-inline-size: 34rem; /* about 75 characters of lede */
+  margin-block-end: clamp(1.6rem, 4vw, 2.6rem);
+}
+
+.head--center {
+  margin-inline: auto;
+  justify-items: center;
+  text-align: center;
+}
+
+.kicker {
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  text-transform: uppercase;
+  color: var(--anvil-accent-text);
+}
+
+.kicker--proof {
+  color: var(--anvil-proof-text);
+}
+
+.title {
+  font-size: var(--fs-h2);
+  letter-spacing: -0.02em;
+  line-height: 1.12;
+}
+
+.lede {
+  font-size: var(--fs-lede);
+  line-height: 1.55;
+  color: var(--anvil-text-muted);
+}
+
+.split {
+  display: grid;
+  gap: clamp(1.6rem, 5vw, 3.6rem);
+  align-items: start;
+}
+
+@media (min-width: 60em) {
+  .split {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  }
+
+  .split--flip > :first-child {
+    order: 0;
+  }
+
+  .split--wide-text {
+    grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+  }
+}
+
+.split > .head {
+  margin-block-end: 0;
+}
+
+/* The shorter column keeps its figure in view while the longer one scrolls. */
+@media (min-width: 60em) {
+  .split__aside {
+    position: sticky;
+    inset-block-start: 5.6rem; /* clears the sticky header and tab bar */
+  }
+}
+
+.stack {
+  display: grid;
+  gap: 1.2rem;
+}
+
+.more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.2rem;
+  margin-block-start: 1.6rem;
+  font-size: var(--fs-small);
+  font-weight: 500;
+}
+
+.more a::after {
+  content: " \2192"; /* → */
+}
+
+/* ---------------------------------------------------------------------------
+ * Buttons
+ * ------------------------------------------------------------------------ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-block-size: 2.2rem; /* 44px */
+  padding: 0.4rem 0.9rem;
+  border: 1px solid transparent;
+  border-radius: var(--anvil-radius-sm);
+  font: inherit;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    border-color 150ms ease-out,
+    scale 150ms ease-out;
+}
+
+.btn--primary {
+  background: var(--anvil-accent-solid);
+  color: var(--anvil-on-accent);
+}
+
+.btn--ghost {
+  border-color: var(--anvil-control-border);
+  background: transparent;
+  color: var(--anvil-text);
+}
+
+@media (hover: hover) {
+  .btn--primary:hover {
+    background: var(--anvil-accent-solid-hover);
+  }
+
+  .btn--ghost:hover {
+    border-color: var(--anvil-text);
+    background: var(--anvil-accent-wash);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn:active {
+    scale: 0.96;
+  }
+}
+
+.btn svg {
+  inline-size: 1em;
+  block-size: 1em;
+  flex: none;
+}
+
+/* Install command with a copy button. */
+.install {
+  display: inline-flex;
+  align-items: stretch;
+  max-inline-size: 100%;
+  border: 1px solid var(--anvil-border-strong);
+  border-radius: var(--anvil-radius-sm);
+  background: var(--anvil-surface-sunken);
+  font-size: var(--fs-small);
+}
+
+.install__cmd {
+  display: flex;
+  align-items: center;
+  min-inline-size: 0;
+  padding: 0.5rem 0.8rem;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: var(--anvil-text);
+}
+
+.install__cmd::before {
+  content: "$";
+  margin-inline-end: 0.6em;
+  color: var(--anvil-text-muted);
+  user-select: none;
+}
+
+.install__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-inline-size: 5.2rem;
+  justify-content: center;
+  padding: 0 0.7rem;
+  border: 0;
+  border-inline-start: 1px solid var(--anvil-border-strong);
+  border-radius: 0 var(--anvil-radius-sm) var(--anvil-radius-sm) 0;
+  background: transparent;
+  color: var(--anvil-accent-text);
+  font: inherit;
+  font-family: var(--md-text-font-family, "IBM Plex Sans", sans-serif);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 150ms ease-out;
+}
+
+@media (hover: hover) {
+  .install__copy:hover {
+    background: var(--anvil-accent-wash);
+  }
+}
+
+/* Copy and check share one cell and cross-fade when the command is copied. */
+.install__icons {
+  display: grid;
+  inline-size: 0.8rem;
+  block-size: 0.8rem;
+}
+
+.install__icons svg {
+  grid-area: 1 / 1;
+  inline-size: 100%;
+  block-size: 100%;
+  transition: opacity 150ms ease-out;
+}
+
+.install__icon-done,
+.install__copy.is-copied .install__icon-copy {
+  opacity: 0;
+}
+
+.install__copy.is-copied .install__icon-done {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .install__icons svg {
+    transition:
+      opacity 300ms var(--anvil-ease),
+      scale 300ms var(--anvil-ease),
+      filter 300ms var(--anvil-ease);
+  }
+
+  .install__icon-done,
+  .install__copy.is-copied .install__icon-copy {
+    scale: 0.25;
+    filter: blur(4px);
+  }
+
+  .install__copy.is-copied .install__icon-done {
+    scale: 1;
+    filter: blur(0);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Hero
+ * ------------------------------------------------------------------------ */
+.hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  padding-block: clamp(2.6rem, 6vw, 4.6rem) clamp(2.4rem, 5vw, 4rem);
+  background: var(--anvil-bg);
+  color: var(--anvil-text);
+}
+
+/* Atmosphere: a teal glow behind the headline and a faint ledger grid.
+   Purely decorative, never under text at a strength that costs contrast. */
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(60rem 26rem at 50% -6rem, rgb(65 207 203 / 0.16), transparent 70%),
+    radial-gradient(34rem 20rem at 88% 12rem, rgb(52 61 143 / 0.28), transparent 70%),
+    linear-gradient(to right, rgb(185 190 200 / 0.045) 1px, transparent 1px) 0 0 / 3.2rem 3.2rem,
+    linear-gradient(to bottom, rgb(185 190 200 / 0.045) 1px, transparent 1px) 0 0 / 3.2rem 3.2rem;
+  mask-image: linear-gradient(to bottom, #000 40%, transparent 96%);
+}
+
+.hero__intro {
+  display: grid;
+  justify-items: center;
+  gap: 1.1rem;
+  max-inline-size: 44rem;
+  margin-inline: auto;
+  text-align: center;
+}
+
+.hero__title {
+  font-size: var(--fs-display);
+  letter-spacing: -0.03em;
+  line-height: 1.04;
+}
+
+.hero__title span {
+  display: block;
+}
+
+.hero__title .is-accent {
+  color: var(--teal-300);
+}
+
+.hero__lede {
+  max-inline-size: 34rem;
+  font-size: var(--fs-lede);
+  line-height: 1.55;
+  color: var(--ink-300);
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.6rem;
+  margin-block-start: 0.3rem;
+}
+
+.hero__hint {
+  font-size: var(--fs-small);
+  color: var(--anvil-text-muted);
+}
+
+.hero__facts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.2rem 1rem;
+  font-size: var(--fs-small);
+  color: var(--anvil-text-muted);
+}
+
+.hero__facts li + li::before {
+  content: "\00b7"; /* · */
+  margin-inline-end: 1rem;
+  color: var(--ink-500);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero__intro > * {
+    animation: rise 300ms ease-out both;
+  }
+
+  .hero__intro > :nth-child(2) { animation-delay: 100ms; }
+  .hero__intro > :nth-child(3) { animation-delay: 200ms; }
+  .hero__intro > :nth-child(4) { animation-delay: 300ms; }
+  .hero__intro > :nth-child(5) { animation-delay: 400ms; }
+  .hero__intro > :nth-child(6) { animation-delay: 500ms; }
+  .hero__intro > :nth-child(7) { animation-delay: 600ms; }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      filter: blur(4px);
+      translate: 0 12px;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Terminal replay (always dark)
+ * ------------------------------------------------------------------------ */
+.stage {
+  margin-block-start: clamp(2rem, 5vw, 3.4rem);
+}
+
+.stage__head {
+  display: grid;
+  gap: 0.4rem;
+  max-inline-size: 36rem;
+  margin: 0 auto 1.2rem;
+  text-align: center;
+}
+
+.stage__title {
+  font-size: 1.1rem;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+}
+
+.stage__sub {
+  max-inline-size: 34em;
+  margin-inline: auto;
+  font-size: var(--fs-small);
+  color: var(--anvil-text-muted);
+}
+
+.term {
+  --term-bg: var(--ink-900);
+  --term-chrome: var(--ink-850);
+  --term-line: var(--ink-800);
+
+  border: 1px solid var(--term-line);
+  border-radius: var(--anvil-radius-lg);
+  background: var(--term-bg);
+  box-shadow:
+    0 0 0 1px rgb(65 207 203 / 0.06),
+    0 1.2rem 3.5rem rgb(0 0 0 / 0.55),
+    0 0 6rem rgb(65 207 203 / 0.07);
+  overflow: hidden;
+}
+
+.term__chrome {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.8rem;
+  padding: 0.5rem 0.7rem;
+  border-block-end: 1px solid var(--term-line);
+  background: var(--term-chrome);
+}
+
+.term__dots {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.term__dots i {
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-radius: 50%;
+  background: var(--ink-700);
+}
+
+.term__path {
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  color: var(--ink-400);
+}
+
+.term__now {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1rem 0.6rem;
+  flex: 1 1 12rem;
+  min-inline-size: 0;
+  font-size: var(--fs-small);
+  line-height: 1.35;
+}
+
+.term__count {
+  flex: none;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--teal-300);
+}
+
+.term__caption {
+  color: var(--ink-200);
+}
+
+.term__controls {
+  display: flex;
+  gap: 0.3rem;
+  margin-inline-start: auto;
+}
+
+.term__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-inline-size: 2rem;
+  min-block-size: 2rem; /* 40px */
+  padding: 0 0.55rem;
+  border: 1px solid var(--ink-500);
+  border-radius: var(--anvil-radius-sm);
+  background: transparent;
+  color: var(--ink-100);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    border-color 150ms ease-out;
+}
+
+.term__btn[data-term-toggle] {
+  min-inline-size: 4.6rem;
+}
+
+/* The class sets display, which would otherwise beat the hidden attribute. */
+.term__btn[hidden] {
+  display: none;
+}
+
+/* Previous / next at either end stay focusable (aria-disabled), so focus is
+   not thrown back to the top of the page when the last step is reached. */
+.term__btn:disabled,
+.term__btn[aria-disabled="true"] {
+  border-color: var(--ink-700);
+  color: var(--ink-500);
+  cursor: default;
+}
+
+@media (hover: hover) {
+  .term__btn:not(:disabled, [aria-disabled="true"]):hover {
+    border-color: var(--teal-300);
+    background: rgb(65 207 203 / 0.1);
+  }
+}
+
+.term__btn svg {
+  inline-size: 0.8rem;
+  block-size: 0.8rem;
+  flex: none;
+}
+
+.term__icon-pause,
+.term.is-playing .term__icon-play {
+  display: none;
+}
+
+.term.is-playing .term__icon-pause {
+  display: block;
+}
+
+.term__body {
+  display: grid;
+}
+
+/* Step list: a rail beside the screen on wide viewports. Below that the
+   current step is named in the bar above and the buttons move between steps. */
+.term__steps {
+  display: none;
+}
+
+@media (min-width: 60em) {
+  .term__body {
+    grid-template-columns: 15rem minmax(0, 1fr);
+  }
+
+  .term__steps {
+    display: grid;
+    align-content: start;
+    gap: 0.2rem;
+    padding: 0.5rem;
+    border-inline-end: 1px solid var(--term-line);
+    background: var(--ink-950);
+  }
+
+  .term__now {
+    display: none;
+  }
+}
+
+/* An act is a chapter of the session. Only the act holding the current step
+   shows its steps, so the rail never outgrows the screen beside it. */
+.term__act-btn {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  inline-size: 100%;
+  padding: 0.45rem 0.5rem;
+  border: 0;
+  border-radius: var(--anvil-radius-sm);
+  background: transparent;
+  color: var(--ink-300);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.term__act-name {
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.term__act-meta {
+  font-size: var(--fs-label);
+  color: var(--ink-400);
+}
+
+.term__act.is-open .term__act-btn {
+  color: #ffffff;
+}
+
+.term__act.is-open .term__act-name {
+  color: var(--teal-300);
+}
+
+/* A finished act says so with a check mark, not only with colour. */
+.term__act.is-done .term__act-meta::after {
+  content: " \2713";
+  color: var(--teal-400);
+}
+
+.term__act-steps {
+  display: none;
+}
+
+/* An act that holds keyboard focus stays open while playback moves on. */
+.term__act.is-open .term__act-steps,
+.term__act:focus-within .term__act-steps {
+  display: grid;
+  gap: 0.1rem;
+  padding-block-end: 0.3rem;
+}
+
+@media (hover: hover) {
+  .term__act-btn:hover {
+    background: rgb(185 190 200 / 0.07);
+    color: var(--ink-100);
+  }
+}
+
+.term__step-btn {
+  display: grid;
+  grid-template-columns: 1.4rem minmax(0, 1fr);
+  gap: 0.4rem;
+  align-items: baseline;
+  inline-size: 100%;
+  padding: 0.35rem 0.5rem;
+  border: 0;
+  border-radius: var(--anvil-radius-sm);
+  background: transparent;
+  color: var(--ink-400);
+  font: inherit;
+  font-size: var(--fs-small);
+  line-height: 1.35;
+  text-align: start;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.term__step-num {
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-400);
+}
+
+.term__step.is-done .term__step-btn {
+  color: var(--ink-300);
+}
+
+.term__step.is-done .term__step-num {
+  color: var(--teal-400);
+}
+
+/* The current step is marked by weight and a bar as well as colour. */
+.term__step.is-current .term__step-btn {
+  background: rgb(65 207 203 / 0.1);
+  box-shadow: inset 2px 0 0 var(--teal-400);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.term__step.is-current .term__step-num {
+  color: var(--teal-300);
+}
+
+@media (hover: hover) {
+  .term__step-btn:hover {
+    background: rgb(185 190 200 / 0.07);
+    color: var(--ink-100);
+  }
+}
+
+.term__screen {
+  position: relative;
+  block-size: clamp(19rem, 62vh, 25rem);
+  padding: 0.8rem 0.9rem 1.2rem;
+  overflow: auto;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-term);
+  line-height: 1.55;
+  color: var(--ink-300);
+  scrollbar-color: var(--ink-700) transparent;
+  tab-size: 4;
+}
+
+.term__entry + .term__entry {
+  margin-block-start: 1rem;
+}
+
+.term__comment {
+  color: var(--ink-400);
+}
+
+.term__cmd {
+  color: #ffffff;
+  font-weight: 500;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.term__prompt {
+  color: var(--teal-300);
+  user-select: none;
+}
+
+.term__out {
+  margin-block-start: 0.2rem;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink-300);
+}
+
+.term__out.is-fail,
+.term__out .is-bad {
+  color: var(--bad-300);
+}
+
+.term__out .is-ok {
+  color: var(--ok-300);
+}
+
+/* Ember is reserved for one thing on this page: proof. */
+.term__out .is-proof {
+  color: var(--ember-300);
+}
+
+.term__more {
+  color: var(--ink-400);
+}
+
+.term__exit {
+  display: inline-block;
+  margin-block-start: 0.35rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid currentColor;
+  border-radius: 0.2rem;
+  color: var(--bad-300);
+  font-size: var(--fs-label);
+  font-weight: 500;
+}
+
+.term__cursor {
+  display: inline-block;
+  inline-size: 0.55em;
+  block-size: 1.1em;
+  margin-inline-start: 1px;
+  vertical-align: text-bottom;
+  background: var(--teal-300);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .term__cursor {
+    animation: blink 1s steps(1) infinite;
+  }
+
+  @keyframes blink {
+    50% {
+      opacity: 0;
+    }
+  }
+}
+
+.term__note {
+  font-family: var(--md-text-font-family, "IBM Plex Sans", sans-serif);
+  font-size: var(--fs-body);
+  color: var(--ink-200);
+}
+
+.term__foot {
+  max-inline-size: 34em;
+  margin-inline: auto;
+  margin-block-start: 0.8rem;
+  font-size: var(--fs-small);
+  color: var(--anvil-text-muted);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------------
+ * Cards and grids
+ * ------------------------------------------------------------------------ */
+.grid {
+  display: grid;
+  gap: 0.8rem;
+}
+
+@media (min-width: 40em) {
+  .grid--2,
+  .grid--4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .grid--3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 64em) {
+  .grid--4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.card {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 0.4rem;
+  padding: 1.1rem;
+  border: 1px solid var(--anvil-border);
+  border-radius: var(--anvil-radius-md);
+  background: var(--anvil-surface);
+}
+
+.card__title {
+  font-size: var(--fs-h3);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.card__text {
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  color: var(--anvil-text-muted);
+}
+
+.card__label {
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--anvil-accent-text);
+}
+
+/* A card that is one link: the title link's hit area stretches over the card. */
+.card--link .card__title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.card--link .card__title a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.card--link .card__title a:focus-visible {
+  outline: none;
+}
+
+.card--link .card__title a:focus-visible::after {
+  outline: 2px solid var(--anvil-focus);
+  outline-offset: 2px;
+}
+
+.card--link {
+  transition:
+    border-color 150ms ease-out,
+    background-color 150ms ease-out;
+}
+
+.card--link .card__title::after {
+  content: "\2192"; /* → */
+  margin-inline-start: 0.35em;
+  color: var(--anvil-accent-text);
+}
+
+@media (hover: hover) {
+  .card--link:hover {
+    border-color: var(--anvil-accent-text);
+    background: var(--anvil-accent-wash);
+  }
+}
+
+/* Plain point list: a title and a sentence, grouped by space. */
+.points {
+  display: grid;
+  gap: 1.1rem;
+}
+
+.points h3 {
+  font-size: var(--fs-h3);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.points p {
+  max-inline-size: 32em;
+  margin-block-start: 0.2rem;
+  color: var(--anvil-text-muted);
+}
+
+.points--ruled > li {
+  padding-inline-start: 0.9rem;
+  border-inline-start: 2px solid var(--anvil-border-strong);
+}
+
+/* Status tag: the words carry the status; colour only reinforces it. */
+.tag {
+  display: inline-block;
+  justify-self: start;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--anvil-border-strong);
+  border-radius: 0.2rem;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--anvil-text-muted);
+}
+
+.tag--live {
+  border-color: var(--anvil-accent-text);
+  color: var(--anvil-accent-text);
+}
+
+.tag--early {
+  border-color: var(--anvil-proof-text);
+  color: var(--anvil-proof-text);
+}
+
+/* Verbatim CLI output shown as a figure. */
+.sample {
+  border: 1px solid var(--ink-800);
+  border-radius: var(--anvil-radius-md);
+  background: var(--ink-900);
+  overflow: hidden;
+}
+
+.sample__cap {
+  padding: 0.45rem 0.8rem;
+  border-block-end: 1px solid var(--ink-800);
+  background: var(--ink-850);
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  color: var(--ink-400);
+}
+
+.sample pre {
+  padding: 0.8rem;
+  overflow-x: auto;
+  font-size: var(--fs-term);
+  line-height: 1.55;
+  color: var(--ink-300);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sample .c-cmd {
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.sample .c-prompt {
+  color: var(--teal-300);
+  user-select: none;
+}
+
+.sample .c-bad {
+  color: var(--bad-300);
+}
+
+.sample .c-ok {
+  color: var(--ok-300);
+}
+
+/* Ember marks proof here exactly as it does in the replay above. */
+.sample .c-proof {
+  color: var(--ember-300);
+}
+
+/* ---------------------------------------------------------------------------
+ * Why: three failure modes, then the four pillars as an index
+ * ------------------------------------------------------------------------ */
+.pillars {
+  margin-block-start: clamp(2rem, 5vw, 3rem);
+  padding-block-start: clamp(2rem, 5vw, 3rem);
+  border-block-start: 1px solid var(--anvil-border);
+}
+
+.pillars__lead {
+  max-inline-size: 34rem;
+  margin-block-end: 1.2rem;
+  font-size: var(--fs-lede);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+}
+
+/* ---------------------------------------------------------------------------
+ * The loop
+ * ------------------------------------------------------------------------ */
+.loop {
+  display: grid;
+  gap: 1.2rem;
+  counter-reset: loop;
+}
+
+.loop > li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: 0.2rem 0.6rem;
+  counter-increment: loop;
+}
+
+.loop > li::before {
+  content: counter(loop, decimal-leading-zero);
+  grid-row: span 2;
+  padding-block-start: 0.15rem;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--anvil-accent-text);
+}
+
+.loop h3 {
+  font-size: var(--fs-h3);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.loop p {
+  grid-column: 2;
+  max-inline-size: 32em;
+  color: var(--anvil-text-muted);
+}
+
+.art {
+  border-radius: var(--anvil-radius-lg);
+  overflow: hidden;
+}
+
+.art img {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+  border-radius: inherit;
+  outline: 1px solid rgb(255 255 255 / 0.1);
+  outline-offset: -1px;
+}
+
+[data-md-color-scheme="default"] .band:not(.anvil-ink) .art img {
+  outline-color: rgb(0 0 0 / 0.1);
+}
+
+/* ---------------------------------------------------------------------------
+ * Ledger figure: harnesses, two doors, one record
+ * ------------------------------------------------------------------------ */
+.flow {
+  display: grid;
+  gap: 0;
+  padding: 1.1rem;
+  border: 1px solid var(--anvil-border);
+  border-radius: var(--anvil-radius-lg);
+  background: var(--anvil-surface);
+  font-size: var(--fs-small);
+}
+
+.flow__label {
+  margin-block-end: 0.5rem;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--anvil-text-muted);
+}
+
+/* Each row hangs off a spine: a node, then a line down to the next node.
+   The list order already says what flows where; the spine only draws it. */
+.flow__row {
+  position: relative;
+  padding-inline-start: 1.4rem;
+  padding-block-end: 1.3rem;
+}
+
+.flow__row:last-child {
+  padding-block-end: 0;
+}
+
+.flow__row::before {
+  content: "";
+  position: absolute;
+  inset-block-start: 0.18rem;
+  inset-inline-start: 0;
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border: 2px solid var(--anvil-accent-text);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+
+.flow__row:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  inset-block: 0.85rem 0;
+  inset-inline-start: calc(0.25rem - 0.5px);
+  inline-size: 1px;
+  background: var(--anvil-border-strong);
+}
+
+/* Static name tags. No hover and no pointer: they are labels, not controls. */
+.names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.names li {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--anvil-border);
+  border-radius: 0.2rem;
+  background: var(--anvil-surface-sunken);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.names--lg li {
+  padding: 0.2rem 0.6rem;
+  background: var(--anvil-surface);
+  font-size: var(--fs-body);
+  font-weight: 500;
+}
+
+.flow__doors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.flow__door {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--anvil-accent-text);
+  border-radius: var(--anvil-radius-sm);
+  background: var(--anvil-accent-wash);
+}
+
+.flow__door code {
+  font-weight: 600;
+  color: var(--anvil-accent-text);
+}
+
+.flow__door span {
+  display: block;
+  color: var(--anvil-text-muted);
+}
+
+.flow__path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-small);
+  color: var(--anvil-text);
+}
+
+.flow__path li:not(:last-child)::after {
+  content: "\2192";
+  margin-inline: 0.5rem;
+  color: var(--anvil-text-muted);
+}
+
+.flow__store {
+  display: grid;
+  gap: 0.5rem;
+}
+
+@media (min-width: 34em) {
+  .flow__store {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+
+.flow__file {
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--anvil-border-strong);
+  border-radius: var(--anvil-radius-sm);
+  background: var(--anvil-surface-sunken);
+}
+
+.flow__file strong {
+  display: block;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-weight: 600;
+}
+
+.flow__file span {
+  color: var(--anvil-text-muted);
+}
+
+/* ---------------------------------------------------------------------------
+ * Replay: guards and measurements
+ * ------------------------------------------------------------------------ */
+.guards {
+  counter-reset: guard;
+}
+
+.guards > li {
+  counter-increment: guard;
+}
+
+.guards .card__label::before {
+  content: counter(guard, decimal-leading-zero);
+}
+
+.stats {
+  display: grid;
+  gap: 1.2rem 2rem;
+  margin-block-start: clamp(1.6rem, 4vw, 2.4rem);
+  padding-block-start: clamp(1.6rem, 4vw, 2.4rem);
+  border-block-start: 1px solid var(--anvil-border);
+}
+
+@media (min-width: 46em) {
+  .stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.stat__value {
+  font-size: clamp(1.5rem, 1.2rem + 1.2vw, 2rem);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.stat__label {
+  margin-block-start: 0.3rem;
+  font-weight: 600;
+}
+
+.stat__note {
+  margin-block-start: 0.2rem;
+  font-size: var(--fs-small);
+  color: var(--anvil-text-muted);
+}
+
+.aside {
+  max-inline-size: 34em; /* em, so the cap tracks this block's smaller type */
+  margin-block-start: 1.4rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--anvil-border);
+  border-inline-start: 2px solid var(--anvil-border-strong);
+  border-radius: var(--anvil-radius-sm);
+  background: var(--anvil-surface);
+  font-size: var(--fs-small);
+  color: var(--anvil-text-muted);
+}
+
+.aside strong {
+  color: var(--anvil-text);
+}
+
+/* ---------------------------------------------------------------------------
+ * Proof
+ * ------------------------------------------------------------------------ */
+.proof {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.proof::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(46rem 26rem at 82% 8rem, rgb(248 172 61 / 0.13), transparent 70%),
+    radial-gradient(40rem 22rem at 6% 100%, rgb(65 207 203 / 0.07), transparent 70%);
+}
+
+.proof .title {
+  font-size: clamp(1.7rem, 1.2rem + 2.2vw, 2.7rem);
+  letter-spacing: -0.025em;
+  line-height: 1.08;
+}
+
+.proof .card__label {
+  color: var(--anvil-proof-text);
+}
+
+.proof__grid {
+  margin-block-start: clamp(1.8rem, 5vw, 3rem);
+}
+
+.terms {
+  display: grid;
+  gap: 1.6rem;
+  margin-block-start: clamp(1.8rem, 5vw, 3rem);
+}
+
+@media (min-width: 52em) {
+  .terms {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.terms h3 {
+  margin-block-end: 0.6rem;
+  font-size: var(--fs-h3);
+  letter-spacing: -0.01em;
+}
+
+.terms ul {
+  display: grid;
+  gap: 0.5rem;
+  color: var(--anvil-text-muted);
+}
+
+.terms li {
+  position: relative;
+  padding-inline-start: 1.4rem;
+}
+
+/* The marker is a word-level cue (a check or a dash), not colour alone. */
+.terms li::before {
+  position: absolute;
+  inset-inline-start: 0;
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-weight: 600;
+}
+
+.terms--does li::before {
+  content: "\2713"; /* ✓ */
+  color: var(--anvil-proof-text);
+}
+
+.terms--doesnt li::before {
+  content: "\2013"; /* – */
+  color: var(--anvil-text-muted);
+}
+
+/* ---------------------------------------------------------------------------
+ * Journeys
+ * ------------------------------------------------------------------------ */
+.lanes {
+  display: grid;
+  gap: 2rem 1.2rem;
+}
+
+@media (min-width: 56em) {
+  .lanes {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.lane__title {
+  margin-block-end: 0.7rem;
+  padding-block-end: 0.5rem;
+  border-block-end: 1px solid var(--anvil-border-strong);
+  font-family: var(--md-code-font-family, "IBM Plex Mono", ui-monospace, monospace);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--anvil-text-muted);
+}
+
+.lane .grid {
+  gap: 0.5rem;
+}
+
+.lane .card {
+  padding: 0.85rem 0.9rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Harness tiers
+ * ------------------------------------------------------------------------ */
+.tiers {
+  display: grid;
+  border-block-start: 1px solid var(--anvil-border);
+}
+
+.tier {
+  display: grid;
+  gap: 0.3rem 1.6rem;
+  padding-block: 1rem;
+  border-block-end: 1px solid var(--anvil-border);
+}
+
+@media (min-width: 48em) {
+  .tier {
+    grid-template-columns: 15rem minmax(0, 1fr);
+    align-items: baseline;
+  }
+}
+
+.tier h3 {
+  font-size: var(--fs-h3);
+  letter-spacing: -0.01em;
+}
+
+.tier__how {
+  font-size: var(--fs-small);
+  color: var(--anvil-text-muted);
+}
+
+/* ---------------------------------------------------------------------------
+ * Thesis
+ * ------------------------------------------------------------------------ */
+.thesis {
+  max-inline-size: 40rem;
+  margin-block-end: clamp(2rem, 5vw, 3rem);
+  font-size: clamp(1.2rem, 0.95rem + 1.1vw, 1.7rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.thesis em {
+  font-style: normal;
+  color: var(--anvil-accent-text);
+}
+
+/* ---------------------------------------------------------------------------
+ * Closing call to action
+ * ------------------------------------------------------------------------ */
+.close {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  text-align: center;
+}
+
+.close::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(50rem 20rem at 50% 110%, rgb(65 207 203 / 0.16), transparent 70%);
+}
+
+.close__inner {
+  display: grid;
+  justify-items: center;
+  gap: 1.1rem;
+}
+
+.close .lede {
+  max-inline-size: 30rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Narrow viewports
+ * ------------------------------------------------------------------------ */
+@media (max-width: 30em) {
+  .anvil-home {
+    --fs-term: 0.6rem; /* 12px keeps ~46 columns at 320px */
+  }
+
+  .hero__facts li + li::before {
+    display: none;
+  }
+
+  .hero__facts {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .term__screen {
+    padding-inline: 0.6rem;
+  }
+
+  .term__path,
+  .term__dots {
+    display: none;
+  }
+
+  /* The command wraps rather than scrolling out of sight, and the copy button
+     keeps its name for assistive tech while showing only its icon. */
+  .install {
+    display: flex;
+    inline-size: 100%;
+  }
+
+  .install__cmd {
+    flex: 1 1 auto;
+    padding-inline: 0.6rem;
+    overflow-x: visible;
+    font-size: 0.6rem; /* 12px: the whole command fits one line at 320px */
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .install__copy {
+    min-inline-size: 2.4rem;
+  }
+
+  .install__label {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .flow__doors {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (forced-colors: active) {
+  .term__step.is-current .term__step-btn {
+    outline: 2px solid Highlight;
+  }
+
+  .term__cursor {
+    background: CanvasText;
+  }
+}
