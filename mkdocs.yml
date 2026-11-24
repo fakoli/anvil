@@ -13,24 +13,41 @@ docs_dir: docs
 
 theme:
   name: material
-  icon:
-    logo: material/anvil
+  # Template overrides: overrides/main.html (fonts, social meta) and
+  # overrides/home.html (the landing page shell used by docs/index.md).
+  custom_dir: overrides
+  logo: img/logo.svg
+  favicon: img/favicon.png
+  # Fonts (IBM Plex Sans / Mono) are loaded in overrides/main.html so the
+  # exact weights are under our control; the stack lives in stylesheets/anvil.css.
+  font: false
+  # "custom" hands the palette to docs/stylesheets/anvil.css, which defines
+  # every colour token for both schemes.
+  # Three states: follow the system, then explicit light, then explicit dark.
+  # Without the first entry the site stops following the OS after one visit.
   palette:
+    - media: "(prefers-color-scheme)"
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: black
-      accent: deep orange
+      primary: custom
+      accent: custom
       toggle:
-        icon: material/brightness-7
+        icon: material/weather-sunny
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: black
-      accent: deep orange
+      primary: custom
+      accent: custom
       toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+        icon: material/weather-night
+        name: Switch to system preference
   features:
+    - navigation.tabs
     - navigation.sections
     - navigation.top
     - navigation.footer
@@ -39,9 +56,34 @@ theme:
     - content.code.copy
     - content.action.edit
 
+extra_css:
+  - stylesheets/anvil.css
+
+# Keyboard access to the mobile drawer and search toggles (the theme ships
+# them as unfocusable <label> elements), and aria-current on the active page.
+extra_javascript:
+  - javascripts/a11y.js
+
+# Search scope: keeps archived plans, research and backlogs from outranking
+# the user guides. See the module docstring.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fakoli/anvil
+      name: Anvil on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/anvil-state/
+      name: anvil-state on PyPI
+
+copyright: MIT licensed · built in the open by Fakoli and contributors
+
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
   - toc:
       permalink: true
   - tables
@@ -102,32 +144,40 @@ not_in_nav: |
   plans/2026-07-07-retro-opps-prd.md
   plans/2026-10-08-issue-246-long-running-delivery.md
 
+# Top-level entries render as tabs (navigation.tabs); keep the labels short.
+# Guides are grouped by the job the reader is doing, not alphabetically.
 nav:
   - Home: index.md
-  - Getting started:
-      - First project: how-to/getting-started.md
+  - Get started:
+      - Getting started: how-to/getting-started.md
       - Where state lives: how-to/state-location.md
       - Authoring a PRD: how-to/authoring-a-prd.md
       - PRD template & schema: prd-template.md
       - Glossary: glossary.md
       - FAQ: faq.md
-  - How-to guides:
-      - Web interface: how-to/web-interface.md
-      - Claiming & shipping a task: how-to/claiming-and-shipping-a-task.md
-      - Attesting external progress: how-to/attesting-external-progress.md
-      - Driving the anvil loop: how-to/drive-the-anvil-loop.md
-      - Long-running delivery: how-to/long-running-delivery.md
-      - Verification profiles: how-to/verification-profiles.md
-      - Recorded attempt views: how-to/attempt-views.md
-      - Coordinating a milestone bundle: how-to/coordinating-a-bundle.md
-      - Concurrent execution journeys: how-to/concurrent-execution-journeys.md
-      - Execute in the current or local-model harness: how-to/execute-in-your-harness.md
-      - Using anvil on any harness: how-to/using-anvil-on-any-harness.md
-      - Syncing with GitHub: how-to/syncing-with-github.md
-      - Optional Jev advice: how-to/optional-jev.md
+  - Guides:
+      - The core loop:
+          - Claiming & shipping a task: how-to/claiming-and-shipping-a-task.md
+          - Driving the anvil loop: how-to/drive-the-anvil-loop.md
+          - Long-running delivery: how-to/long-running-delivery.md
+      - Evidence & proof:
+          - Verification profiles: how-to/verification-profiles.md
+          - Recorded attempt views: how-to/attempt-views.md
+          - Attesting external progress: how-to/attesting-external-progress.md
+      - Coordinating agents:
+          - Coordinating a milestone bundle: how-to/coordinating-a-bundle.md
+          - Concurrent execution journeys: how-to/concurrent-execution-journeys.md
+      - Harnesses:
+          - Using anvil on any harness: how-to/using-anvil-on-any-harness.md
+          - Execute in the current or local-model harness: how-to/execute-in-your-harness.md
+          - Run a task with a configured harness: how-to/harness-execution.md
+      - Interfaces & sync:
+          - Web interface: how-to/web-interface.md
+          - Syncing with GitHub: how-to/syncing-with-github.md
+          - Optional Jev advice: how-to/optional-jev.md
   - Reference:
       - CLI: cli-reference.md
-      - MCP server (38 tools): mcp.md
+      - MCP server: mcp.md
       - Provider read contracts: contracts/provider-reads-v1.md
       - Agents: agents-reference.md
       - Skills: skills-reference.md
@@ -139,10 +189,17 @@ nav:
       - GitHub sync: github-sync.md
       - Migrations: migrations.md
       - Codex harness: reference/codex.md
-  - Architecture & design:
+  - Architecture:
       - Architecture: architecture.md
       - Design rationale: design.md
-  - Development (contributors):
+      - Validation notes:
+          - Ledger latency: design/ledger-latency-validation.md
+          - Snapshot capture latency: design/snapshot-capture-latency.md
+          - Execution and proof qualification: design/execution-scale-validation.md
+          - Concurrency source findings: design/concurrency-source-findings.md
+          - Concurrency and approval research: design/concurrency-and-approval-research.md
+          - Spec Kit comparison: design/spec-kit-concurrency-comparison.md
+  - Contribute:
       - Contributing: contributing.md
       - Sync providers (contributing): sync-providers.md
       - Backlog: backlog/anvil-backlog.md
@@ -179,5 +236,4 @@ nav:
               - 2026-06-22 skill init loop: postmortems/2026-06-22-skill-init-loop.md
           - Findings:
               - 2026-07-05 OpenClaw weak runner: findings/2026-07-05-openclaw-weak-runner.md
-  - Project:
-      - Roadmap: roadmap.md
+  - Roadmap: roadmap.md

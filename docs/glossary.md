@@ -54,6 +54,14 @@ call by any actor reaps it — the claim flips to `stale` and the task returns
 to `ready`. See
 [Claiming and shipping a task — renew the lease](how-to/claiming-and-shipping-a-task.md).
 
+### ledger
+
+The landing page's name for anvil's state layer as a whole: the append-only
+event log (`events.jsonl`, the authority) together with the SQLite database
+projected from it (`state.db`). Where only the log is meant, the docs say
+"event log". See [Architecture](architecture.md) and
+[Where state lives](how-to/state-location.md).
+
 ### loop (the anvil loop)
 
 The pattern of repeatedly running `anvil next -q` to pick the next

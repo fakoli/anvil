@@ -1,0 +1,422 @@
+/*
+ * Anvil — site-wide design tokens and Material for MkDocs theme mapping.
+ *
+ * Loaded on every page (mkdocs.yml › extra_css). The landing page adds
+ * stylesheets/home.css on top of this file.
+ *
+ * COLOUR SYSTEM
+ * Three ramps, built in OKLCH (constant hue per ramp, chroma peaking mid-ramp)
+ * and declared here as the sRGB hex each step resolves to. Every step is inside
+ * the sRGB gamut. To regenerate a step, convert the OKLCH value in the comment.
+ *
+ *   ink    neutral, tinted toward the logo's indigo        hue 265
+ *   teal   the accent: links, primary actions, focus       hue 190–212
+ *   ember  reserved for one meaning — proof                hue 52–85
+ *
+ * Components never read a primitive (--ink-900). They read a semantic token
+ * (--anvil-surface), which each colour scheme points at a primitive.
+ *
+ * Measured WCAG contrast for the text pairs these tokens produce is recorded
+ * beside each scheme block. Re-measure when a value changes.
+ */
+
+:root {
+  /* ink — oklch(L C 265) */
+  --ink-950: #060a13; /* 0.145 0.022 */
+  --ink-900: #0d121e; /* 0.185 0.026 */
+  --ink-850: #151b2a; /* 0.225 0.030 */
+  --ink-800: #202738; /* 0.275 0.032 */
+  --ink-700: #343d4f; /* 0.360 0.034 */
+  --ink-600: #4f586a; /* 0.460 0.032 */
+  --ink-500: #6c7585; /* 0.560 0.028 */
+  --ink-400: #989fad; /* 0.700 0.022 */
+  --ink-300: #b9bec8; /* 0.800 0.016 */
+  --ink-200: #d5d9e1; /* 0.885 0.012 */
+  --ink-150: #e3e6ec; /* 0.925 0.009 */
+  --ink-100: #eef0f5; /* 0.955 0.007 */
+  --ink-50: #f7f8fb; /*  0.980 0.004 */
+
+  /* teal — oklch(L C H) */
+  --teal-200: #a3efe9; /* 0.90 0.075 190 */
+  --teal-300: #72e4dd; /* 0.85 0.105 190 */
+  --teal-400: #41cfcb; /* 0.78 0.118 192 */
+  --teal-500: #21adae; /* 0.68 0.110 196 */
+  --teal-600: #0b888d; /* 0.57 0.095 200 */
+  --teal-700: #01676f; /* 0.47 0.080 204 */
+  --teal-800: #014c54; /* 0.38 0.065 208 */
+  --teal-900: #01323a; /* 0.29 0.050 212 */
+
+  /* ember — oklch(L C H) */
+  --ember-200: #fbdea0; /* 0.91 0.085 85 */
+  --ember-300: #fcc86c; /* 0.86 0.125 80 */
+  --ember-400: #f8ac3d; /* 0.80 0.150 72 */
+  --ember-500: #ea8a18; /* 0.72 0.160 62 */
+  --ember-600: #c0640c; /* 0.60 0.145 55 */
+  --ember-700: #974c12; /* 0.50 0.120 52 */
+
+  /* terminal status — always paired with a symbol or label, never colour alone */
+  --ok-300: #76e699; /*  0.84 0.15 152 */
+  --ok-700: #0a6d37; /*  0.47 0.12 152 */
+  --bad-300: #fe8a88; /* 0.76 0.14 22 */
+  --bad-700: #b02a2d; /* 0.50 0.17 25 */
+
+  /* type */
+  --md-text-font: "IBM Plex Sans";
+  --md-code-font: "IBM Plex Mono";
+
+  /* shape and motion */
+  --anvil-radius-sm: 0.3rem; /*  6px controls, chips */
+  --anvil-radius-md: 0.5rem; /* 10px cards */
+  --anvil-radius-lg: 0.8rem; /* 16px stages, large panels */
+  --anvil-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ---------------------------------------------------------------------------
+ * Light scheme
+ * text 19.8:1 · muted 7.1:1 · link 6.6:1 · proof 6.2:1   (on #ffffff)
+ * text 18.6:1 · muted 6.7:1 · link 6.2:1 · proof 5.8:1   (on --ink-50)
+ * control border 4.6:1 on #ffffff (3:1 required)
+ * ------------------------------------------------------------------------ */
+[data-md-color-scheme="default"] {
+  --anvil-bg: #ffffff;
+  --anvil-bg-alt: var(--ink-50);
+  --anvil-surface: #ffffff;
+  --anvil-surface-sunken: var(--ink-50);
+  --anvil-border: var(--ink-150);
+  --anvil-border-strong: var(--ink-300);
+  --anvil-control-border: var(--ink-500);
+  --anvil-text: var(--ink-950);
+  --anvil-text-muted: var(--ink-600);
+  --anvil-accent-text: var(--teal-700);
+  --anvil-accent-solid: var(--teal-700);
+  --anvil-accent-solid-hover: var(--teal-800);
+  --anvil-on-accent: #ffffff;
+  --anvil-accent-wash: rgb(1 103 111 / 0.08);
+  --anvil-proof-text: var(--ember-700);
+  --anvil-proof-wash: rgb(151 76 18 / 0.08);
+  --anvil-ok-text: var(--ok-700);
+  --anvil-bad-text: var(--bad-700);
+  --anvil-focus: var(--teal-700);
+  --anvil-shadow: 0 1px 2px rgb(6 10 19 / 0.06), 0 4px 16px rgb(6 10 19 / 0.06);
+
+  /* Material mapping */
+  --md-primary-fg-color: var(--ink-950);
+  --md-primary-fg-color--light: var(--ink-800);
+  --md-primary-fg-color--dark: var(--ink-950);
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: var(--ink-300);
+  --md-accent-fg-color: var(--teal-700);
+  --md-accent-fg-color--transparent: rgb(1 103 111 / 0.1);
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: rgb(255 255 255 / 0.7);
+  --md-default-bg-color: #ffffff;
+  --md-default-fg-color: var(--ink-900);
+  --md-default-fg-color--light: var(--ink-600);
+  --md-default-fg-color--lighter: var(--ink-400);
+  --md-default-fg-color--lightest: var(--ink-150);
+  --md-typeset-a-color: var(--teal-700);
+  --md-code-bg-color: var(--ink-50);
+  --md-code-fg-color: var(--ink-800);
+  --md-footer-bg-color: var(--ink-900);
+  --md-footer-bg-color--dark: var(--ink-950);
+}
+
+/* ---------------------------------------------------------------------------
+ * Dark scheme
+ * text 16.4:1 · docs body 13.2:1 · muted 7.0:1 · link 12.3:1 · proof 12.1:1
+ *                                                         (on --ink-900)
+ * text 15.0:1 · muted 6.4:1 · link 11.3:1                 (on --ink-850)
+ * control border 4.0:1 on --ink-900 (3:1 required)
+ * ------------------------------------------------------------------------ */
+[data-md-color-scheme="slate"] {
+  --anvil-bg: var(--ink-900);
+  --anvil-bg-alt: var(--ink-950);
+  --anvil-surface: var(--ink-850);
+  --anvil-surface-sunken: var(--ink-950);
+  --anvil-border: var(--ink-800);
+  --anvil-border-strong: var(--ink-700);
+  --anvil-control-border: var(--ink-500);
+  --anvil-text: var(--ink-100);
+  --anvil-text-muted: var(--ink-400);
+  --anvil-accent-text: var(--teal-300);
+  --anvil-accent-solid: var(--teal-400);
+  --anvil-accent-solid-hover: var(--teal-300);
+  --anvil-on-accent: var(--ink-950);
+  --anvil-accent-wash: rgb(65 207 203 / 0.1);
+  --anvil-proof-text: var(--ember-300);
+  --anvil-proof-wash: rgb(248 172 61 / 0.1);
+  --anvil-ok-text: var(--ok-300);
+  --anvil-bad-text: var(--bad-300);
+  --anvil-focus: var(--teal-300);
+  --anvil-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.35);
+
+  /* Material mapping */
+  --md-primary-fg-color: var(--ink-950);
+  --md-primary-fg-color--light: var(--ink-800);
+  --md-primary-fg-color--dark: var(--ink-950);
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: var(--ink-300);
+  --md-accent-fg-color: var(--teal-200);
+  --md-accent-fg-color--transparent: rgb(65 207 203 / 0.12);
+  --md-accent-bg-color: var(--ink-950);
+  --md-accent-bg-color--light: rgb(6 10 19 / 0.7);
+  --md-default-bg-color: var(--ink-900);
+  --md-default-fg-color: var(--ink-200);
+  --md-default-fg-color--light: var(--ink-400);
+  --md-default-fg-color--lighter: var(--ink-500);
+  --md-default-fg-color--lightest: var(--ink-800);
+  --md-typeset-a-color: var(--teal-300);
+  --md-code-bg-color: var(--ink-850);
+  --md-code-fg-color: var(--ink-200);
+  --md-footer-bg-color: var(--ink-950);
+  --md-footer-bg-color--dark: var(--ink-950);
+}
+
+/* ---------------------------------------------------------------------------
+ * Docs chrome and reading experience
+ * ------------------------------------------------------------------------ */
+
+/* The header and tab bar are ink in both schemes; a hairline separates them
+   from a dark page, where the fill alone would not. */
+.md-header,
+.md-tabs {
+  border-block-end: 1px solid var(--ink-800);
+}
+
+.md-header {
+  border-block-end-color: transparent;
+}
+
+.md-header--shadow,
+.md-header:not(.md-header--lifted) {
+  border-block-end-color: var(--ink-800);
+}
+
+.md-header__button.md-logo img {
+  block-size: 1.4rem;
+  inline-size: auto;
+}
+
+.md-header__topic:first-child {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Headings: weight and colour carry the hierarchy. Material's defaults use a
+   light (300) weight in a muted colour, which reads as washed out. */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+  color: var(--md-default-fg-color);
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+.md-typeset h1 {
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.md-typeset h2 {
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+}
+
+.md-typeset h3 {
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.md-typeset p,
+.md-typeset li {
+  text-wrap: pretty;
+}
+
+/* Links in running text are underlined: colour alone does not mark a link
+   (WCAG 1.4.1). Navigation, buttons and heading anchors keep their own cues. */
+.md-typeset a:not(.md-button, .headerlink, .md-annotation__index, .footnote-ref, .anvil-plain) {
+  text-decoration-line: underline;
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.18em;
+}
+
+/* Code: a hairline defines the block on a white page, where the fill is subtle. */
+.md-typeset pre > code,
+.md-typeset .highlighttable {
+  border: 1px solid var(--anvil-border);
+  border-radius: var(--anvil-radius-sm);
+}
+
+.md-typeset code {
+  border-radius: 0.2rem;
+  font-variant-ligatures: none;
+}
+
+.md-typeset table:not([class]) {
+  border-radius: var(--anvil-radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.md-typeset table:not([class]) th {
+  font-weight: 600;
+}
+
+/* One focus treatment everywhere: a 2px ring in the accent, offset so it
+   never touches the control's own edge. */
+.md-typeset a:focus-visible,
+.md-nav__link:focus-visible,
+.md-tabs__link:focus-visible,
+.md-header__button:focus-visible,
+.md-source:focus-visible,
+.md-footer__link:focus-visible,
+.md-top:focus-visible {
+  outline: 2px solid var(--anvil-focus);
+  outline-offset: 2px;
+  border-radius: 0.15rem;
+}
+
+/* On the ink chrome the ring is the light teal in both schemes; the light
+   scheme's dark teal measured 3.0:1 there. */
+.md-header .md-header__button:focus-visible,
+.md-header .md-source:focus-visible,
+.md-tabs .md-tabs__link:focus-visible,
+.md-footer .md-footer__link:focus-visible,
+.md-footer-meta a:focus-visible,
+.md-social__link:focus-visible {
+  outline: 2px solid var(--teal-300);
+  outline-offset: 2px;
+  border-radius: 0.15rem;
+}
+
+.md-header .md-option.focus-visible + label,
+.md-header .md-option:focus-visible + label {
+  outline-color: var(--teal-300);
+}
+
+/* The current tab was marked by brightness alone: add weight and a bar. */
+.md-tabs__item--active {
+  box-shadow: inset 0 -2px 0 var(--teal-300);
+}
+
+.md-tabs__item--active .md-tabs__link {
+  font-weight: 600;
+}
+
+/* The inline search field had the header's own colour and no visible extent. */
+@media screen and (min-width: 60em) {
+  .md-search__form {
+    background-color: var(--ink-850);
+  }
+}
+
+/* Anchored headings must not land under the sticky header. */
+html {
+  scroll-padding-block-start: 4.5rem;
+}
+
+.md-copyright {
+  color: var(--ink-400);
+}
+
+.md-copyright__highlight {
+  color: var(--ink-300);
+}
+
+/* ---------------------------------------------------------------------------
+ * Fixes to inherited theme behaviour (found in the 2026-11 interface review)
+ * ------------------------------------------------------------------------ */
+
+/* The closed navigation drawer sits off-screen but its links stayed in the
+   tab order, so keyboard focus vanished below the desktop breakpoint.
+   Hidden while closed; the delayed switch lets the slide-out finish first.
+   javascripts/a11y.js makes the toggle itself operable from the keyboard. */
+@media screen and (max-width: 76.234375em) {
+  .md-sidebar--primary {
+    visibility: hidden;
+    transition:
+      transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+      box-shadow 0.25s,
+      visibility 0s 0.25s;
+  }
+
+  [data-md-toggle="drawer"]:checked ~ .md-container .md-sidebar--primary {
+    visibility: visible;
+    transition:
+      transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+      box-shadow 0.25s,
+      visibility 0s;
+  }
+
+  /* Inside the drawer each nested section is a panel that slides over its
+     parent. A panel that is not open stays out of the tab order... */
+  .md-nav--primary .md-nav__toggle:not(:checked) ~ .md-nav {
+    visibility: hidden;
+  }
+
+  /* ...and so do the entries an open panel covers. (Separate rules, so a
+     browser without :has() still applies the one above.) */
+  .md-nav--primary .md-nav__list:has(> .md-nav__item > .md-nav__toggle:checked) > .md-nav__item:not(:has(> .md-nav__toggle:checked)) {
+    visibility: hidden;
+  }
+
+  .md-nav--primary .md-nav__item:has(> .md-nav__toggle:checked) > .md-nav__link {
+    visibility: hidden;
+  }
+
+  .md-nav--primary:has(> .md-nav__list > .md-nav__item > .md-nav__toggle:checked) > :is(.md-nav__title, .md-nav__source) {
+    visibility: hidden;
+  }
+}
+
+/* The search results pane is a tab stop even while search is closed. */
+.md-search__scrollwrap {
+  visibility: hidden;
+}
+
+[data-md-toggle="search"]:checked ~ .md-header .md-search__scrollwrap {
+  visibility: visible;
+}
+
+.md-header__button[role="button"]:focus-visible {
+  outline: 2px solid var(--teal-300);
+  outline-offset: 2px;
+  border-radius: 0.15rem;
+}
+
+/* The current page was marked by colour alone. */
+.md-nav__link--active {
+  font-weight: 600;
+}
+
+/* The copy and edit icons used the border tint and were close to invisible
+   (1.2:1). The theme names the copy button .md-code__button; older releases
+   used .md-clipboard. */
+.md-code__button,
+.md-clipboard,
+.md-typeset .md-content__button {
+  color: var(--md-default-fg-color--light);
+}
+
+/* The theme cancels transitions under reduced motion, but not these. */
+@media (prefers-reduced-motion: reduce) {
+  .md-source__facts,
+  .md-source__fact {
+    animation: none;
+  }
+}
+
+/* Reading measure: at most about 75 characters for running text (measured
+   in the rendered page). Tables, code and lists that hold them keep the
+   full column. */
+.md-typeset > :is(p, blockquote),
+.md-typeset > :is(ul, ol):not(:has(pre, table)) {
+  max-inline-size: 32em;
+}
+
+/* Blockquotes carry the docs' callouts ("Requirement IDs are strict"), so
+   they read at full strength rather than as the quietest text on the page. */
+:is([dir="ltr"], [dir="rtl"]) .md-typeset blockquote {
+  border-color: var(--anvil-accent-text);
+  color: var(--md-default-fg-color);
+}

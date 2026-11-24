@@ -4,64 +4,76 @@
 
 # Anvil
 
-**The system of record for agent teams** — durable, evidence-gated,
-lease-coordinated state for multi-agent software work.
+**The system of record for agent teams.**
+Agents come and go. The record stays.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.6.27-blue.svg)](.claude-plugin/plugin.json)
 [![PyPI](https://img.shields.io/badge/pypi-anvil--state-purple.svg)](https://pypi.org/project/anvil-state/)
 [![Docs](https://img.shields.io/badge/docs-fakoli.github.io%2Fanvil-informational.svg)](https://fakoli.github.io/anvil/)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
+[![CI](https://github.com/fakoli/anvil/actions/workflows/ci.yml/badge.svg)](https://github.com/fakoli/anvil/actions/workflows/ci.yml)
 
 </div>
 
 ---
 
-Anvil is a local-first state layer that lets multiple AI coding agents — and
-the humans working alongside them — execute the same plan without overwriting
-each other. It records requirements, tasks, claims, and evidence in SQLite, and
-exposes them through a CLI (`anvil`) and an MCP server that any harness (Claude
-Code, Codex, Cursor, Copilot, …) can drive.
+Anvil is an open-source, local-first ledger for AI coding agents. Requirements,
+tasks, claims, and evidence live in one place on your machine, outside any
+harness, so Claude Code, Codex, Cursor, and a shell loop can work the same plan
+without overwriting each other. Every harness reaches that state through the
+same two doors: a CLI (`anvil`) and an MCP server (`anvil-mcp`).
 
-Two ideas separate it from an issue tracker:
-
-- **Claims are enforced, not conventional.** A claim is a database row with a
-  lease and heartbeat — single-winner coordination that holds across sessions,
-  parallel loops, and machines, not "assign a label and hope."
-- **Status is downstream of proof.** Completion is evidence-gated: agents submit
-  typed proofs, reviews gate acceptance, and every accepted task mints a signed,
-  replayable `AcceptanceProof` you can verify off-host.
+It is for developers who run more than one coding agent, or one agent across
+many sessions.
 
 > **Beta — v0.6.27.** The core loop is stable and dogfooded; some command
 > surfaces may change before 1.0.
 
-## What changed in v0.6.7
+## See it run
 
-- **Verified local projection repair** — `anvil repair projection --yes`
-  reconstructs a diverged local projection from immutable event history while
-  retaining an online backup.
+[![A recorded Anvil session: agent-b's claim on a task agent-a already holds is refused, then an approval with no evidence on record is refused](assets/demo-terminal.webp)](https://fakoli.github.io/anvil/#demo)
 
-- **Historical project registration repair** — `anvil repair project` first
-  reports a unanimous immutable PRD-owner decision, then `--yes` appends one
-  audited current project registration with a backup and replay verification.
+Two agents reach for the same task and one is refused; approval is refused
+until there is evidence. This is real CLI output, recorded by
+[`scripts/record-site-demo.sh`](scripts/record-site-demo.sh).
+**[Watch the full session replayed in the browser](https://fakoli.github.io/anvil/#demo).**
 
-- **Revision-safe PRDs** — review, approval, planning, and new claims bind the
-  exact source revision ([#180](https://github.com/fakoli/anvil/issues/180),
-  [#192](https://github.com/fakoli/anvil/issues/192)).
-- **Transactional Git claims** — branch/worktree setup now commits completely
-  or rolls claim state back cleanly ([#180](https://github.com/fakoli/anvil/issues/180)).
-- **Versioned provider reads** — bounded project snapshots and PRD content are
-  available without internal-database coupling
-  ([#178](https://github.com/fakoli/anvil/issues/178)).
-- **Safer task routing** — PRD scope, strict 1-5 risk ceilings, and actor review
-  history agree across CLI and MCP ([#56](https://github.com/fakoli/anvil/issues/56),
-  [#109](https://github.com/fakoli/anvil/issues/109)).
-- **Faster Windows tests** — the maintained parallel suite and focused contract
-  slice run without UAC or junction-dependent collection
-  ([#118](https://github.com/fakoli/anvil/issues/118)).
+## What it gives you
 
-See the [v0.6.7 changelog](CHANGELOG.md#067---2026-09-10) for the complete
-release-candidate-to-release history and related fixes.
+- **A ledger that lives outside the harness.** Every accepted change is one line
+  appended to an event log, and a SQLite database is the queryable projection of
+  that log. State sits outside the repository by default and is shared by every
+  git worktree, so a crashed session, a compacted context, or a different
+  harness opens the same tasks, claims, and evidence.
+- **One queue with single-winner claims.** A claim is a database row with a
+  lease, not a label. The first writer wins and everyone else is refused; a
+  lease nobody renews is released and the task returns to the queue. Claims are
+  live across harnesses, worktrees, and loops on one machine. Across machines
+  the event log can travel in git, which is opt-in and early, and is not a live
+  lock service.
+- **State that replays, with guards.** The event log is the authority, and
+  `anvil replay` rebuilds the database from it. Replay stops on a damaged line,
+  refuses events it does not understand, and never writes into the live
+  database. `anvil doctor` checks that the log still reproduces the live state,
+  and CI runs a replay-equivalence check on every pull request.
+- **Status downstream of proof.** A task reaches done only when submitted
+  evidence is approved, and an `anvil apply` approval writes a signed, portable
+  `AcceptanceProof` you can check on another machine with `anvil proof verify`.
+  The evidence gate is advisory by default; `strict_evidence: true` makes it
+  refuse. A proof records what a hook reported, so read it as a strong record,
+  not a guarantee that the code is correct.
+- **Work packets built for agents.** `anvil packet T012` renders intent,
+  acceptance criteria, scope, non-goals, and verification: the contract for one
+  task, sized for a small context.
+- **A plan with structure.** PRDs parse into validated tasks scored across six
+  dimensions (complexity, parallelizability, context load, blast radius, review
+  risk, agent suitability). Several PRDs share one state, each gated separately.
+  The parser and scorer are deterministic; drafting tasks with an LLM is
+  optional and runs through your Claude or Codex subscription or an API
+  provider.
+
+The [landing page](https://fakoli.github.io/anvil/) goes through each of these
+with the limits stated next to the strengths.
 
 ## Install
 
@@ -71,7 +83,8 @@ anvil install <harness>          # wire anvil into Codex, Cursor, VS Code, …
 ```
 
 Python 3.11+ and [uv](https://docs.astral.sh/uv/) are the only requirements.
-Upgrading or uninstalling later? See
+`anvil install` previews every change, backs up each file it touches, and can
+roll back. Upgrading or uninstalling later? See
 [Upgrading and uninstalling](https://fakoli.github.io/anvil/how-to/getting-started/#upgrading-and-uninstalling).
 
 <details>
@@ -102,25 +115,6 @@ paste-ready config block.
 
 </details>
 
-## Development
-
-Run the same locked lint gate as CI from the source checkout:
-
-```bash
-cd bin
-uv sync --locked --extra custom
-uv run --locked ruff check ..
-cd ..
-uv run --project bin pytest
-```
-
-## Web interface
-
-Use `anvil web enroll /path/to/repository`, then `anvil web` from any directory.
-The read-only interface selects a local machine, repository and campaign while
-retaining canonical task state and reader provenance. A scoped `anvil-web`
-entrypoint is also available. See [enrollment, access and compatibility](docs/how-to/web-interface.md).
-
 ## Quick start
 
 ```bash
@@ -129,55 +123,103 @@ anvil next                   # → the next ready task, immediately
 anvil claim T001             # lease it; a git branch is created for the work
 anvil packet T001            # the exact intent, acceptance criteria, and scope
 anvil submit T001 --commands "pytest" --files-changed src/foo.py
-anvil apply T001 --approve   # evidence-gated → done, with a signed proof
+anvil apply T001 --approve   # approve the evidence → done, with a signed proof
 ```
 
 That is the whole loop. The
 **[getting-started guide](https://fakoli.github.io/anvil/how-to/getting-started/)**
 walks through it on your own PRD.
 
-## What you get
+## Pick up where you are
 
-- **A canonical plan, not free-form text.** PRDs parse into validated tasks
-  scored across six dimensions (complexity, parallelizability, context load,
-  blast radius, review risk, agent suitability) that drive routing. Optional
-  typed assumptions remain visible through planning and execution, while
-  `anvil prd assess` gives advisory, testability-focused feedback before design.
-- **Work packets built for agents.** `anvil packet T012` renders exact intent,
-  acceptance criteria, and non-goals — no summarizing an issue thread.
-- **A tamper-evident audit trail.** Every mutation appends to an event log;
-  replaying it reconstructs the database — an invariant checked in CI.
-- **Runtime-neutral by design.** The CLI and MCP server aren't coupled to any
-  one agent runtime, and multi-PRD projects, GitHub Issues sync, and
-  multi-provider LLM planning (Anthropic · Bedrock · OpenAI-compatible) all ship
-  today.
+Each guide is a complete path.
+
+| If you want to… | Start here |
+|---|---|
+| Wire Anvil into the harness you use | [Using anvil on any harness](https://fakoli.github.io/anvil/how-to/using-anvil-on-any-harness/) |
+| Ship one task end to end | [Claiming and shipping a task](https://fakoli.github.io/anvil/how-to/claiming-and-shipping-a-task/) |
+| Run a loop unattended | [Driving the anvil loop](https://fakoli.github.io/anvil/how-to/drive-the-anvil-loop/) |
+| Carry work across sessions | [Long-running delivery](https://fakoli.github.io/anvil/how-to/long-running-delivery/) |
+| Coordinate a milestone across parallel work | [Coordinating a milestone bundle](https://fakoli.github.io/anvil/how-to/coordinating-a-bundle/) · [Concurrent execution journeys](https://fakoli.github.io/anvil/how-to/concurrent-execution-journeys/) |
+| Use a subscription or local model for the reasoning | [Execute in your harness](https://fakoli.github.io/anvil/how-to/execute-in-your-harness/) |
+| Watch the board | [Web interface](https://fakoli.github.io/anvil/how-to/web-interface/) |
+| Mirror status to GitHub Issues | [Syncing with GitHub](https://fakoli.github.io/anvil/how-to/syncing-with-github/) |
+
+## Works where your agents work
+
+- **Native integration:** Claude Code, Codex, OpenClaw, Pi.
+- **MCP in one command** (`anvil install <name> --write`): Cursor, VS Code
+  (Copilot), Windsurf, Zed, Amp, OpenCode, Roo.
+- **MCP by pasted config:** Cline, Continue, Goose, Gemini CLI, OpenHands.
+
+## Recently shipped
+
+- **A board for people.** `anvil web` shows repositories, campaigns, and tasks
+  on a local Kanban board. It is read-only by default; `--allow-writes` enables
+  moves and evidence-bound approvals.
+- **Run and continue.** `anvil run` dispatches one task to a configured harness,
+  runs the frozen checks, and stops at review (Linux only).
+- **Bundles and bounded batches.** One coordinator claims a set of tasks
+  atomically, delegates in bounded batches, and ships a single reviewed
+  delivery.
+- **Long-running delivery.** Attempt views, evidence preflight, frozen
+  verification profiles, and attested external progress let work resume across
+  sessions.
+- **Revision-safe PRDs.** Review, approval, planning, and new claims bind the
+  exact PRD revision, and `anvil prd assess` gives advisory readiness feedback.
+- **Recovery.** `anvil repair projection` rebuilds a diverged projection from
+  the event log with a backup, and `anvil migrate state` previews and backs up
+  a schema upgrade.
+
+The [CHANGELOG](CHANGELOG.md) has the release-by-release history.
 
 ## Anvil vs. an issue tracker
 
 | | Anvil | GitHub Issues / markdown-file conventions |
 |---|---|---|
 | **State shape** | Pydantic models in SQLite, validated at every transition | Free-form markdown in an issue body or `.md` file |
-| **Coordination** | `Claim` row with lease + heartbeat; stale leases reaped at coordination entry points | Assignment-by-label — no enforcement |
+| **Coordination** | `Claim` row with lease + heartbeat; stale leases released at coordination entry points | Assignment-by-label — no enforcement |
 | **Agent hand-off** | Rendered work packet: intent, criteria, non-goals | Agent summarizes the whole thread |
-| **Completion** | Evidence-gated; signed, replayable proof | Trust the "done" checkbox |
-| **Context cost** | Measured ~2.4k always-on tokens ([audit](benchmarks/CONTEXT_AUDIT.md)) | Whole threads enter context on demand |
+| **Completion** | Evidence submitted and approved; signed, portable receipt | Trust the "done" checkbox |
+| **Context cost** | Lean default MCP tool surface; planning tools load on request ([context budget](docs/context-budget.md)) | Whole threads enter context on demand |
 
-## Proven in real sessions
+## Measured, with caveats
 
-Numbers from recorded working sessions
-([post-session-findings](https://github.com/fakoli/post-session-findings)), not
-projections:
+- **Coordination benchmark.** Against a shared-markdown control, file collisions
+  fell from 4.0 to 0.0 and duplicate completions from 9.0 to 0.0
+  ([results](benchmarks/RESULTS.md)). That is one trial with simulated actors:
+  a mechanism check, not a field result.
+- **Ledger writes.** p95 is 12–14 ms inside the engine with 8 concurrent
+  writers. At 64 writers it is 150 ms, which misses the 15 ms target
+  ([validation note](docs/design/ledger-latency-validation.md)). Anvil is
+  measured at eight concurrent writers, not at swarm scale.
+- **From the maintainer's own sessions.** One 23.7-hour autonomous session
+  produced 32 tasks, 21 PRs, and a release. Two concurrent agent loops finished
+  an 18/18-task PRD in 16.7 hours, with the lease model deconflicting both
+  sessions. Review gates caught a fail-open deny gate, log-injection bugs, and
+  a semantically broken "clean" merge before they shipped. The session logs
+  behind these figures are not published, so treat them as anecdote.
 
-- **32 tasks, 21 PRs, and a release from one 23.7-hour autonomous session** —
-  the loop stayed coherent across 28M generated tokens under ~2 dozen human
-  messages.
-- **Two concurrent agent loops finished an 18/18-task PRD in 16.7 hours** — the
-  lease model deconflicted both sessions with zero explicit negotiation (in the
-  [benchmark](benchmarks/RESULTS.md), file collisions dropped 3.0 → 0.0 vs. a
-  shared-markdown control).
-- **The review gates catch real defects every time they run** — a fail-open deny
-  gate, log-injection bugs, and a semantically broken "clean" merge, each caught
-  before it shipped.
+## What Anvil is not
+
+- **Not a coding agent.** It is the layer around your agents: packets in,
+  evidence out.
+- **Not an orchestrator.** It does not schedule agents or pick the model that
+  does the work. Dispatching a single task with `anvil run` is opt-in.
+- **Not a service.** There is no hosted backend, no account, and no telemetry.
+  State stays on your machine unless you turn on sync, backup, or a hosted
+  model.
+- **Not an issue tracker.** GitHub Issues is a sync target, not the source of
+  truth.
+
+## Web interface
+
+Use `anvil web enroll /path/to/repository`, then `anvil web` from any directory.
+The interface selects a local machine, repository, and campaign while retaining
+canonical task state and reader provenance. It is read-only by default;
+`anvil web --allow-writes --actor <name>` enables moves and approvals. A scoped
+`anvil-web` entrypoint is also available. See
+[enrollment, access and compatibility](docs/how-to/web-interface.md).
 
 ## Documentation
 
@@ -189,10 +231,32 @@ Full documentation: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)*
 - [FAQ](https://fakoli.github.io/anvil/faq/) — installing, storage, backups, and common gotchas
 - [Roadmap](https://fakoli.github.io/anvil/roadmap/) · [CHANGELOG](CHANGELOG.md)
 
+## Contributing
+
+Anvil is MIT licensed and developed in the open; its roadmap, backlog, and
+design decisions live in the docs. Good places to start are a
+[sync provider](docs/sync-providers.md) (GitHub Issues ships today), packaging a
+harness that is missing, and the docs themselves. The
+[contributing guide](docs/contributing.md) covers the test workflow and how to
+work on the docs site.
+
+Run the same locked lint gate as CI from the source checkout:
+
+```bash
+cd bin
+uv sync --locked --extra custom
+uv run --locked ruff check ..
+cd ..
+uv run --project bin pytest
+```
+
+One pull request per change. CI and an automated review have to pass before it
+merges.
+
 ## Status
 
 Beta (v0.6.27). The full PRD → plan → claim → execute → verify → finish loop
-works today, alongside GitHub Issues sync and multi-provider LLM support.
+works today, alongside GitHub Issues sync and optional LLM planning.
 Near-term focus is provider expansion, usability, and remaining pre-1.0
 contract hardening; Linear/Monday providers and webhook sync are on the
 [roadmap](https://fakoli.github.io/anvil/roadmap/).

@@ -1,0 +1,142 @@
+[
+  {
+    "act": "Plan",
+    "label": "Start a project",
+    "comment": "Start a project: Anvil scaffolds its state, a SQLite database and an append-only event log",
+    "cmd": "anvil init --name Shortener",
+    "exit": 0,
+    "output": "Initialized anvil for 'Shortener' (id: shortener)\n\n  ~/shortener/.anvil/config.yaml\n  ~/shortener/.anvil/state.db\n  ~/shortener/.anvil/events.jsonl\n  ~/shortener/.anvil/packets/\n\nNext step: author your PRD at ~/shortener/.anvil/prd.md, then run `anvil prd parse`.\n\nYour prd.md must contain these required sections:\n  # Project: <Name>\n  ## Summary\n  ## Goals\n  ## Requirements\nOptional ## Features / ## Tasks use bold-inline fields, e.g.\n  **Feature:** F001   (under a ### Txxx task heading)\n  **Requirements:** R001, R002   (under a ### Fxxx feature heading)\nSee docs/prd-template.md for the full template.",
+    "display_lines": [
+      0,
+      8
+    ]
+  },
+  {
+    "act": "Plan",
+    "label": "Load and approve the PRD",
+    "comment": "Load the PRD (3 requirements, 2 tasks) and pass the two-step human review gate",
+    "cmd": "anvil prd parse && anvil prd review && anvil prd review --approve",
+    "exit": 0,
+    "output": "Parsed 3 requirements, 1 features, 2 tasks.\nPRD source: default\nPRD reviewed by 'human'.\nRun `anvil prd review --approve` to approve.\nPRD approved by 'human'."
+  },
+  {
+    "act": "Plan",
+    "label": "Plan, score, promote",
+    "comment": "Plan without an LLM: build the task graph, score it, promote tasks to ready",
+    "cmd": "anvil plan && anvil score && anvil review tasks",
+    "exit": 0,
+    "output": "Planned 1 features, 2 tasks.\nDetected 1 conflict group(s).\nPRD: default\nTaskID       Complexity Parallel CtxLoad Blast Review Agent\n-----------------------------------------------------------\nT001                  2        4       3     2      2     4\nT002                  2        3       3     2      2     4\n\nScored 2 task(s).\nPRD: default\nPromoted 2 task(s) to reviewed.\nPromoted 2 task(s) to ready.\n\n4 total promotion(s). No tasks blocked."
+  },
+  {
+    "act": "Plan",
+    "label": "Read the task graph",
+    "comment": "The task graph: T002 depends on T001, so Anvil lists only T001 as ready to claim",
+    "cmd": "anvil graph",
+    "exit": 0,
+    "output": "Task graph: 2 node(s), 1 edge(s).\n\nBy status:\n  ready: 2\n\nReady to claim: T001\n\nRender a diagram with `anvil graph --format mermaid`."
+  },
+  {
+    "act": "Coordinate",
+    "label": "agent-a claims T001",
+    "comment": "agent-a claims T001: an exclusive lease, plus a git branch to work on",
+    "cmd": "anvil claim T001 --actor agent-a",
+    "exit": 0,
+    "output": "Claimed task 'T001' as 'agent-a'.\n  Claim ID:    C00D1A16A\n  Lease until: 2026-11-24T12:27:27.442687+00:00\n  Branch:      agent/t001-implement-shorten\n\n  Actor:        'agent-a'\n  Actor identity is local coordination and audit attribution, not cryptographic authentication.\n  Pin for continuation: `export ANVIL_ACTOR=agent-a`\n  Pin hook attribution: `export ANVIL_ACTOR=agent-a ANVIL_CLAIM_ID=C00D1A16A`\nExternal progress: `anvil progress T001 PHASE --attestation-file PATH --actor ...`; an accepted attestation is consumed by the next renewal.\nRun `anvil renew C00D1A16A --actor agent-a` to extend the lease before it expires."
+  },
+  {
+    "act": "Coordinate",
+    "label": "agent-b is refused",
+    "comment": "agent-b tries to claim the same task and is refused",
+    "cmd": "anvil claim T001 --actor agent-b",
+    "exit": 1,
+    "output": "Warning: 1 other active claim(s) share this checkout (T001 ('agent-a')) — concurrent edits can collide. Use --worktree, or set worktree_isolation: require to isolate by default.\nError: Task 'T001' cannot be claimed: status is 'claimed', expected 'ready'."
+  },
+  {
+    "act": "Prove",
+    "label": "Approve with no evidence",
+    "comment": "agent-a tries to approve its own task with no evidence on record: refused",
+    "cmd": "anvil apply T001 --approve --reviewer agent-a",
+    "exit": 1,
+    "output": "Error: task 'T001' has status 'claimed', expected 'needs_review'. Run `anvil submit` first to record completion evidence."
+  },
+  {
+    "act": "Prove",
+    "label": "The gate names what is missing",
+    "comment": "The finish gate names exactly which proof is missing (exit 2 means block)",
+    "cmd": "anvil gate-check --actor agent-a",
+    "exit": 2,
+    "output": "Task T001 is claimed by 'agent-a' but its verification evidence is incomplete (missing: `pytest -q` exits 0). Run the task's verification commands and submit evidence before finishing — e.g. `anvil submit T001 --actor agent-a` — then end your turn. (anvil checks that required evidence was submitted, not that commands exited 0.) Actor identity is local coordination and audit attribution, not cryptographic authentication."
+  },
+  {
+    "act": "Prove",
+    "label": "Run the verification",
+    "comment": "agent-a does the work on its branch, then runs the task's verification command",
+    "cmd": "pytest -q | tee pytest.log",
+    "exit": 0,
+    "output": "..                                                                       [100%]\n2 passed in 0.00s"
+  },
+  {
+    "act": "Prove",
+    "label": "Capture the proof",
+    "comment": "The run is captured as a claim-bound proof: command, exit code, output hash. A harness hook does this automatically",
+    "cmd": "ANVIL_CLAIM_ID=C00D1A16A anvil hook capture-evidence --command \"pytest -q\" --exit-code 0 --stdout-file pytest.log --actor agent-a",
+    "exit": 0,
+    "output": ""
+  },
+  {
+    "act": "Prove",
+    "label": "Submit evidence",
+    "comment": "agent-a submits evidence: the gate matches the proof and the claim is released",
+    "cmd": "anvil submit T001 --commands \"pytest -q\" --files-changed shortener.py --files-changed test_shortener.py --actor agent-a",
+    "exit": 0,
+    "output": "Evidence submitted for task 'T001'.\n  Evidence ID:  EVE6DA041F\n  Claim ID:     C00D1A16A (auto-released)\n  Submitted by: 'agent-a'\n  Commands:     ['pytest -q']\n  Files:        ['shortener.py', 'test_shortener.py']\n  Claim-bound hook proofs: 1\n\nTask 'T001' status → needs_review.\nRun `anvil apply T001` when ready for human review.\nEvidence gate: PASSED — all required evidence present.\n  Actor:        'agent-a'\n  Actor identity is local coordination and audit attribution, not cryptographic authentication.\n  Pin for continuation: `export ANVIL_ACTOR=agent-a`"
+  },
+  {
+    "act": "Prove",
+    "label": "Approve and sign",
+    "comment": "A human reviewer approves: the task is done and a signed acceptance proof is written",
+    "cmd": "anvil apply T001 --approve --reviewer human",
+    "exit": 0,
+    "output": "Merge check: local base 'main' used (no remote named 'origin').\nTask 'T001' approved by 'human' → done.\n  Signed proof: ~/shortener/.anvil/proofs/T001-E000017.json"
+  },
+  {
+    "act": "Prove",
+    "label": "Merge the branch",
+    "comment": "The approved branch lands on main",
+    "cmd": "git switch -q main && git merge agent/t001-implement-shorten",
+    "exit": 0,
+    "output": "Updating ee4cbac..bf69bd8\nFast-forward\n shortener.py      | 12 ++++++++++++\n test_shortener.py | 14 ++++++++++++++\n 2 files changed, 26 insertions(+)\n create mode 100644 shortener.py\n create mode 100644 test_shortener.py"
+  },
+  {
+    "act": "Replay",
+    "label": "Read the event log",
+    "comment": "The ledger: every state change is one line in an append-only event log",
+    "cmd": "jq -r '[.id, .action, .target_id, .actor] | @tsv' .anvil/events.jsonl | column -t",
+    "exit": 0,
+    "output": "E000001  project.created         shortener  anvil-cli\nE000002  state.initialized       shortener  anvil-cli\nE000003  prd.parsed              shortener  anvil-cli\nE000004  prd.reviewed            shortener  anvil-cli\nE000005  prd.approved            shortener  anvil-cli\nE000006  planning.batch_applied  default    anvil-cli\nE000007  task.scored             T001       anvil-cli\nE000008  task.scored             T002       anvil-cli\nE000009  task.status_changed     T001       anvil-cli\nE000010  task.status_changed     T002       anvil-cli\nE000011  task.status_changed     T001       anvil-cli\nE000012  task.scored             T001       anvil-cli\nE000013  task.status_changed     T002       anvil-cli\nE000014  task.scored             T002       anvil-cli\nE000015  claim.created           C00D1A16A  agent-a\nE000016  evidence.submitted      T001       agent-a\nE000017  task.applied            T001       human"
+  },
+  {
+    "act": "Replay",
+    "label": "Rebuild from events",
+    "comment": "Rebuild state from the event log alone, into a scratch database",
+    "cmd": "anvil replay --from-events .anvil/events.jsonl --into ../replay.db",
+    "exit": 0,
+    "output": "Replayed events from ~/shortener/.anvil/events.jsonl\nCanonical state written to ~/replay.db"
+  },
+  {
+    "act": "Replay",
+    "label": "Check replay integrity",
+    "comment": "Health check: replaying events.jsonl reproduces the live state.db",
+    "cmd": "anvil doctor",
+    "exit": 0,
+    "output": "anvil doctor\n\n  [OK] state_db: state.db reachable; schema version 26.\n  [OK] config: config.yaml parsed.\n  [OK] claims: 0 active claim(s), none stale.\n  [OK] max_claim_age: No active claim is past max-claim-age (960 min).\n  [OK] replay: replay integrity verified: events.jsonl reproduces the live state.db.\n  [OK] reconciliation: no reconciliation drift between intent, state, and filesystem/git.\n  [OK] verification_paths: All ready-task verification command paths resolve from the project root.\n\nOverall: healthy (no ERROR-level findings)."
+  },
+  {
+    "act": "Replay",
+    "label": "Final status",
+    "comment": "Final status: T001 is done and T002 is unlocked for the next agent",
+    "cmd": "anvil status",
+    "exit": 0,
+    "output": "anvil for \"Shortener\" (id: shortener)\nPath: ~/shortener/.anvil\nInitialized: 2026-11-24T08:27:22.566691Z\n\nPRD default (approved)\n  Tasks:         2 total (1 ready, 0 claimed, 0 in_progress, 0 needs_review, 0 blocked, 1 done)\n  Active claims: 0\n\nPROJECT TOTAL\nPRD:           approved\nTasks:         2 total (1 ready, 0 claimed, 0 in_progress, 0 needs_review, 0 blocked, 1 done)\nActive claims: 0\nSync:          off\nSchema:        26"
+  }
+]
