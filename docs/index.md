@@ -332,8 +332,8 @@ Claimed task 'T001' as 'agent-a'.
 </li>
 <li class="card">
 <p class="card__label" aria-hidden="true"></p>
-<h3 class="card__title">Repeats are no-ops</h3>
-<p class="card__text">A duplicate request changes nothing and adds no event, so a retry is safe.</p>
+<h3 class="card__title">Satisfied requests add nothing</h3>
+<p class="card__text">A request the state already satisfies, such as releasing a released claim, adds no event. Not every command is idempotent: scoring a task twice records two events.</p>
 </li>
 <li class="card">
 <p class="card__label" aria-hidden="true"></p>

@@ -26,13 +26,15 @@
     Array.prototype.forEach.call(nodes, fn);
   }
 
-  // The theme already activates a focused label on Enter. Space is the half of
-  // button behaviour it leaves out; handling Enter here as well would click
-  // twice and close what was just opened.
-  function onSpace(label) {
+  // Enter and Space activate, as on a native button. The theme also clicks a
+  // focused label on Enter from a document-level listener; stopping the event
+  // here keeps that second click from closing what was just opened, and means
+  // activation does not depend on the theme doing it.
+  function onActivate(label) {
     label.addEventListener("keydown", function (event) {
-      if (event.key === " ") {
+      if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
+        event.stopPropagation();
         label.click();
       }
     });
@@ -69,7 +71,7 @@
       drawerLabel.setAttribute("tabindex", "0");
       drawerLabel.setAttribute("aria-label", "Navigation");
       drawerLabel.setAttribute("aria-expanded", "false");
-      onSpace(drawerLabel);
+      onActivate(drawerLabel);
 
       // Inside the drawer: each nested panel's "back" title, and the section
       // entries the theme leaves unfocusable (the active section and the
@@ -81,7 +83,7 @@
           return label.getAttribute("tabindex") !== "0";
         }
       );
-      each(panelLabels, onSpace);
+      each(panelLabels, onActivate);
 
       var applyLayout = function () {
         each(panelLabels, function (label) {
@@ -167,7 +169,7 @@
       searchLabel.setAttribute("role", "button");
       searchLabel.setAttribute("tabindex", "0");
       searchLabel.setAttribute("aria-label", "Search");
-      onSpace(searchLabel);
+      onActivate(searchLabel);
     }
 
     each(document.querySelectorAll("a.md-nav__link--active"), function (link) {
