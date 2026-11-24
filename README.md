@@ -10,7 +10,7 @@ Agents come and go. The record stays.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.6.27-blue.svg)](.claude-plugin/plugin.json)
 [![PyPI](https://img.shields.io/badge/pypi-anvil--state-purple.svg)](https://pypi.org/project/anvil-state/)
-[![Docs](https://img.shields.io/badge/docs-fakoli.github.io%2Fanvil-informational.svg)](https://fakoli.github.io/anvil/)
+[![Docs](https://img.shields.io/badge/docs-anvilstate.com-informational.svg)](https://anvilstate.com/)
 [![CI](https://github.com/fakoli/anvil/actions/workflows/ci.yml/badge.svg)](https://github.com/fakoli/anvil/actions/workflows/ci.yml)
 
 </div>
@@ -31,12 +31,12 @@ many sessions.
 
 ## See it run
 
-[![A recorded Anvil session: agent-b's claim on a task agent-a already holds is refused, then an approval with no evidence on record is refused](assets/demo-terminal.webp)](https://fakoli.github.io/anvil/#demo)
+[![A recorded Anvil session: agent-b's claim on a task agent-a already holds is refused, then an approval with no evidence on record is refused](assets/demo-terminal.webp)](https://anvilstate.com/#demo)
 
 Two agents reach for the same task and one is refused; approval is refused
 until there is evidence. This is real CLI output, recorded by
 [`scripts/record-site-demo.sh`](scripts/record-site-demo.sh).
-**[Watch the full session replayed in the browser](https://fakoli.github.io/anvil/#demo).**
+**[Watch the full session replayed in the browser](https://anvilstate.com/#demo).**
 
 ## What it gives you
 
@@ -72,7 +72,7 @@ until there is evidence. This is real CLI output, recorded by
   optional and runs through your Claude or Codex subscription or an API
   provider.
 
-The [landing page](https://fakoli.github.io/anvil/) goes through each of these
+The [landing page](https://anvilstate.com/) goes through each of these
 with the limits stated next to the strengths.
 
 ## Install
@@ -85,7 +85,7 @@ anvil install <harness>          # wire anvil into Codex, Cursor, VS Code, …
 Python 3.11+ and [uv](https://docs.astral.sh/uv/) are the only requirements.
 `anvil install` previews every change, backs up each file it touches, and can
 roll back. Upgrading or uninstalling later? See
-[Upgrading and uninstalling](https://fakoli.github.io/anvil/how-to/getting-started/#upgrading-and-uninstalling).
+[Upgrading and uninstalling](https://anvilstate.com/how-to/getting-started/#upgrading-and-uninstalling).
 
 <details>
 <summary>Other ways to install (Claude Code plugin · one-line script · from source)</summary>
@@ -127,7 +127,7 @@ anvil apply T001 --approve   # approve the evidence → done, with a signed proo
 ```
 
 That is the whole loop. The
-**[getting-started guide](https://fakoli.github.io/anvil/how-to/getting-started/)**
+**[getting-started guide](https://anvilstate.com/how-to/getting-started/)**
 walks through it on your own PRD.
 
 ## Pick up where you are
@@ -136,14 +136,14 @@ Each guide is a complete path.
 
 | If you want to… | Start here |
 |---|---|
-| Wire Anvil into the harness you use | [Using anvil on any harness](https://fakoli.github.io/anvil/how-to/using-anvil-on-any-harness/) |
-| Ship one task end to end | [Claiming and shipping a task](https://fakoli.github.io/anvil/how-to/claiming-and-shipping-a-task/) |
-| Run a loop unattended | [Driving the anvil loop](https://fakoli.github.io/anvil/how-to/drive-the-anvil-loop/) |
-| Carry work across sessions | [Long-running delivery](https://fakoli.github.io/anvil/how-to/long-running-delivery/) |
-| Coordinate a milestone across parallel work | [Coordinating a milestone bundle](https://fakoli.github.io/anvil/how-to/coordinating-a-bundle/) · [Concurrent execution journeys](https://fakoli.github.io/anvil/how-to/concurrent-execution-journeys/) |
-| Use a subscription or local model for the reasoning | [Execute in your harness](https://fakoli.github.io/anvil/how-to/execute-in-your-harness/) |
-| Watch the board | [Web interface](https://fakoli.github.io/anvil/how-to/web-interface/) |
-| Mirror status to GitHub Issues | [Syncing with GitHub](https://fakoli.github.io/anvil/how-to/syncing-with-github/) |
+| Wire Anvil into the harness you use | [Using anvil on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) |
+| Ship one task end to end | [Claiming and shipping a task](https://anvilstate.com/how-to/claiming-and-shipping-a-task/) |
+| Run a loop unattended | [Driving the anvil loop](https://anvilstate.com/how-to/drive-the-anvil-loop/) |
+| Carry work across sessions | [Long-running delivery](https://anvilstate.com/how-to/long-running-delivery/) |
+| Coordinate a milestone across parallel work | [Coordinating a milestone bundle](https://anvilstate.com/how-to/coordinating-a-bundle/) · [Concurrent execution journeys](https://anvilstate.com/how-to/concurrent-execution-journeys/) |
+| Use a subscription or local model for the reasoning | [Execute in your harness](https://anvilstate.com/how-to/execute-in-your-harness/) |
+| Watch the board | [Web interface](https://anvilstate.com/how-to/web-interface/) |
+| Mirror status to GitHub Issues | [Syncing with GitHub](https://anvilstate.com/how-to/syncing-with-github/) |
 
 ## Works where your agents work
 
@@ -223,13 +223,13 @@ canonical task state and reader provenance. It is read-only by default;
 
 ## Documentation
 
-Full documentation: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)**
+Full documentation: **[anvilstate.com](https://anvilstate.com/)**
 
-- [Getting started](https://fakoli.github.io/anvil/how-to/getting-started/) — first project, end to end
-- [Using anvil on any harness](https://fakoli.github.io/anvil/how-to/using-anvil-on-any-harness/) — Cursor, VS Code, Zed, Codex, …
-- [Architecture](https://fakoli.github.io/anvil/architecture/) · [CLI reference](https://fakoli.github.io/anvil/cli-reference/) · [MCP reference](https://fakoli.github.io/anvil/mcp/)
-- [FAQ](https://fakoli.github.io/anvil/faq/) — installing, storage, backups, and common gotchas
-- [Roadmap](https://fakoli.github.io/anvil/roadmap/) · [CHANGELOG](CHANGELOG.md)
+- [Getting started](https://anvilstate.com/how-to/getting-started/) — first project, end to end
+- [Using anvil on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) — Cursor, VS Code, Zed, Codex, …
+- [Architecture](https://anvilstate.com/architecture/) · [CLI reference](https://anvilstate.com/cli-reference/) · [MCP reference](https://anvilstate.com/mcp/)
+- [FAQ](https://anvilstate.com/faq/) — installing, storage, backups, and common gotchas
+- [Roadmap](https://anvilstate.com/roadmap/) · [CHANGELOG](CHANGELOG.md)
 
 ## Contributing
 
@@ -259,7 +259,7 @@ Beta (v0.6.27). The full PRD → plan → claim → execute → verify → finis
 works today, alongside GitHub Issues sync and optional LLM planning.
 Near-term focus is provider expansion, usability, and remaining pre-1.0
 contract hardening; Linear/Monday providers and webhook sync are on the
-[roadmap](https://fakoli.github.io/anvil/roadmap/).
+[roadmap](https://anvilstate.com/roadmap/).
 
 ## License
 
