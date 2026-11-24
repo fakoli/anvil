@@ -130,6 +130,11 @@ That is the whole loop. The
 **[getting-started guide](https://fakoli.github.io/anvil/how-to/getting-started/)**
 walks through it on your own PRD.
 
+On the sample, `submit` reports `Evidence gate: INCOMPLETE`: the task asks for
+a specific test command, and no proof of it was recorded. `apply --approve`
+still goes through, because the gate is advisory by default. Add `--strict` to
+make approval refuse until the proof is on record.
+
 ## Pick up where you are
 
 Each guide is a complete path.
