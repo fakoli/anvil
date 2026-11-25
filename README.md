@@ -2,6 +2,8 @@
 
 <img src="docs/img/logo.svg" width="80" height="80" alt="Anvil State">
 
+<a name="anvil"></a>
+
 # Anvil State
 
 **The system of record for agent teams.**
@@ -175,6 +177,8 @@ Each guide is a complete path.
 
 The [CHANGELOG](CHANGELOG.md) has the release-by-release history.
 
+<a name="anvil-vs-an-issue-tracker"></a>
+
 ## Anvil State vs. an issue tracker
 
 | | Anvil State | GitHub Issues / markdown-file conventions |
@@ -201,6 +205,8 @@ The [CHANGELOG](CHANGELOG.md) has the release-by-release history.
   sessions. Review gates caught a fail-open deny gate, log-injection bugs, and
   a semantically broken "clean" merge before they shipped. The session logs
   behind these figures are not published, so treat them as anecdote.
+
+<a name="what-anvil-is-not"></a>
 
 ## What Anvil State is not
 

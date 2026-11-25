@@ -1,6 +1,6 @@
-# AGENTS.md — Anvil
+# AGENTS.md — Anvil State
 
-Anvil is a local-first, backend-neutral **project-state engine**: it turns PRDs
+Anvil State is a local-first, backend-neutral **project-state engine**: it turns PRDs
 into reviewed, lockable, evidence-backed work packets that humans and AI agents
 can coordinate on without conflicts. State lives in SQLite inside a `.anvil/`
 dir (event-sourced; `events.jsonl` is the log). By default that dir is a
@@ -37,7 +37,7 @@ schemas through `describe_surface`, then execute the documented CLI command.
    coordinator owns child mutations; released/stale bundles require replan, and
    root reservations require owner reconciliation. Never infer force authority.
 3. Inspect `verification.profile` and the environment before costly verification;
-   Anvil validates frozen literal commands/file bindings but does not run the
+   Anvil State validates frozen literal commands/file bindings but does not run the
    repository runner. `anvil evidence-preflight TASK_ID --json` is advisory and
    grants no submission, renewal or approval authority. Retain failed captures;
    do not trim buffers or retarget old evidence to pass a new claim.
@@ -144,7 +144,7 @@ and the full 39-tool surface returns the moment the env flag is set. Use it for
 the planning phase; the steady-state execution loop needs none of the 12.
 
 ## Notes
-- Review disposition policy: before presenting any Anvil task in
+- Review disposition policy: before presenting any Anvil State task in
   `needs_review` for acceptance, run at least three independent adversarial
   reviews with distinct angles. Treat any unresolved blocking finding as a
   failed gate; fix it and repeat the affected reviews. Record the reviewers,
@@ -152,7 +152,7 @@ the planning phase; the steady-state execution loop needs none of the 12.
   review gate is automatic for every task, but it does not replace explicit human
   authority required before the immutable `anvil apply --approve` event or the
   final user project-validation gate.
-- Claude Code and Codex can run Anvil's non-blocking
+- Claude Code and Codex can run Anvil State's non-blocking
   SessionStart/PreToolUse/PostToolUse **hooks** from `hooks/hooks.json`; the
   manifest uses a shell-free `uv run --quiet ... anvil.cli hook dispatch ...`
   path so Windows hosts do not depend on bare `bash`. Every capability is still

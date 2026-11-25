@@ -8,9 +8,9 @@ prose. Keep commands, paths, package IDs and recorded output literal.
 | Surface | Name to use | Compatibility contract |
 | --- | --- | --- |
 | Install from PyPI | `uv tool install anvil-state` | Same distribution; no uninstall, new package claim or data migration. |
-| Run the CLI | `anvil status --json` | This works on existing releases. Source builds containing the rename also install `anvil-state` as a second spelling of the same entry point; older wheels do not. Keep using `anvil` in scripts that must support them. |
+| Run the CLI | `anvil status --json` | This works on existing releases. Source builds containing the rename also install `anvil-state` as a second spelling of the same entry point; older wheels do not. Keep using `anvil` in scripts that must support them. Human-readable help text now uses Anvil State. |
 | Start Web or MCP | `anvil-web`, `anvil-mcp` | Existing launchers, registered MCP server `anvil`, tool names and protocol version are unchanged. |
-| Import or configure | Python `anvil`, environment `ANVIL_*` | A distribution name is not an import path. Existing API, command output, headers and schema IDs do not change. |
+| Import or configure | Python `anvil`, environment `ANVIL_*` | A distribution name is not an import path. The Python API, versioned JSON CLI contracts, HTTP headers and schema IDs are unchanged. |
 | State on disk | `.anvil/`, `~/.anvil/workspaces/` | No rename or copy. Do not make an empty replacement state. See [state resolution](../how-to/state-location.md). |
 | Install harness adapters | Claude `anvil@anvil`, Codex plugin `anvil`, Pi `anvil-pi`, OpenClaw `anvil-finish-gate` | Display labels can change, but IDs stay stable to avoid duplicate tools or disconnected configurations. |
 | Clone source | [fakoli/anvil](https://github.com/fakoli/anvil) | This is the current GitHub repository. Do not substitute a guessed new URL. |
