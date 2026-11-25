@@ -1,5 +1,5 @@
 {#-
-  Site-wide template override for the Anvil docs.
+  Site-wide template override for the Anvil State docs.
 
   - fonts:     IBM Plex Sans / IBM Plex Mono with the exact weights the design
                uses (mkdocs.yml sets `font: false`, so Material loads none).
@@ -23,8 +23,8 @@
   <meta property="og:title" content="{{ og_title }}">
   <meta property="og:description" content="{{ og_description }}">
   {% if config.site_url %}
-    <meta property="og:image" content="{{ config.site_url }}img/social-card.jpg">
-    <meta property="og:image:alt" content="Anvil — the system of record for agent teams">
+    <meta property="og:image" content="{{ config.site_url }}img/forge.webp">
+    <meta property="og:image:alt" content="Anvil State illustration: a glowing chain and a paper task record on a forge">
     {% if page and page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
   {% endif %}
   <meta name="twitter:card" content="summary_large_image">

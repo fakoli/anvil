@@ -92,7 +92,7 @@ app = typer.Typer(
     name="anvil",
     cls=SchemaDiagnosticGroup,
     help=(
-        "Local-first project state engine: turn rough ideas and PRDs into reviewed, "
+        "Anvil State: turn rough ideas and PRDs into reviewed, "
         "lockable, evidence-backed work packets that humans and AI agents can "
         "coordinate on without conflicts."
     ),

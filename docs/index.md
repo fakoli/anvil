@@ -1,8 +1,8 @@
 ---
 template: home.html
-title: Anvil — the system of record for agent teams
+title: Anvil State — the system of record for agent teams
 description: >-
-  Anvil is an open-source, local-first ledger for AI coding agents:
+  Anvil State is an open-source, local-first ledger for AI coding agents:
   single-winner claims, guarded replay and signed proofs, shared by every
   harness you run.
 hide:
@@ -32,7 +32,7 @@ hide:
 <div class="hero__intro">
 <p class="kicker">The system of record for agent teams</p>
 <h1 class="hero__title" id="hero-title"><span>Agents come and go.</span> <span class="is-accent">The record stays.</span></h1>
-<p class="hero__lede">Anvil is an open-source, local-first ledger for AI coding agents. Requirements, tasks, claims and evidence live in one place on your machine, outside any harness, so Claude Code, Codex, Cursor and a shell loop can work the same plan without overwriting each other.</p>
+<p class="hero__lede">Anvil State is an open-source, local-first ledger for AI coding agents. Requirements, tasks, claims and evidence live in one place on your machine, outside any harness, so Claude Code, Codex, Cursor and a shell loop can work the same plan without overwriting each other.</p>
 <div class="hero__actions">
 <a class="btn btn--primary" href="how-to/getting-started/">Get started</a>
 <a class="btn btn--ghost" href="https://github.com/fakoli/anvil">View on GitHub</a>
@@ -98,7 +98,7 @@ hide:
 <div class="head">
 <p class="kicker">Why a system of record</p>
 <h2 class="title" id="why-title">Chat is not a database</h2>
-<p class="lede">Anvil is for developers who run more than one coding agent, or one agent across many sessions. That work fails in three predictable ways, and a better model does not fix any of them.</p>
+<p class="lede">Anvil State is for developers who run more than one coding agent, or one agent across many sessions. That work fails in three predictable ways, and a better model does not fix any of them.</p>
 </div>
 <ul class="grid grid--3">
 <li class="card">
@@ -115,7 +115,7 @@ hide:
 </li>
 </ul>
 <div class="pillars">
-<p class="pillars__lead">Anvil moves the plan, the locks and the evidence out of the conversation and into a ledger every agent shares.</p>
+<p class="pillars__lead">Anvil State moves the plan, the locks and the evidence out of the conversation and into a ledger every agent shares.</p>
 <ul class="grid grid--4">
 <li class="card card--link">
 <p class="card__label">01 · Ledger</p>
@@ -145,12 +145,12 @@ hide:
 <div class="head">
 <p class="kicker">How it works</p>
 <h2 class="title" id="loop-title">Plan, claim, execute, prove</h2>
-<p class="lede">The whole loop is four moves. Anvil keeps the record of each one; your harness does the work.</p>
+<p class="lede">The whole loop is four moves. Anvil State keeps the record of each one; your harness does the work.</p>
 </div>
 <ol class="loop">
 <li>
 <h3>Plan</h3>
-<p>Write a PRD, a product requirements document. Anvil parses it into tasks with dependencies, acceptance criteria and verification commands, and you approve the plan.</p>
+<p>Write a PRD, a product requirements document. Anvil State parses it into tasks with dependencies, acceptance criteria and verification commands, and you approve the plan.</p>
 </li>
 <li>
 <h3>Claim</h3>
@@ -240,7 +240,7 @@ hide:
 <div class="head">
 <p class="kicker">02 · Coordination</p>
 <h2 class="title" id="coordination-title">One queue for every harness</h2>
-<p class="lede">Agents pull work instead of being handed it. A harness asks for the next task it is eligible for, claims it under a lease, does the work and submits evidence. Anvil decides who holds what. The harness decides how the work gets done.</p>
+<p class="lede">Agents pull work instead of being handed it. A harness asks for the next task it is eligible for, claims it under a lease, does the work and submits evidence. Anvil State decides who holds what. The harness decides how the work gets done.</p>
 </div>
 <ul class="points points--ruled">
 <li>
@@ -365,7 +365,7 @@ Claimed task 'T001' as 'agent-a'.
 <div>
 <dt class="stat__value">150 ms</dt>
 <dd class="stat__label">p95 at 64 writers</dd>
-<dd class="stat__note">That misses the target. Anvil is measured at eight concurrent writers, not at swarm scale.</dd>
+<dd class="stat__note">That misses the target. Anvil State is measured at eight concurrent writers, not at swarm scale.</dd>
 </div>
 </dl>
 <p class="aside"><strong>What this does not claim.</strong> The log is append-only and auditable, not tamper-proof: signatures cover acceptance proofs, not the log itself. Default durability favors speed and can lose the last few events in a hard power cut; set <code>durability: strict</code> to sync every event. The figures above are synthetic and come from the <a href="design/ledger-latency-validation/">ledger latency validation note</a>.</p>
@@ -433,9 +433,9 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <div>
 <h3>What it does not</h3>
 <ul class="terms--doesnt">
-<li>It does not prove the code is correct, or that the command really ran. A hook reports the result and Anvil does not re-run it, so an agent that can write the evidence buffer could forge one.</li>
+<li>It does not prove the code is correct, or that the command really ran. A hook reports the result and Anvil State does not re-run it, so an agent that can write the evidence buffer could forge one.</li>
 <li>The gate is advisory by default: it reports what is missing and lets a person approve. Set <code>strict_evidence: true</code> to refuse by default.</li>
-<li>Anvil runs checks itself only when you ask it to: with <code>anvil run</code> on Linux, or from a workflow file.</li>
+<li>Anvil State runs checks itself only when you ask it to: with <code>anvil run</code> on Linux, or from a workflow file.</li>
 <li>Actor names are attribution, not authentication, and an actor can approve its own submission. The record shows who did.</li>
 </ul>
 </div>
@@ -488,12 +488,12 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <p class="card__text">Init, PRD, plan, claim, evidence, done, in about five minutes.</p>
 </li>
 <li class="card card--link">
-<h4 class="card__title"><a href="how-to/using-anvil-on-any-harness/">Wire Anvil into your harness</a></h4>
+<h4 class="card__title"><a href="how-to/using-anvil-on-any-harness/">Wire Anvil State into your harness</a></h4>
 <p class="card__text">One command for Codex, Cursor, VS Code, Zed and more; a plugin for Claude Code.</p>
 </li>
 <li class="card card--link">
 <h4 class="card__title"><a href="how-to/execute-in-your-harness/">Execute in your own session</a></h4>
-<p class="card__text">With <code>llm_provider: harness</code>, your own session does the reasoning and Anvil makes no model calls.</p>
+<p class="card__text">With <code>llm_provider: harness</code>, your own session does the reasoning and Anvil State makes no model calls.</p>
 </li>
 <li class="card card--link">
 <h4 class="card__title"><a href="how-to/authoring-a-prd/">Author a PRD</a></h4>
@@ -538,7 +538,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <p class="card__text">Repositories, campaigns and tasks on a local Kanban board.</p>
 </li>
 <li class="card card--link">
-<h4 class="card__title"><a href="how-to/harness-execution/">Dispatch a task from Anvil</a></h4>
+<h4 class="card__title"><a href="how-to/harness-execution/">Dispatch a task from Anvil State</a></h4>
 <p class="card__text"><code>anvil run</code> hands one task to a configured harness, runs the frozen checks and stops at review. Linux only.</p>
 </li>
 </ul>
@@ -552,7 +552,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <div class="head">
 <p class="kicker">Harnesses</p>
 <h2 class="title" id="harnesses-title">Works where your agents work</h2>
-<p class="lede">Anvil is not tied to one harness. Install it once, then wire it into the ones you run. The installer previews every change, backs up each file it touches and can roll back.</p>
+<p class="lede">Anvil State is not tied to one harness. Install it once, then wire it into the ones you run. The installer previews every change, backs up each file it touches and can roll back.</p>
 </div>
 <div class="tiers">
 <div class="tier">
@@ -586,7 +586,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <p class="thesis">Orchestration is the hammer and the agents are the hand. Both keep changing. <em>The anvil is the surface the work is done on.</em></p>
 <div class="head">
 <p class="kicker">Scope</p>
-<h2 class="title" id="not-title">What Anvil is not</h2>
+<h2 class="title" id="not-title">What Anvil State is not</h2>
 </div>
 <ul class="grid grid--4">
 <li class="card">
@@ -606,7 +606,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <p class="card__text">GitHub Issues is a sync target, not the source of truth.</p>
 </li>
 </ul>
-<p class="aside"><strong>Status: beta.</strong> The core loop is stable and is used to build Anvil itself. Some command surfaces may still change before 1.0. The <a href="roadmap/">roadmap</a> says what is shipped and what is planned.</p>
+<p class="aside"><strong>Status: beta.</strong> The core loop is stable and is used to build Anvil State itself. Some command surfaces may still change before 1.0. The <a href="roadmap/">roadmap</a> says what is shipped and what is planned.</p>
 </div>
 </section>
 
@@ -617,7 +617,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <div class="head">
 <p class="kicker">Open source</p>
 <h2 class="title" id="contribute-title">Built in the open. Come build it.</h2>
-<p class="lede">Anvil is MIT licensed, and its roadmap, backlog and design decisions live in these docs. It is a small project, which means a good pull request changes it.</p>
+<p class="lede">Anvil State is MIT licensed, and its roadmap, backlog and design decisions live in these docs. It is a small project, which means a good pull request changes it.</p>
 </div>
 <ul class="points points--ruled">
 <li>

@@ -69,6 +69,12 @@ def _qualify_wheel(wheel: Path, root: Path) -> dict[str, Any]:
         [str(anvil), "describe", "--json"], cwd=root, env=clean_env
     )
     assert described.returncode == 0, (described.stdout + described.stderr)[-1600:]
+    # Both installed commands must reach the same versioned API. No wrapper,
+    # extra state directory or alternate protocol for the branded spelling.
+    alias = anvil.with_name("anvil-state" + anvil.suffix)
+    branded = _run([str(alias), "describe", "--json"], cwd=root, env=clean_env)
+    assert branded.returncode == 0, branded.stderr
+    assert json.loads(branded.stdout) == json.loads(described.stdout)
     payload = json.loads(described.stdout)
     data = payload["data"]
 

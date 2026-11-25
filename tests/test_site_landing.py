@@ -167,3 +167,15 @@ def test_search_scope_keeps_explicit_front_matter():
     plain = SimpleNamespace(file=SimpleNamespace(src_uri="how-to/web-interface.md"), meta={})
     hooks.on_page_markdown("body", page=plain, config=None, files=None)
     assert plain.meta["search"]["boost"] > 1
+
+
+def test_product_name_on_reader_facing_surfaces() -> None:
+    root = _repo_root()
+    assert "# Anvil State\n" in (root / "README.md").read_text(encoding="utf-8")
+    assert "site_name: Anvil State\n" in (root / "mkdocs.yml").read_text(encoding="utf-8")
+    assert "\ntitle: Anvil State " in _landing()
+    board = (root / "bin/src/anvil/_data/web/index.html").read_text(encoding="utf-8")
+    assert "<title>Anvil State · Work board</title>" in board
+    codex = json.loads((root / "packaging/codex/.codex-plugin/plugin.json").read_text())
+    assert codex["interface"]["displayName"] == "Anvil State"
+    assert codex["name"] == "anvil"  # Existing installations keep their identity.

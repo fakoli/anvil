@@ -5,7 +5,7 @@
     "url": "https://github.com/fakoli"
   },
   "metadata": {
-    "description": "Anvil — local-first, runtime-neutral project state for humans and AI coding agents."
+    "description": "Anvil State — local-first, runtime-neutral project state for humans and AI coding agents."
   },
   "plugins": [
     {
