@@ -1,6 +1,6 @@
-# Execute Anvil work in your current harness
+# Execute Anvil State work in your current harness
 
-Anvil owns project state. The current harness owns reasoning, tool execution,
+Anvil State owns project state. The current harness owns reasoning, tool execution,
 file edits, and model access. This works in a Codex or Claude subscription
 session and in a harness connected to a locally served model. Selecting a
 planning provider does not replace the model of an already running session.
@@ -44,11 +44,11 @@ carries the complete claim-to-evidence workflow.
 
 Configure the **harness** to use your existing local serving router and an
 explicit model alias using that harness's own provider configuration. Keep
-Anvil's CLI or MCP server available to it. Use the same `harness` config and
-execution loop above. Anvil will not start a model server, change routes,
+Anvil State's CLI or MCP server available to it. Use the same `harness` config and
+execution loop above. Anvil State will not start a model server, change routes,
 substitute a cloud model, or alter separately selected cloud sessions.
 
-If instead you want Anvil itself to call a local OpenAI-compatible endpoint for
+If instead you want Anvil State itself to call a local OpenAI-compatible endpoint for
 planning augmentation, that is an explicit API connection:
 
 ```yaml
@@ -71,5 +71,5 @@ Codex or Claude subscription execution as documented in
 [behavioral evals](https://github.com/fakoli/anvil/blob/main/evals/README.md).
 Offline integration tests verify the same state loop without invoking a model.
 A local-model deployment still needs its own tool-use qualification against
-its selected router and model; Anvil's portable state contract does not assert
+its selected router and model; Anvil State's portable state contract does not assert
 that every local model can follow a work packet.

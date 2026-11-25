@@ -138,9 +138,9 @@ Each guide is a complete path.
 
 | If you want to… | Start here |
 |---|---|
-| Wire Anvil State into the harness you use | [Using anvil on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) |
+| Wire Anvil State into the harness you use | [Using Anvil State on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) |
 | Ship one task end to end | [Claiming and shipping a task](https://anvilstate.com/how-to/claiming-and-shipping-a-task/) |
-| Run a loop unattended | [Driving the anvil loop](https://anvilstate.com/how-to/drive-the-anvil-loop/) |
+| Run a loop unattended | [Driving the Anvil State loop](https://anvilstate.com/how-to/drive-the-anvil-loop/) |
 | Carry work across sessions | [Long-running delivery](https://anvilstate.com/how-to/long-running-delivery/) |
 | Coordinate a milestone across parallel work | [Coordinating a milestone bundle](https://anvilstate.com/how-to/coordinating-a-bundle/) · [Concurrent execution journeys](https://anvilstate.com/how-to/concurrent-execution-journeys/) |
 | Use a subscription or local model for the reasoning | [Execute in your harness](https://anvilstate.com/how-to/execute-in-your-harness/) |
@@ -228,7 +228,7 @@ canonical task state and reader provenance. It is read-only by default;
 Full documentation: **[anvilstate.com](https://anvilstate.com/)**
 
 - [Getting started](https://anvilstate.com/how-to/getting-started/) — first project, end to end
-- [Using anvil on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) — Cursor, VS Code, Zed, Codex, …
+- [Using Anvil State on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) — Cursor, VS Code, Zed, Codex, …
 - [Architecture](https://anvilstate.com/architecture/) · [CLI reference](https://anvilstate.com/cli-reference/) · [MCP reference](https://anvilstate.com/mcp/)
 - [FAQ](https://anvilstate.com/faq/) — installing, storage, backups, and common gotchas
 - [Roadmap](https://anvilstate.com/roadmap/) · [CHANGELOG](CHANGELOG.md)

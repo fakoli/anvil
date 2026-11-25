@@ -1,4 +1,4 @@
-# anvil roadmap
+# Anvil State roadmap
 
 **Last updated:** 2026-08-24 (v0.6.5 closeout; restructured around Shipped /
 Now / Next / Later — the retired v1.11/v2.0/v2.1 version-target buckets are

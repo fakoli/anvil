@@ -26,7 +26,10 @@ the product name. Coordinate the following in a single maintenance window:
    downstream consumers. Record a known-good wheel and docs revision. Keep
    old attestations and published artifacts as historical records.
 2. Verify the existing PyPI project’s GitHub Trusted Publisher: repository owner
-   and slug, workflow `publish.yml` and environment `pypi`. Arrange the
+   and slug, workflow `publish.yml` and environment `pypi`. The release
+   workflow also protects jobs with `github.repository == 'fakoli/anvil'`:
+   update **all** those guards during cutover, not just the publisher setting.
+   Otherwise a renamed repository silently skips its own release jobs. Arrange the
    new binding with the PyPI owner before any new release; verify the release
    job still uses the intended protected environment. Do not publish a test
    release to the production project just to check a rename.

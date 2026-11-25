@@ -1,6 +1,6 @@
-# Using Anvil on any coding harness
+# Using Anvil State on any coding harness
 
-Anvil's engine does not depend on Claude Code. Any harness can drive the full
+Anvil State's engine does not depend on Claude Code. Any harness can drive the full
 loop through one of two surfaces. (New to terms like packet, claim, or lease?
 See the [glossary](../glossary.md).)
 
@@ -191,7 +191,7 @@ anvil never auto-activates them. Review and turn them on in the Codex app
 ## OpenClaw
 
 OpenClaw is its own agent platform with a full CLI — not a Claude `.mcp.json`
-bundle. Anvil installs **natively** and touches **none** of your files:
+bundle. Anvil State installs **natively** and touches **none** of your files:
 
 ```
 openclaw mcp add anvil --no-probe --command anvil-mcp              # register the server

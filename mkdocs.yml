@@ -158,7 +158,7 @@ nav:
   - Guides:
       - The core loop:
           - Claiming & shipping a task: how-to/claiming-and-shipping-a-task.md
-          - Driving the anvil loop: how-to/drive-the-anvil-loop.md
+          - Driving the Anvil State loop: how-to/drive-the-anvil-loop.md
           - Long-running delivery: how-to/long-running-delivery.md
       - Evidence & proof:
           - Verification profiles: how-to/verification-profiles.md
@@ -168,7 +168,7 @@ nav:
           - Coordinating a milestone bundle: how-to/coordinating-a-bundle.md
           - Concurrent execution journeys: how-to/concurrent-execution-journeys.md
       - Harnesses:
-          - Using anvil on any harness: how-to/using-anvil-on-any-harness.md
+          - Using Anvil State on any harness: how-to/using-anvil-on-any-harness.md
           - Execute in the current or local-model harness: how-to/execute-in-your-harness.md
           - Run a task with a configured harness: how-to/harness-execution.md
       - Interfaces & sync:
