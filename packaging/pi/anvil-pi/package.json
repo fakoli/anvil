@@ -1,7 +1,7 @@
 {
   "name": "anvil-pi",
   "version": "0.1.0",
-  "description": "Anvil State integration for the pi coding agent: coarse anvil_* tools over the `anvil --json` CLI, /anvil:* commands, and a bounded idle-state snapshot.",
+  "description": "Anvil state-layer integration for the pi coding agent: coarse anvil_* tools over the `anvil --json` CLI, /anvil:* commands, and a bounded idle-state snapshot.",
   "author": "Fakoli",
   "license": "MIT",
   "type": "module",
