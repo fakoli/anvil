@@ -684,12 +684,14 @@ by the parser — write `` - `pytest tests/` `` or `- pytest tests/` ; both are 
 
 Once `anvil prd parse` succeeds, the PRD status is `draft`. From there:
 
-1. **Review and approve the PRD**: `anvil prd review --approve` transitions the
-   PRD from `draft` → `reviewed` → `approved`. The claims manager enforces this gate —
-   no task can be claimed while the PRD is in `draft` or `reviewed` status.
+1. **Review and approve the PRD**: `anvil prd review` moves the PRD from `draft`
+   to `reviewed`, and `anvil prd review --approve` moves it from `reviewed` to
+   `approved`. They are two separate commands; `--approve` is refused on a draft.
+   The claims manager enforces this gate — no task can be claimed while the PRD
+   is in `draft` or `reviewed` status.
 
-2. **Generate and promote tasks**: `anvil plan` promotes requirements and features
-   into `proposed` tasks. `anvil score` populates the six-dimension scores
+2. **Generate and promote tasks**: `anvil plan` turns requirements and features
+   into `drafted` tasks. `anvil score` populates the six-dimension scores
    (complexity, parallelizability, context load, blast radius, review risk, agent
    suitability). `anvil expand T001` breaks tasks with `complexity ≥ 4` into
    subtasks. `anvil review tasks` promotes drafted tasks to `reviewed` and then
@@ -711,10 +713,10 @@ For tasks whose completion must be PROVEN by artifact content — benchmarks,
 migrations, deployments — a task block may declare **claims** and bind
 **artifact assertions** to them. A command exiting 0 only proves the command
 exited 0; an artifact assertion proves the produced artifact contains the
-result the task claims (issue #153). Declaring assertions is the contract;
-enforcement at `anvil apply --approve` (refusal code `claim_unproven`) lands
-with evidence-contracts:T005 - until then assertions are parsed and stored
-but not yet gated.
+result the task claims. Declaring assertions is the contract, and
+`anvil apply --approve` enforces it: approval re-evaluates the artifacts and
+is refused with code `claim_unproven` while any enforceable claim is
+unproven, whatever `strict_evidence` is set to.
 
 Syntax inside a `### Txxx:` task block:
 
@@ -731,9 +733,9 @@ Syntax inside a `### Txxx:` task block:
   predicates: `stage_order`, `stage_path`, `must_reach`,
   `must_not_fail_before`.
 
-Worked example (the voice-benchmark incident this feature exists to
-prevent):
+Worked example:
 
+````markdown
 ### T005: Run candidate benchmark matrix
 
 **Feature:** F002
@@ -771,6 +773,7 @@ Run bounded benchmark probes for the baseline and each viable candidate.
   stage_path: errors[*].stage
   must_not_fail_before: llm
 ```
+````
 
 A malformed block (missing/unclosed fence, invalid YAML, unknown op or
 kind) is a loud `anvil prd parse` error naming the task — an evidence

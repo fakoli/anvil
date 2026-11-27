@@ -33,7 +33,8 @@ adopted implicitly — see [Adopting a legacy bare-name workspace](#adopting-a-l
 1. **`ANVIL_ROOT`** (env) — an explicit, literal override: state lives at
    `<ANVIL_ROOT>/.anvil/`. Used by CI, tests, and anyone who wants an exact path.
 2. **`ANVIL_STATE_LAYOUT=local`** — opt out of the home workspace and keep state
-   **in the repo** at `<cwd>/.anvil/` (the legacy behavior).
+   **in the repo** at `<cwd>/.anvil/` (the legacy behavior). `anvil run` needs
+   the shared workspace and refuses this layout.
 3. **Default** (`ANVIL_STATE_LAYOUT=workspace`) — the home workspace above.
 
 The CLI and the MCP server resolve identically, so a host configures one project

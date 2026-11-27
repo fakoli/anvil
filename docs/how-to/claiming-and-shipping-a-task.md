@@ -16,7 +16,7 @@ ready → claimed → in_progress → needs_review → accepted → done
 
 `claim` moves `ready → claimed`. The first hook-recorded file change auto-transitions to `in_progress`. `submit` moves to `needs_review`. `apply --approve` moves through `accepted → done`; `apply --reject` returns the task to `drafted` for rework.
 
-The full 11-status state machine — including the named gates that fire on each transition — is documented in [`../architecture.md#task-lifecycle`](../architecture.md). The concurrency primitives that make claims safe under multi-actor load are in [`../architecture.md#concurrency-model`](../architecture.md).
+The full 12-status state machine — including the named gates that fire on each transition — is documented in [`../architecture.md#task-lifecycle`](../architecture.md). The concurrency primitives that make claims safe under multi-actor load are in [`../architecture.md#concurrency-model`](../architecture.md).
 
 ## Step 1 — Pick the next task: `anvil next`
 
@@ -83,14 +83,14 @@ Sample output:
 
 ```text
 Claimed task 'T012' as 'alice'.
-  Claim ID:    C9F3A210
+  Claim ID:    C9F3A2104
   Lease until: 2026-05-25T15:23:00+00:00
   Branch:      agent/t012-wire-submit-progress-evidence-buffer-flush
 
   Actor:        'alice'
   Actor identity is local coordination and audit attribution, not cryptographic authentication.
   Pin for continuation: `export ANVIL_ACTOR=alice`
-Run `anvil renew C9F3A210 --actor alice` to extend the lease before it expires.
+Run `anvil renew C9F3A2104 --actor alice` to extend the lease before it expires.
 ```
 
 ### Claim flags
@@ -174,18 +174,18 @@ with `240` as the in-code default; the project-level override lives in the
 resolved `config.yaml`). Renew it before expiry:
 
 ```bash
-anvil renew C9F3A210 --actor alice
+anvil renew C9F3A2104 --actor alice
 ```
 
 Sample output:
 
 ```text
-Renewed claim 'C9F3A210'.
+Renewed claim 'C9F3A2104'.
   New lease until: 2026-05-25T19:23:00+00:00
   Last heartbeat:  2026-05-25T15:23:00+00:00
 ```
 
-The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes` only when new hook-observed file progress or a pending verified attestation authorizes it. Only the exact persisted owner can renew an active claim. A mismatch refuses with the owner and structured `--actor` / `ANVIL_ACTOR` remedies. Pin `ANVIL_ACTOR` in the agent-loop environment, or carry the claim output's actor argument on each command. Pass `renew C9F3A210 --lease <minutes>` to override the renewal duration.
+The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes` only when new hook-observed file progress or a pending verified attestation authorizes it. Only the exact persisted owner can renew an active claim. A mismatch refuses with the owner and structured `--actor` / `ANVIL_ACTOR` remedies. Pin `ANVIL_ACTOR` in the agent-loop environment, or carry the claim output's actor argument on each command. Pass `renew C9F3A2104 --lease <minutes>` to override the renewal duration.
 
 When work is produced outside Anvil's hooks, follow [Attesting progress from an
 external writer](attesting-external-progress.md) to construct the exact `file`
@@ -201,10 +201,10 @@ A `renew` against an already-expired lease raises `ClaimError`: "lease expired .
 You can force-release someone else's stale (or active) claim with `--force`:
 
 ```bash
-anvil release C9F3A210 --force --reason "stale; reclaiming for hot-fix"
+anvil release C9F3A2104 --force --reason "stale; reclaiming for hot-fix"
 ```
 
-Note that `release` takes the **claim ID** (`C9F3A210`), not the task ID — claims have their own identifier (`C` + 8 hex chars) so the audit trail survives multiple claims per task over time.
+Note that `release` takes the **claim ID** (`C9F3A2104`), not the task ID — claims have their own identifier (`C` + 8 hex chars) so the audit trail survives multiple claims per task over time.
 
 ## Step 6 — Submit evidence: `anvil submit T012`
 
@@ -264,7 +264,7 @@ The output prints an **evidence gate summary** so you see immediately whether th
 ```text
 Evidence submitted for task 'T012'.
   Evidence ID:  EVA1B2C3D4
-  Claim ID:     C9F3A210 (auto-released)
+  Claim ID:     C9F3A2104 (auto-released)
   Submitted by: alice
   ...
 Task 'T012' status → needs_review.
@@ -303,7 +303,7 @@ Match is case-insensitive. The word-boundary on "PR" exists because plain substr
 
 ## Step 7 — Apply: `anvil apply T012`
 
-`apply` is the merge gate. It is **human-only by default** — not exposed via the MCP surface — so an agent cannot self-approve its own work.
+`apply` is the merge gate, and it is meant to be a reviewer's decision. The approval tool is not on the default MCP surface, so an agent limited to those tools cannot approve; it is on the opt-in planning surface as `apply_review_decision`. Nothing in the CLI stops a script or an agent with shell access from running `anvil apply --approve`, and an actor can approve its own submission. The approval records who gave it. Use `--strict`, or set `strict_evidence: true`, so approval is refused until the required proof is on record.
 
 ### Review-only mode (no flag)
 
@@ -359,7 +359,7 @@ anvil apply T012 --reject --reason "missing rate-limit test for the 429 path"
 ### Abandoning a claim cleanly
 
 ```bash
-anvil release C9F3A210 --reason "abandoning, blocked on upstream API"
+anvil release C9F3A2104 --reason "abandoning, blocked on upstream API"
 ```
 
 The task returns to `ready` and is immediately claimable by anyone. The reason is recorded on the `claim.released` event so the next claimant has context.
@@ -367,7 +367,7 @@ The task returns to `ready` and is immediately claimable by anyone. The reason i
 ### Force-releasing someone else's claim
 
 ```bash
-anvil release C9F3A210 --force --reason "stale recovery; original actor offline"
+anvil release C9F3A2104 --force --reason "stale recovery; original actor offline"
 ```
 
 `--force` bypasses the actor-ownership check and lets you release an `active` or `stale` claim by anyone. The original `claimed_by` is preserved on the event for audit.

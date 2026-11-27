@@ -153,9 +153,11 @@ open/closed state. The mapping is in `STATUS_TO_LABEL` /
 | `accepted`        | `status:accepted`      | open        |
 | `done`            | `status:done`          | **closed**  |
 | `rejected`        | `status:rejected`      | open        |
+| `closed`          | `status:closed`        | **closed**  |
 
-Only `done` closes the issue. `rejected` stays open so a human looking at
-the repo can see it was actively rejected, not silently archived.
+`done` closes the issue as completed. `closed` (a task closed without
+completion) closes it as not planned. `rejected` stays open so a human looking
+at the repo can see it was actively rejected, not silently archived.
 
 On update, the provider removes every other `status:*` label it manages
 before adding the new one. Non-`status:*` labels (user-added `bug`,

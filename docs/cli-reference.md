@@ -2029,6 +2029,24 @@ OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
   while any of its claimed tasks has incomplete verification evidence
   (`--actor`, `-q`/`--quiet`, `--json`; exit 2 = block).
 
+**Dispatching a task to a configured harness**
+
+Linux only. [Run a task with a configured harness](how-to/harness-execution.md)
+covers the full flow.
+
+- `anvil run-configure` — Register the coordination adapter once (`--script`,
+  `--interpreter`, `--profile`, `--write`), or explicitly preview and confirm a
+  pinned adapter upgrade (`--upgrade`, `--preview`, `--confirm`).
+- `anvil run TASK_ID` — Preview a ready task, then confirm that exact request
+  to dispatch it (`--preview`, `--confirm`). `--provider`, `--model`,
+  `--thinking` and `--wall-seconds` choose how the run executes.
+- `anvil continue RUN_ID` — Preview and confirm fresh work in an exact saved
+  conversation (`--preview`, `--confirm`, optional `--task`).
+- `anvil run-status [RUN_ID]` — Inspect retained execution status without
+  changing task state.
+- `anvil run-capabilities` — Read the verified model choices, or dispatch a
+  no-prompt refresh with `--refresh`.
+
 **Data lifecycle and maintenance**
 
 - `anvil replay --from-events PATH --into PATH` — Rebuild canonical state

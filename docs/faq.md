@@ -79,8 +79,8 @@ Two surfaces are always available:
   client connects; tool responses are structured JSON with explicit error
   envelopes.
 
-When a runtime cannot speak MCP (Cursor has no shell, some Copilot modes
-have no stdio), the CLI surface is the fallback. Hooks are Claude
+When a harness has no MCP client, the CLI is the fallback: anything that can
+run a shell command can drive the same loop. Hooks are Claude
 Code-specific because they use the SessionStart / PreToolUse / PostToolUse
 contract — agents in other runtimes still get full coordination via
 claims + leases, just without the editor-time warning.
@@ -165,14 +165,17 @@ aborts mid-batch. See [`llm.md` § Cost notes](llm.md).
 
 There is no shipped migration tool. The recommended path is:
 
-1. `anvil init --name "<project>"` — scaffolds `.anvil/`.
-2. Author `.anvil/prd.md` against the schema in
+1. `anvil init --name "<project>"` — creates the project's state and prints
+   the path of the PRD to write.
+2. Author the PRD at that path against the schema in
    [`prd-template.md`](prd-template.md). Existing intent / acceptance
    criteria from your markdown status files map cleanly into PRD task
    blocks.
-3. `anvil prd parse` then `prd review --approve` to promote the
-   PRD to `approved`.
-4. `anvil plan` then `score` to materialize tasks and dependencies.
+3. `anvil prd parse`, then `anvil prd review` and `anvil prd review --approve`
+   to take the PRD to `approved`. Approval is two commands; `--approve` is
+   refused on a draft.
+4. `anvil plan`, `anvil score` and `anvil review tasks` to create the tasks
+   and promote them to `ready`.
 5. Once tasks exist in the database, the old `agent-*-status.md` files can
    be deleted. Their role (per-agent status notes) is replaced by claim
    rows, evidence, and the `events.jsonl` audit log.

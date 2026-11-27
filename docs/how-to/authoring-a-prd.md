@@ -173,8 +173,8 @@ PRD source: default
 ```
 
 The parser writes a `prd.parsed` event with the full payload (summary, goals,
-non-goals, requirements list, acceptance criteria, risks, open questions). Features and
-tasks are emitted as separate entities. PRD status is now `draft`.
+non-goals, requirements list, acceptance criteria, risks, open questions). The features
+and tasks it counted become rows only when you run `anvil plan`. PRD status is now `draft`.
 
 ---
 

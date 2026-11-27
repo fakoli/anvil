@@ -227,9 +227,11 @@ in-repo directory. See [`getting-started.md#where-your-state-lives`](getting-sta
 that the prompt path falls back silently. The audit event records
 `resolution="prompt_defaulted_to_local"` so you can grep for these later.
 
-The `--fix` flag reconciles remote state into local on conflicts — it forces
-a pull for tasks whose `SyncMapping` is in the `conflict` state — useful when
-the remote is the trusted version after an out-of-band edit:
+With a provider, the `--fix` flag reconciles remote state into local on
+conflicts — it forces a pull for tasks whose `SyncMapping` is in the `conflict`
+state — useful when the remote is the trusted version after an out-of-band
+edit. (On the bare `anvil sync` command, described below, `--fix` means
+something else: apply the reconciliation fixes it lists.)
 
 ```bash
 anvil sync github --pull --fix

@@ -202,7 +202,7 @@ reconciliation code.
 
 ## Status label mapping
 
-Every provider must map anvil's 11 `TaskStatus` values to whatever
+Every provider must map anvil's 12 `TaskStatus` values to whatever
 the remote system uses. Centralise the mapping in a module-level
 `STATUS_TO_LABEL: dict[TaskStatus, str]` and a reverse `LABEL_TO_STATUS`
 so push and fetch agree verbatim.
@@ -210,7 +210,7 @@ so push and fetch agree verbatim.
 The GitHub Issues provider is the canonical reference implementation —
 see `STATUS_TO_LABEL` in `sync/providers/github_issues.py:67` for the
 source, or [`github-sync.md` → Status label mapping](github-sync.md#status-label-mapping)
-for the rendered table (all 11 statuses, their GitHub label, and open/closed
+for the rendered table (all 12 statuses, their GitHub label, and open/closed
 state).
 
 Where the provider has a separate open/closed bit (GitHub, Jira), keep
