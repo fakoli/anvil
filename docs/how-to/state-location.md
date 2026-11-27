@@ -1,6 +1,6 @@
-# Where anvil stores its state
+# Where Anvil State stores its data
 
-anvil keeps everything for a project in one state directory — `state.db` (SQLite),
+Anvil State keeps everything for a project in one state directory — `state.db` (SQLite),
 `config.yaml`, `events.jsonl`, `packets/`, the evidence buffer.
 
 ## Default: a shared workspace in your home directory

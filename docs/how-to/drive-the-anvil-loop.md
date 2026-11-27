@@ -1,13 +1,13 @@
-# Drive the Anvil loop
+# Drive the Anvil State loop
 
-Anvil has two front doors. The first is the **PRD**: author requirements, and
-Anvil turns them into a governed, ready-to-execute task queue. The second is the
+Anvil State has two front doors. The first is the **PRD**: author requirements, and
+Anvil State turns them into a governed, ready-to-execute task queue. The second is the
 **loop**: drive that queue from whatever automation a runtime gives you — a shell
 `while`, a Claude Code `/loop`, a scheduled Codex automation — so each step runs
-Anvil's governed transitions instead of ad-hoc script state.
+Anvil State's governed transitions instead of ad-hoc script state.
 
 The PRD **is** the spec. You do not author a workflow file from scratch for the
-common case — Anvil already produced the ready queue. The loop's only job is to
+common case — Anvil State already produced the ready queue. The loop's only job is to
 **transfer that queue into a runtime** and run the body once per task.
 
 New to terms like the loop, packet, or claim? See the [glossary](../glossary.md).
@@ -74,7 +74,7 @@ Both modes run the **same body**; they differ only in cadence.
 
 ### One-per-invocation
 
-Run the body once for `anvil next`'s task, then exit. The cursor is Anvil's
+Run the body once for `anvil next`'s task, then exit. The cursor is Anvil State's
 durable state, so the next invocation resumes from the next ready task. Fits a
 scheduled fire (Codex automation), a cron job, or a single CI step.
 
@@ -110,7 +110,7 @@ run loses no progress — re-run and it continues from whatever is still `ready`
 When several related tasks should produce one reviewed delivery, use a coordinator-first
 execution bundle instead of forcing one conversational handoff per task. The coordinator
 keeps integration in the main loop and may delegate bounded work without transferring
-Anvil ownership. See [Coordinating a milestone bundle](coordinating-a-bundle.md).
+Anvil State ownership. See [Coordinating a milestone bundle](coordinating-a-bundle.md).
 
 ## 5. Per-runtime adapters
 

@@ -1,8 +1,10 @@
 <div align="center">
 
-![Anvil — the system of record for agent teams](assets/banner.png)
+<img src="docs/img/logo.svg" width="80" height="80" alt="Anvil State">
 
-# Anvil
+<a name="anvil"></a>
+
+# Anvil State
 
 **The system of record for agent teams.**
 Agents come and go. The record stays.
@@ -17,11 +19,13 @@ Agents come and go. The record stays.
 
 ---
 
-Anvil is an open-source, local-first ledger for AI coding agents. Requirements,
+Anvil State is an open-source, local-first ledger for AI coding agents. Requirements,
 tasks, claims, and evidence live in one place on your machine, outside any
 harness, so Claude Code, Codex, Cursor, and a shell loop can work the same plan
 without overwriting each other. Every harness reaches that state through the
 same two doors: a CLI (`anvil`) and an MCP server (`anvil-mcp`).
+
+The product and PyPI distribution are **Anvil State** (`anvil-state`). Existing projects keep the same `anvil` command, MCP configuration, and stored data. See the [naming and compatibility guide](docs/reference/product-names.md).
 
 It is for developers who run more than one coding agent, or one agent across
 many sessions.
@@ -31,7 +35,7 @@ many sessions.
 
 ## See it run
 
-[![A recorded Anvil session: agent-b's claim on a task agent-a already holds is refused, then an approval with no evidence on record is refused](assets/demo-terminal.webp)](https://anvilstate.com/#demo)
+[![A recorded Anvil State session: agent-b's claim on a task agent-a already holds is refused, then an approval with no evidence on record is refused](assets/demo-terminal.webp)](https://anvilstate.com/#demo)
 
 Two agents reach for the same task and one is refused; approval is refused
 until there is evidence. This is real CLI output, recorded by
@@ -141,9 +145,9 @@ Each guide is a complete path.
 
 | If you want to… | Start here |
 |---|---|
-| Wire Anvil into the harness you use | [Using anvil on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) |
+| Wire Anvil State into the harness you use | [Using Anvil State on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) |
 | Ship one task end to end | [Claiming and shipping a task](https://anvilstate.com/how-to/claiming-and-shipping-a-task/) |
-| Run a loop unattended | [Driving the anvil loop](https://anvilstate.com/how-to/drive-the-anvil-loop/) |
+| Run a loop unattended | [Driving the Anvil State loop](https://anvilstate.com/how-to/drive-the-anvil-loop/) |
 | Carry work across sessions | [Long-running delivery](https://anvilstate.com/how-to/long-running-delivery/) |
 | Coordinate a milestone across parallel work | [Coordinating a milestone bundle](https://anvilstate.com/how-to/coordinating-a-bundle/) · [Concurrent execution journeys](https://anvilstate.com/how-to/concurrent-execution-journeys/) |
 | Use a subscription or local model for the reasoning | [Execute in your harness](https://anvilstate.com/how-to/execute-in-your-harness/) |
@@ -178,9 +182,11 @@ Each guide is a complete path.
 
 The [CHANGELOG](CHANGELOG.md) has the release-by-release history.
 
-## Anvil vs. an issue tracker
+<a name="anvil-vs-an-issue-tracker"></a>
 
-| | Anvil | GitHub Issues / markdown-file conventions |
+## Anvil State vs. an issue tracker
+
+| | Anvil State | GitHub Issues / markdown-file conventions |
 |---|---|---|
 | **State shape** | Pydantic models in SQLite, validated at every transition | Free-form markdown in an issue body or `.md` file |
 | **Coordination** | `Claim` row with lease + heartbeat; stale leases released at coordination entry points | Assignment-by-label — no enforcement |
@@ -196,7 +202,7 @@ The [CHANGELOG](CHANGELOG.md) has the release-by-release history.
   a mechanism check, not a field result.
 - **Ledger writes.** p95 is 12–14 ms inside the engine with 8 concurrent
   writers. At 64 writers it is 150 ms, which misses the 15 ms target
-  ([validation note](docs/design/ledger-latency-validation.md)). Anvil is
+  ([validation note](docs/design/ledger-latency-validation.md)). Anvil State is
   measured at eight concurrent writers, not at swarm scale.
 - **From the maintainer's own sessions.** One 23.7-hour autonomous session
   produced 32 tasks, 21 PRs, and a release. Two concurrent agent loops finished
@@ -205,7 +211,9 @@ The [CHANGELOG](CHANGELOG.md) has the release-by-release history.
   a semantically broken "clean" merge before they shipped. The session logs
   behind these figures are not published, so treat them as anecdote.
 
-## What Anvil is not
+<a name="what-anvil-is-not"></a>
+
+## What Anvil State is not
 
 - **Not a coding agent.** It is the layer around your agents: packets in,
   evidence out.
@@ -231,14 +239,14 @@ canonical task state and reader provenance. It is read-only by default;
 Full documentation: **[anvilstate.com](https://anvilstate.com/)**
 
 - [Getting started](https://anvilstate.com/how-to/getting-started/) — first project, end to end
-- [Using anvil on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) — Cursor, VS Code, Zed, Codex, …
+- [Using Anvil State on any harness](https://anvilstate.com/how-to/using-anvil-on-any-harness/) — Cursor, VS Code, Zed, Codex, …
 - [Architecture](https://anvilstate.com/architecture/) · [CLI reference](https://anvilstate.com/cli-reference/) · [MCP reference](https://anvilstate.com/mcp/)
 - [FAQ](https://anvilstate.com/faq/) — installing, storage, backups, and common gotchas
 - [Roadmap](https://anvilstate.com/roadmap/) · [CHANGELOG](CHANGELOG.md)
 
 ## Contributing
 
-Anvil is MIT licensed and developed in the open; its roadmap, backlog, and
+Anvil State is MIT licensed and developed in the open; its roadmap, backlog, and
 design decisions live in the docs. Good places to start are a
 [sync provider](docs/sync-providers.md) (GitHub Issues ships today), packaging a
 harness that is missing, and the docs themselves. The

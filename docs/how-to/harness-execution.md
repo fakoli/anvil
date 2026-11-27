@@ -1,20 +1,20 @@
-# Run an Anvil task with a configured harness
+# Run an Anvil State task with a configured harness
 
-Anvil can dispatch one ordinary ready task to the registered Codex–Pi
+Anvil State can dispatch one ordinary ready task to the registered Codex–Pi
 coordination adapter, integrate verified returned files in an isolated native
 claim checkout, run the frozen verification commands there, and submit their
 real claim-bound proofs. Successful execution ends at `needs_review`; independent
 review and explicit final approval remain separate.
 
 Install the coordination plugin and configure its private OpenShell profile
-first. Register its installed files once with Anvil (preview by omitting
+first. Register its installed files once with Anvil State (preview by omitting
 `--write`):
 
 ```sh
 anvil run-configure --script /installed/coordination/scripts/coordinate.py --interpreter /absolute/python3 --profile /private/profile.json --write
 ```
 
-The registration lives only in the owner's global Anvil YAML configuration.
+The registration lives only in the owner's global Anvil State YAML configuration.
 Project configuration cannot replace executable or profile paths. Registration
 pins the interpreter, script, extension and profile bytes; it does not qualify
 the model or runtime. Changed registered bytes require an intentional reviewed
@@ -71,7 +71,7 @@ uses those saved options and rechecks current material scope. Ready tasks get a
 native isolated claim. To use an existing claim, run from its isolated checkout
 as its exact actor. Dependencies must be `done`. Bundle members, root sets,
 unbounded paths, verification profiles and dirty source refuse in this slice.
-New claim actors use Anvil's native Unicode normalization; existing owners must
+New claim actors use Anvil State's native Unicode normalization; existing owners must
 still match their recorded identity exactly. Initial Run requires shared
 workspace State. `ANVIL_STATE_LAYOUT=local` refuses before reservation with
 `unsupported_local_isolated_mode`; this command never creates replacement State
@@ -119,7 +119,7 @@ review or accepted state. Conversation history grants no authority or extra scop
 The current clean source must descend from the prior source, and native isolated
 claim planning must select that exact commit. Inspect and commit changes on the
 owned branch first; if planning cannot preserve it, establish the normal eligible
-owner claim explicitly. Anvil never resets a worktree or silently changes the
+owner claim explicitly. Anvil State never resets a worktree or silently changes the
 selected source. Old ephemeral runs, stale checkpoints, foreign conversations
 and uncertain outcomes refuse; no fresh-session fallback or live-process attach
 is available.
@@ -148,7 +148,7 @@ owner reconciliation; they are never automatically retired or replayed.
 
 The worker runs independently of the CLI and does not hold an execution-wide
 State lock. Each task has an exclusive State-local operational slot. Duplicate
-confirmation cannot launch again. Receipts distinguish the Anvil run, native
+confirmation cannot launch again. Receipts distinguish the Anvil State run, native
 claim, adapter run and owned processes; adapter model statements are never
 native verification proofs. Logs are bounded; overflow is a failed check.
 Each capture uses an owned supervisor to stop and reap local descendants,
@@ -186,7 +186,7 @@ actual outcome. Default Run never depends on this metadata cache.
 A verified catalog is fresh for 300 seconds and pins the adapter/profile bytes.
 Only selectable model IDs, the effective selection and supported thinking levels
 for that exact observed model are exposed. The cache counts omitted catalog entries that
-exceed Anvil’s portable selection bounds. An unrelated omitted model or optional
+exceed Anvil State’s portable selection bounds. An unrelated omitted model or optional
 cache storage failure cannot block a valid task return; Run status reports an
 unavailable cache. Selected options remain strict. Metadata refresh verifies the
 exact registered sandbox and stopped main instance before publishing its cache.
@@ -204,7 +204,7 @@ official session, checkpoint, preserved-prefix and stable workspace evidence.
 Raw transcripts and remote session paths are not user-supplied selectors.
 These bind the native claim, source, exact preimages and actual host permission
 bits, assignment, selected options, artifact hashes and stopped owner custody.
-Contract digests use Anvil's canonical UTF-8 JSON. Local interpreter pinning and
+Contract digests use Anvil State's canonical UTF-8 JSON. Local interpreter pinning and
 operational status remain separate; neither an adapter result nor sandbox checks
 grant native acceptance. Hidden Git index flags and special file-mode bits
 refuse rather than hiding source changes or normalizing permissions.

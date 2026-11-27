@@ -1,8 +1,8 @@
-# Getting started with anvil
+# Getting started with Anvil State
 
-> anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite in a per-project workspace under `~/.anvil/` and exposed through a CLI and an MCP server. This walkthrough takes you from an empty directory to a shipped task in about five minutes.
+> Anvil State is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite in a per-project workspace under `~/.anvil/` and exposed through a CLI and an MCP server. This walkthrough takes you from an empty directory to a shipped task in about five minutes.
 
-New to anvil's vocabulary — packet, claim, lease, gate? Keep the [glossary](../glossary.md) open in another tab.
+New to Anvil State's vocabulary — packet, claim, lease, gate? Keep the [glossary](../glossary.md) open in another tab.
 
 ## What you'll do
 
@@ -18,7 +18,7 @@ By the end you will have one task in `done`, one claim recorded in `events.jsonl
 
 ## Where your state lives
 
-By default anvil keeps state **outside** your project, in a per-project HOME workspace: `~/.anvil/workspaces/<dirname>-<hash8>/.anvil/` (e.g. `~/.anvil/workspaces/my-project-183a2542/.anvil`). Your repo stays clean — no `.anvil/` directory appears inside it. `anvil status` prints the exact location on its `Path:` line, and `anvil init` prints the absolute PRD path in its next-step hint. Two environment variables override the default: `ANVIL_STATE_LAYOUT=local` restores the in-repo `./.anvil/` layout, and `ANVIL_ROOT=<dir>` pins state to `<dir>/.anvil` literally. Wherever this guide writes `.anvil/…`, it means the state directory `anvil status` reports.
+By default Anvil State keeps state **outside** your project, in a per-project HOME workspace: `~/.anvil/workspaces/<dirname>-<hash8>/.anvil/` (e.g. `~/.anvil/workspaces/my-project-183a2542/.anvil`). Your repo stays clean — no `.anvil/` directory appears inside it. `anvil status` prints the exact location on its `Path:` line, and `anvil init` prints the absolute PRD path in its next-step hint. Two environment variables override the default: `ANVIL_STATE_LAYOUT=local` restores the in-repo `./.anvil/` layout, and `ANVIL_ROOT=<dir>` pins state to `<dir>/.anvil` literally. Wherever this guide writes `.anvil/…`, it means the state directory `anvil status` reports.
 
 ## Prerequisites
 

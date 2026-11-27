@@ -1,6 +1,6 @@
 # Glossary
 
-Short definitions for the vocabulary anvil's docs use without re-explaining
+Short definitions for the vocabulary the Anvil State docs use without re-explaining
 it every time. Each entry links to the doc that covers the term in depth.
 
 ### claim

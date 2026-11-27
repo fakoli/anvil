@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Anvil">
-  <!-- The Anvil mark: a record slab between two translucent layers. Redrawn
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Anvil State">
+  <!-- The Anvil State mark: a record slab between two translucent layers. Redrawn
        as vector from assets/logo-1024.png so it sits cleanly on any surface. -->
   <g transform="translate(32 32) scale(1.62) translate(-32 -32.1)">
     <path d="M32 29.4 50 39.25 32 49.1 14 39.25Z" fill="#4b4e9a" fill-opacity=".85"/>

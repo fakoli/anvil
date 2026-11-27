@@ -26,7 +26,7 @@ meta:
     - evidence-based
 
 about:
-  title: anvil
+  title: Anvil State
   description: >-
     Local-first project state engine. Turns rough ideas and PRDs into reviewed,
     lockable, evidence-backed work packets that humans and AI agents can
