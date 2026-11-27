@@ -65,6 +65,7 @@ anvil packet T001                     # the contract: criteria, files, verify cm
 uv run pytest -x > pytest.log 2>&1; code=$?        # the packet's verification command
 anvil hook capture-evidence --command "uv run pytest -x" \
   --exit-code "$code" --stdout-file pytest.log --actor loop   # record the command proof
+[ "$code" -eq 0 ] || exit "$code"                  # a failed check stops before submit
 anvil submit T001 --actor loop \
   --commands "uv run pytest -x" \
   --files-changed "src/app/foo.py"    # hand in the evidence; -> needs_review
@@ -75,8 +76,15 @@ anvil apply T001 --approve --strict   # the gate; --strict refuses unverified wo
 record `capture-evidence` wrote: the exact command, its exit code and a hash of
 its output, bound to the claim named by `ANVIL_CLAIM_ID`. Without that variable
 the capture still exits 0 but is bound to nothing, and the gate reports the
-check as missing. In a harness with Anvil's hooks installed the capture happens
-as the command runs, so you only write that step yourself in a bare shell.
+check as missing. A task with several verification commands needs one capture
+for each. If a check fails, stop before `submit`: `submit` releases the claim,
+and the task would sit in `needs_review` with a failing proof.
+
+Anvil's hooks make this capture for you only when the command contains
+`pytest`, `ruff check`, `mypy`, `npm test`, `cargo test` or `bun test`
+([the matcher](../hooks-reference.md#capture-evidence-dispatcher-posttooluse-bash)).
+For any other verification command, such as `go test ./...` or `make test`, and
+for every command in a bare shell, run the capture step yourself.
 
 `apply` is the gate: with `--strict` it refuses `--approve` until every required
 check has a matching, passing command proof. Leasing + evidence gating are why

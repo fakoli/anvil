@@ -43,9 +43,11 @@ Advance exactly ONE Anvil task, then stop. Do not loop.
 5. Implement against the acceptance criteria on the claim's branch. Run every
    verification command in the packet; do not proceed if any fails.
 6. `anvil submit <task> --commands "<commands run>" --files-changed "<paths>"`
-   — hands in what ran and what changed (the hooks captured each command's
-   proof as it ran); this auto-releases the claim and moves the task to
-   needs_review.
+   — hands in what ran and what changed; this auto-releases the claim and moves
+   the task to needs_review. The hooks capture a command's proof as it runs
+   only when the command contains `pytest`, `ruff check`, `mypy`, `npm test`, `cargo test` or `bun test`.
+   For any other verification command, run `anvil hook capture-evidence` for
+   it before submitting.
 7. Run three independent adversarial reviews with distinct angles before
    presenting the task for acceptance. Fix blocking findings and repeat affected
    reviews. Keep the task in needs_review; human confirmation is required before

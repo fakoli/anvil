@@ -39,8 +39,10 @@ already wrap this; the raw flow is:
    criteria, files in scope, verification commands). Read it before editing.
 4. Do the work on the claim's branch; run the packet's verification commands.
 5. `anvil submit <task> --commands "<cmds>" --files-changed "<paths>"` — hands
-   in what ran and what changed (the hooks captured each command's proof as it
-   ran); this auto-releases the claim → `needs_review`.
+   in what ran and what changed; this auto-releases the claim → `needs_review`.
+   The hooks capture a command's proof as it runs only when the command
+   contains `pytest`, `ruff check`, `mypy`, `npm test`, `cargo test` or `bun test`. For any other verification command, run
+   `anvil hook capture-evidence` for it before submitting.
 6. `anvil apply <task> --approve` — the gate (refuses approval when required
    evidence is missing; pass `--strict` to enforce). Then loop back to step 1.
 
