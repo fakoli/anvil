@@ -74,6 +74,7 @@ verify() {
 # reads what was recorded and lists each required proof with `satisfied`. Checked
 # before `submit` for the same reason as above: the claim is still held, so the
 # task can be fixed and re-run rather than left in needs_review without proof.
+# Command proofs only: the preflight does not assess other evidence (see step 5).
 require_proofs() {
 	preflight="$(anvil evidence-preflight "$task" --json)" || {
 		printf '%s\n' "$preflight" >&2
@@ -147,6 +148,11 @@ while true; do
 	# 5. Submit completion evidence: what you ran (one --commands per command
 	#    verified above) and what you changed. This releases the claim and moves
 	#    the task to needs_review.
+	#    This skeleton hands in command proofs and changed files ONLY. A task
+	#    that also requires other evidence (a link, a diff, a screenshot, an
+	#    artifact assertion) needs the matching flags added here (see
+	#    `anvil submit --help`): `require_proofs` does not look at those
+	#    requirements, and step 6 refuses the task without them.
 	anvil submit "$task" \
 		--commands "REPLACE_WITH_VERIFICATION_COMMAND" \
 		--files-changed "REPLACE_WITH_FILES_CHANGED"
