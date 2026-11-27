@@ -345,10 +345,8 @@ log; a CI equivalence test
 ([`tests/test_replay_equivalence.py`](https://github.com/fakoli/anvil/blob/main/tests/test_replay_equivalence.py))
 verifies the guarantee. `anvil backup` / `anvil restore` also ship —
 S3 push/pull of `events.jsonl` plus a replay-based restore. Only the
-`anvil snapshot` subcommand (item P9B-7, a local sqlite `.backup`
-wrapper — see
-[`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot-replay))
-remains open. Copying the resolved state directory wholesale stays as the fully-local
+`anvil snapshot` subcommand (a local sqlite `.backup` wrapper, on the
+[roadmap](roadmap.md)) remains open. Copying the resolved state directory wholesale stays as the fully-local
 fallback; the replay guarantee makes that safe and minimal:
 
 ```bash
@@ -397,7 +395,7 @@ replaces only that PRD's rows and leaves the others untouched.
 
 A `snapshots/` subdirectory was originally planned (and is shown in the v0
 spec) but the `anvil snapshot` subcommand has not yet shipped — see
-[Roadmap → Snapshot / replay](roadmap.md#theme-snapshot-replay).
+the [roadmap](roadmap.md).
 Backups today are done with `anvil backup` / `anvil restore` (S3 push/pull
 of `events.jsonl` plus a replay-based restore) or by copying the resolved state
 directory wholesale (`cp -R`); the replay guarantee makes that safe. Run
@@ -498,7 +496,7 @@ tag-disables them at startup).
 Sync tools (`sync_run`, `sync_health`, `sync_status`, `sync_reconcile`) are
 not yet on the MCP surface — agents that want sync today shell out via Bash
 to `anvil sync`. See
-[Roadmap → MCP sync tools](roadmap.md#theme-mcp-surface-sync-tools).
+the [roadmap](roadmap.md).
 
 ### Hooks (5)
 
@@ -581,21 +579,16 @@ points at a file you can grep.
 
 ## What is NOT here yet
 
-This document describes the current shipped behaviour only. The full backlog of
-planned-but-not-yet-shipped items is in [`roadmap.md`](roadmap.md);
-the notable open themes:
+This document describes the current shipped behaviour only. What is planned
+is on the [roadmap](roadmap.md); the notable open themes:
 
+- independent re-execution of recorded commands, and a strict evidence gate by
+  default;
 - additional workflow-aware sync providers and provider-specific configuration;
 - webhook-based sync and remaining conflict-resolution wiring;
 - the local SQLite `anvil snapshot` backup/retention command (distinct from the
   shipped read-only `anvil project snapshot` provider operation);
-- an MCP sync surface; and
-- focused agent, skill, hook, and documentation hygiene.
-
-Each item carries a backlog id (`P9B-N` from the Phase 9 backlog or
-`P11-XX-XN` from the Phase 11 backlog) preserved across audits — see
-[`roadmap.md`](roadmap.md) for per-item acceptance criteria, file pointers,
-and welder-effort estimates.
+- an MCP sync surface.
 
 ---
 

@@ -1,0 +1,694 @@
+# anvil roadmap (maintainer tracker)
+
+> The item-level tracker for maintainers. The public roadmap is the
+> one-screen page at [`../roadmap.md`](../roadmap.md); keep the two in step.
+
+**Last updated:** 2026-08-24 (v0.6.5 closeout; restructured around Shipped /
+Now / Next / Later — the retired v1.11/v2.0/v2.1 version-target buckets are
+gone; see [How this is organized](#how-this-is-organized))
+**Source of truth:** this file. Archived phase backlogs at [`phase-9-backlog.md`](../archive/phase-9-backlog.md) and [`phase-11-backlog.md`](../archive/phase-11-backlog.md) are kept for historical audit only — do not add new items there.
+**Companion:** [`tech-debt-backlog.md`](../tech-debt-backlog.md) for non-roadmap debt (12 OPEN CL/TQ/PS items from PR #41 critics; tracked by origin PR, closed across phases). Items there are not duplicated here unless a roadmap item naturally touches the same file.
+
+## How this is organized
+
+- **Priority bucket** = when the item actually gets worked, not which numbered
+  release it ships in. anvil is on the 0.x line now and no longer plans by
+  `v1.11`/`v2.0`/`v2.1` milestone labels — those names are gone from the
+  structure below (historical "shipped in vX.Y.Z" citations on individual
+  items are untouched; they're audit trail, not planning taxonomy).
+  - **[Shipped](#shipped)** = already landed. Kept here, not deleted, so this
+    file stays the append-only record of what was promised and delivered.
+  - **[Now](#now)** = the committed direction for the current stretch — the
+    integrity-first priority track. What actually gets built next, ahead of
+    everything in Next/Later.
+  - **[Next](#next)** = wanted and scoped, picked up once Now clears: the
+    Phase 10 audit's mechanical carry-forward batch, plus the bigger
+    capability expansion (multi-provider sync scale-out, push-based sync
+    infra, per-provider config schemas).
+  - **[Later](#later)** = follow-on capability and opportunistic hygiene —
+    additional sync providers, the local SQLite backup snapshot subcommand,
+    MCP sync tools,
+    doc/composition cleanups, and items wanted but without a forcing function
+    yet (formerly the separate `unscheduled` bucket; folded in here).
+- **Theme** = capability group (sync providers, conflict resolution,
+  snapshot/replay, MCP surface, doc agents, hooks, etc.). Themes are durable
+  across priority buckets; an item may move bucket, its theme rarely does.
+- **Item IDs** preserved verbatim from origin (`P9B-N` from phase-9-backlog,
+  `P11-XX-XN` from phase-11-backlog, `SL-N`/`WF-N` from the integrity-first
+  priority track) so commit messages, audit cross-references, and the
+  [Phase 10 audit](../archive/2026-05-26-plugin-audit.md) stay stable. Every ID
+  in the archived backlogs appears here exactly once (except P11-SK-S5, see
+  [Closed / shipped](#closed-shipped-cross-reference)).
+
+**Status legend** (carried over from origin files, plus `SHIPPED` for items
+that landed): `OPEN` = wanted, not actively scheduled; `TARGETED` = scheduled
+within its bucket; `SPEC-FIRST` = needs a design doc before implementation;
+`SHIPPED` = landed (kept inline alongside open siblings for narrative
+continuity, e.g. in the Wave lists below); `PARTIALLY SHIPPED` = part of the
+acceptance criteria landed, part is still open.
+
+---
+
+## Shipped
+
+Capability that has already landed. Kept here — not deleted — so this file
+stays the append-only record of what was promised and delivered; full
+item-level detail for the integrity-first track still lives inline in
+[Now](#now) (shipped items stay listed there too, marked **SHIPPED**, next to
+their still-open siblings). This section is the scannable summary the
+[docs assessment](../plans/2026-07-07-docs-assessment.md) asked for — e.g. `sync
+github`, `replay`, `run-workflow`, multi-PRD, and `migrate-workspace` are all
+shipped.
+
+### Integrity-first track — Wave 1 & Wave 2
+
+- **[SL-0]** Evidence gate unified with the `apply` preview. Shipped in 1.17.1
+  (PR #66) — `transitions._evidence_complete` delegates to
+  `review.gates.evidence_complete`, locked together by a parametrized
+  agreement test.
+- **[SL-1]** Replay proven in CI. Shipped in 1.19.0 — `anvil replay`
+  ([`cli/replay.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/replay.py))
+  rebuilds state from `events.jsonl`, and
+  [`tests/test_replay_equivalence.py`](https://github.com/fakoli/anvil/blob/main/tests/test_replay_equivalence.py)
+  asserts replayed state matches original state on every PR.
+- **[SL-3]** Typed `ProofArtifact` evidence. Shipped in 0.1.0 (B48, part 1 of
+  2) — a typed `ProofArtifact` union (`CommandProof` / `DiffProof` /
+  `LinkProof` / `AssertionProof`) is carried on `Evidence.proofs`
+  ([`state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)),
+  and tasks can declare typed `Verification.required_proofs`; a `command`
+  requirement is satisfiable only by a `CommandProof` whose real `exit_code`
+  is in the passing set. The shell-free capture-evidence dispatcher records each command's
+  real exit code and an `output_sha256`; `anvil submit` (CLI and MCP)
+  reconciles the per-claim buffer into `Evidence.proofs`. Additive and
+  non-breaking — the legacy free-text `required_evidence` path stayed
+  enforced alongside it, so old event logs replay unchanged. Schema v5 → v6.
+  The portable **signed** ProofArtifact + strict-by-default variant (part 2
+  of 2) shipped alongside it.
+- **[SL-6]** Spec-assumption scoring. Shipped as `anvil assumptions`
+  ([`cli/plan.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/plan.py),
+  [`planning/scoring.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/planning/scoring.py))
+  — ranks PRD requirements by `blast_radius * uncertainty` (both 1-5, product
+  range 1-25) before planning, purely advisory (never blocks claims or
+  mutates state).
+- **[SL-2]** Critic false-pass measurement is **PARTIALLY SHIPPED**: the
+  fault-injection corpus and harness are committed
+  ([`benchmarks/critic_corpus/`](https://github.com/fakoli/anvil/tree/main/benchmarks/critic_corpus),
+  [`docs/critic-false-pass-baseline.md`](../critic-false-pass-baseline.md)) with
+  a mock-backend baseline recorded (`false_pass_rate = 1/4 = 0.25`); the
+  real-critic baseline run is still open — tracked in [Now](#now).
+
+### Workflow substrate
+
+- **[WF-1]** `anvil next -q`/`--quiet` exit-code loop seam
+  ([`cli/claim.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py)) —
+  exit 0 if a task is ready, exit 3 if the queue is empty, so `while anvil
+  next -q; do …; done` works without parsing JSON.
+- **[WF-2]** Committed, copy-ready loop adapters + how-to:
+  `packaging/loops/ci-drain.sh`, `packaging/loops/claude-loop.md`,
+  `packaging/loops/codex-automation.md`, documented in
+  [`how-to/drive-the-anvil-loop.md`](../how-to/drive-the-anvil-loop.md).
+- **[WF-3]** `anvil run-workflow` + declarative `.anvil/workflows/*.yaml`
+  runner
+  ([`cli/run_workflow.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/run_workflow.py),
+  [`workflows/runner.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/workflows/runner.py)) —
+  drives each step of a declarative workflow (`trigger`, `steps[]`, per-step
+  `run`/`proof`/`needs`) through anvil's governed transitions (create → claim
+  → run → submit evidence → apply) to completion, then exits — no background
+  process. Scoped to ad-hoc loops not derived from a PRD. The broader `anvil
+  workflow-step` posture-2/3 wrapper this theme was named for is a distinct,
+  still-open item — see **SL-7** in [Now](#now).
+
+### Multi-PRD (release-scoped plans)
+
+Shipped in 0.3.0 — a project can hold several release-scoped PRDs in one
+`state.db` / `events.jsonl`. Full theme writeup, the three load-bearing
+properties, and the one item this theme deferred (`MPRD-RG1`, release-group
+sync) are under [Next](#next) →
+[Theme: Multi-PRD](#theme-multi-prd-release-scoped-plans).
+
+### Sync & recovery
+
+- `github_issues` sync provider
+  ([`sync/providers/github_issues.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/providers/github_issues.py))
+  — the only shipped `SyncProvider`; the registry-driven Protocol is ready
+  for more (see [Next](#next) → Theme: Sync providers).
+- `anvil replay`, `anvil backup` / `anvil restore`.
+- `anvil migrate-workspace` (B44) — one-time, safe-first migration of legacy
+  in-repo `<repo>/.anvil/` (or `<repo>/bin/.anvil/`) into the HOME workspace
+  layout: dry-run by default, never clobbers an existing home workspace,
+  copies (never moves).
+
+### Closed / shipped (cross-reference)
+
+Items that originated in the archived backlogs but shipped before this
+restructure, kept here for cross-reference traceability.
+
+| ID | Title | Closed in |
+|---|---|---|
+| **P11-SK-S5** | `skills/finish/SKILL.md:247-252` — fuzzy detection for `fakoli-crew:sentinel`; no shell check | **Phase 10 Fix #6** — welder closed this as a bonus while fixing the dangling `/anvil:sentinel` slash-command reference at the same lines. Removed the broken snippet AND added the `claude plugin list 2>/dev/null \| grep -q "fakoli-crew"` shell gate (mirroring `start-prd/SKILL.md:48`), with explicit branches for exit-0 (dispatch fakoli-crew:sentinel) vs non-zero (fall through to plugin-local sentinel agent). The PR-B fix-cycle subsequently dropped the `^` anchor from these patterns once it was discovered that `claude plugin list` indents each row (so `^fakoli-...` never matched). See `docs/plans/agent-welder-t11-status.md` § "Fix 6 approach" for the welder's full decision rationale. |
+| P9-1 | Audit-event honesty — `sync.pull.completed` emitted on deferred branches | Phase 9 T5 |
+| P9-2 | `local_moved`-only path set `sync_state="in_sync"` instead of `local_ahead` | Phase 9 T5 |
+| P9-3 | `SyncAuditPayload` single all-optional model accepted nonsense | Phase 9 T3 |
+| P9-4 | `RecordedLLMProvider.record_key` ignored `max_tokens` / `temperature` | Phase 9 T6 |
+| P9-5 | Brainstorm-flow bridge used fuzzy detection | Phase 9 T6 |
+| P9-6 | `expand --use-llm` had no `--format prd` UX | Phase 9 T6 |
+| P9-7 | Multi-provider config — no way to opt out of every sync provider | Phase 9 T5 |
+| P9-8 | Two new plugin-owned doc agents — `marketplace-scribe`, `docs-scribe` | Phase 9 T4 |
+
+See [`tech-debt-backlog.md`](../tech-debt-backlog.md) § "Phase 8 / Phase 9 closures (sync + LLM cleanups)" for the full implementation detail and test counts on P9-1..P9-8.
+
+---
+
+## Now
+
+**Priority track: integrity-first (90-day plan).** This track sits above the
+Next/Later buckets below. It is the committed direction for the current
+stretch and it is sequenced by credibility risk, not by how demonstrable each
+item is. The Next/Later buckets remain the backlog; this track is what
+actually gets built first. Status as of 2026-07-07: **Wave 1 and Wave 2 are
+done except SL-2's real-critic baseline run** (SL-0, SL-1, SL-3, SL-6 shipped
+— see [Shipped](#shipped)); **Wave 3 has not started** (SL-4, SL-5, SL-7 all
+open).
+
+> Operating-model principle: sequencing this track by credibility risk embodies
+> fakoli-style **P5** (sequence by credibility risk, not demonstrability). See
+> `plugins/fakoli-style/docs/fakoli-style.md`.
+
+### The reframe this track serves
+
+The strategic position is that anvil is the durable, governed state and
+audit layer that sits underneath an in-session dynamic-workflow runtime (for
+example, Claude Code's Dynamic Workflows). That runtime is single-driver and
+in-session: it keeps intermediate results in script variables and discards them
+when the session ends. anvil is what remembers, provably, what every
+agent actually did.
+
+One honesty constraint shapes the whole track. There is no state interface to
+slide "underneath" a session-only runtime today. "Underneath" is earned at the
+granularity of the step, through three integration postures:
+
+1. **Beside (ships today).** A workflow script voluntarily shells out to the
+   `anvil` CLI or MCP tools (`next`, `claim`, `submit`, `apply`). No
+   enforcement.
+2. **Governed step (the realistic "underneath").** A thin wrapper a workflow
+   step calls instead of raw tool calls: claim, run, capture typed proof,
+   submit, apply (gate enforced here). The runtime still drives; every step
+   that matters passes through a recorded, gated transition.
+3. **Projection (the inversion of their context-economy primitive).** The
+   runtime keeps intermediate results out of context in script variables.
+   anvil persists those variables as `Evidence` / `Decision` rows, so the
+   audit trail is the durable tail of state the runtime throws away.
+
+Two new types make the postures real and back the items below:
+
+- **`ProofArtifact`** replaces free-text `required_evidence` with typed,
+  verifiable proofs (`CommandProof{command, exit_code, output_sha256}`,
+  `DiffProof`, `LinkProof`, `AssertionProof`). The gate stops asking "does this
+  word appear" and starts asking "does a passing CommandProof exist." **Shipped
+  as SL-3** — see [Shipped](#shipped).
+- **`OutputContract`** replaces file-level conflict detection with
+  interface-level declarations (symbols, modules, endpoints, tables), plus an
+  after-the-fact reconciliation that compares the declared contract to the
+  actual `DiffProof`. Still open — see SL-5 below.
+
+### Why this ordering (the argument against doing it differently)
+
+The reframe rests entirely on "durable governed state" being trustworthy.
+The replay guarantee was, until 1.19.0, unproven in CI (see SL-1) and the
+evidence gate was, until 1.17.1, gameable and self-inconsistent. You cannot position as the trust layer
+with an untrusted trust layer. So Wave 1 makes the existing claims true, Wave 2
+makes governance non-gameable, and Wave 3 builds the integration story on top of
+a substrate that has earned it. The temptation to ship the positioning-friendly
+items (SL-4, SL-5) first, or to clear the long tidy `P11-*` audit backlog first,
+is the temptation to widen the product instead of making its central claim true.
+Resist both.
+
+### Wave 1 (Days 1-30): make the claims true
+
+Theme: integrity. At the end of this wave every sentence in the positioning is
+backed by a passing CI job.
+
+- **[SL-0]** Unify the evidence gate with the `apply` preview. **SHIPPED in
+  1.17.1 (PR #66).** `transitions._evidence_complete` delegates to
+  `review.gates.evidence_complete`; a parametrized agreement test locks the
+  enforcing gate to the preview gate. Prerequisite for SL-3.
+- **[SL-1]** Prove replay in CI. **SHIPPED in 1.19.0.** The `anvil replay`
+  CLI ([`cli/replay.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/replay.py)) rebuilds state from
+  `events.jsonl` into a scratch database (the long-planned replay item,
+  pulled forward because the audit positioning depends on it; the sibling
+  `anvil snapshot` command, P9B-7, remains open), and
+  [`tests/test_replay_equivalence.py`](https://github.com/fakoli/anvil/blob/main/tests/test_replay_equivalence.py)
+  asserts the replayed canonical state is equivalent to the original on every
+  PR — satisfied inside the main pytest `test` CI job rather than a
+  separately-named `replay-equivalence` status check. This converts the
+  most-repeated and least-proven claim into a verified invariant.
+- **[SL-2]** Measure the critic false-pass rate. **PARTIALLY SHIPPED.** Build
+  a fault-injection harness: a corpus of known-bad diffs (off-by-one, dropped
+  null check, assertion-free test, deleted assertion) fed to the critic
+  agent; measure how many it waves through. Acceptance: a reproducible script
+  plus a committed baseline false-pass number in `docs/`. The harness, corpus,
+  and a mock-backend baseline are committed
+  ([`docs/critic-false-pass-baseline.md`](../critic-false-pass-baseline.md));
+  the real-critic baseline run (needs API access) is still open. You cannot
+  improve the critic until you can score it.
+
+### Wave 2 (Days 31-60): make governance non-gameable
+
+Theme: typed proof. The substrate stops trusting strings.
+
+- **[SL-3]** Ship `ProofArtifact` (typed evidence). **SHIPPED (0.1.0, B48 part
+  1 of 2).** Implemented the typed artifact model; migrated
+  `Verification.required_evidence`
+  ([`state/models.py:233`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)); the
+  unified gate ([`review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py))
+  evaluates typed predicates;
+  shell-free `hook dispatch capture-evidence` path emits `CommandProof`
+  with real exit codes and output hashes. The substring path stayed
+  enforced alongside the typed path rather than being deleted (additive, not
+  breaking — old event logs replay unchanged). Depended on SL-0.
+- **[SL-6]** Score spec assumptions, not just tasks. **SHIPPED.** Extended the
+  six-dimension `Score`
+  ([`state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py), `Score` value
+  object) idea to PRD requirements and surfaces the highest-blast-radius,
+  lowest-confidence assumptions before planning. `anvil assumptions`
+  ([`cli/plan.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/plan.py))
+  reports the top assumptions ranked by `blast_radius * uncertainty`;
+  purely advisory today (does not yet block claimable tasks on unaddressed
+  assumptions). This is where the human-in-the-loop-at-spec thesis becomes a
+  feature.
+
+### Wave 3 (Days 61-90): earn the reframe
+
+Theme: "underneath," for real. Only now, on a proven substrate.
+
+- **[SL-4]** Promote status-file coordination to canonical state. **TARGETED.**
+  Today fakoli-flow / fakoli-crew coordinate by writing and grep-parsing markdown
+  at `docs/plans/agent-<name>-status.md` (see
+  `fakoli-flow/references/status-protocol.md`).
+  Replace that with state `Event`s; the wave engine reads `anvil` instead
+  of parsing prose. Acceptance: the wave engine has zero markdown-parsing code
+  paths for status. This is the concrete delivery of "fakoli-flow sits on top of
+  anvil."
+- **[SL-5]** Contract-level conflict with after-the-fact reconciliation.
+  **SPEC-FIRST.** Add `OutputContract` to `Task`; key `ConflictGroup`
+  ([`state/models.py:539`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)) on contract
+  overlap rather than `expected_files` overlap; add a post-`apply` drift check
+  comparing declared contract to actual `DiffProof`. The reconciliation step is
+  what lifts conflict detection out of the advisory-only class (the same
+  gameability class as the old substring gate: both depend on an honest up-front
+  declaration). Acceptance: a test where two tasks touch the same file but
+  declare non-overlapping contracts and run in parallel, plus a test where the
+  declared contract and the actual diff diverge and a drift `Event` fires.
+  Depends on SL-3 (`DiffProof`) — SL-3 has shipped, so SL-5 is unblocked.
+- **[SL-7]** Workflow adapter spike (postures 2 and 3). **SPEC-FIRST, spike not
+  product.** Build `anvil workflow-step` (the governed-step wrapper) and
+  one worked example wiring a dynamic-workflow script to persist its
+  script-variable intermediate results as `Evidence` / `Decision` rows.
+  Acceptance: a recorded run where a workflow script's discarded intermediate
+  state is queryable in `events.jsonl` after the session ends. Distinct from
+  **WF-3** (`anvil run-workflow`, shipped — see [Shipped](#shipped)), which
+  drives a *declarative* file-based workflow rather than wrapping an
+  in-session dynamic-workflow script's individual steps.
+
+### What this track explicitly defers
+
+The multi-provider sync expansion (P9B-1 Linear, P9B-2 Monday, the follow-on
+Jira / GitHub Projects providers) and the 56-item `P11-*` audit batch stay in
+[Next](#next) and [Later](#later) below. Adding a third sync provider makes
+the product wider; it does not make the central claim more true. None of it
+belongs in these 90 days.
+
+Semantic indexing (`sqlite-vec`) and a knowledge-graph view are likewise deferred
+to after Wave 1. They are useful eventually — semantic dedup of requirements
+(SL-6), retrieval of prior decisions, and contract-level conflict modelling
+(SL-5) — but they widen the surface before the integrity claims are proven,
+which is exactly what this track resists. They must also stay **outside the
+replay boundary**: an embedding is model-derived and non-deterministic, so it is
+a rebuildable derived index, never canonical state in `events.jsonl`. Captured as
+fakoli-style principle **P11** (derived indexes live outside the replay boundary;
+distinct from the `P11-*` audit batch below).
+
+### Theme: Workflow substrate (runtime-neutral workflow)
+
+This theme grows **SL-7** (workflow-step) from a Wave 3 spike into a product axis:
+"runtime-neutral **workflow**," the next axis after runtime-neutral **state**. It
+sits on **SL-3** (typed `ProofArtifact`, shipped) for the per-step gate and is the
+forcing function for **SL-4** (status-file coordination → events). Full narrative in
+[`docs/specs/2026-06-19-anvil-workflow-substrate.md`](../specs/2026-06-19-anvil-workflow-substrate.md).
+
+The framing: today anvil's only front door is the PRD (`PRD → parse → review →
+plan/score → tasks → claim → packet → submit evidence → apply`). The **second
+front door is the workflow/loop itself**. Harness-native orchestration primitives
+(Claude Code dynamic workflows = JS orchestrating subagents; Codex automations =
+scheduled prompts; the OpenAI Agents SDK = code) are ephemeral and
+harness-specific; anvil is the durable, governed state + audit layer underneath
+them. The key refinement: **the PRD _is_ the spec** — for the common case you do
+not hand-author a workflow file, because anvil already turns the PRD into a ready
+queue. The job is to transfer/drive that ready queue into whatever loop or
+automation a runtime offers, so each step runs anvil's governed transitions.
+
+The seam is **`anvil next`** ([`cli/claim.py:500`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py)),
+which already returns the next ready task or, with `--json`, `{data: {task: null}}`
+on an empty queue (exit 0). The loop body already exists —
+`claim → packet (the contract that teaches the steps) → do the work →
+submit --evidence → apply (gate)` — and the `execute` skill wraps it. Both
+invocation modes are the **same primitive** ("one governed task per invocation"):
+run the body once for `anvil next`'s task (a Codex automation fire / CI / cron), or
+drain until empty (`while anvil next -q; do <body>; done`, e.g. Claude's self-paced
+`/loop` or any shell). Durable state makes both resumable and safe under
+concurrency via single-winner leases.
+
+Why it strengthens anvil: it exercises the wedge (single-winner leases,
+file-conflict detection, evidence gating) under real parallel load; adds a second
+entry point covering the ad-hoc / brownfield ~75% the PRD front door misses;
+collapses the fakoli-flow / fakoli-crew trinity (coordination becomes anvil
+events — SL-4); and keeps loops correct-not-just-fast (leased + evidence-gated
+steps cannot double-claim or fake "done").
+
+- **[WF-1]** `anvil next -q` exit-code seam. **SHIPPED.** — see
+  [Shipped](#shipped). Adds a `-q`/`--quiet` flag to `anvil next`
+  ([`cli/claim.py:500`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py))
+  that gives jq-less shells and automations a branchable exit code: exit 0 if a
+  task is ready, exit 3 if the queue is empty. This is the single missing bit that
+  turns the existing `anvil next` into a loop seam — `while anvil next -q; do …;
+  done` works without parsing JSON.
+- **[WF-2]** Committed loop adapters + how-to. **SHIPPED.** — see
+  [Shipped](#shipped). Worked,
+  committed adapters that drive the WF-1 seam from each runtime — a Claude `/loop`
+  drain, a Codex automation single-fire, a CI/cron drain — plus a how-to that
+  documents the "one governed task per invocation" vs "drain until empty" modes
+  over the same primitive.
+- **[WF-3]** `anvil run-workflow` + `.anvil/workflows/*.yaml` declarative path.
+  **SHIPPED.** — see [Shipped](#shipped). A committed, harness-neutral declarative
+  workflow format (`trigger`, `steps[]`, per-step `run`/`fan_out`/`claim`/`proof`/
+  `needs`/`on_fail`) plus a governed runner that drives each step through anvil's
+  transitions. Scoped **only** to ad-hoc loops _not_ derived from a PRD — the
+  common case is already covered by WF-1/WF-2 driving the PRD's ready queue.
+  Design lives in
+  [`docs/specs/2026-06-19-anvil-workflow-substrate.md`](../specs/2026-06-19-anvil-workflow-substrate.md);
+  it extends the SL-7 spike but does not close it — the general `anvil
+  workflow-step` posture-2/3 wrapper (SL-7 above) is a separate, still-open item.
+
+---
+
+## Next
+
+Wanted and scoped; picked up once [Now](#now) clears — see [What this track
+explicitly defers](#what-this-track-explicitly-defers) for why these wait.
+
+These are the Phase 10 plugin-audit deferrals. Items already satisfied by the
+current implementation are marked `SHIPPED` inline; the remaining findings are
+SHOULD FIX, CONSIDER, or NIT severity, not release blockers. The bulk close as
+mechanical batches; see [Cross-cutting themes](#cross-cutting-themes-high-leverage-batches)
+for the recommended welder fan-out.
+
+### Theme: Audit honesty (mutating-tool input validation)
+
+- **[P11-MC-S1]** **SHIPPED in v0.6.5.** The canonical `_require_actor`
+  validator now rejects empty actor identity before mutating MCP operations and
+  preserves normalized actor continuity across lifecycle surfaces.
+- **[P11-MC-S2]** `list_tasks.status: str | None` not constrained — typo like `"in-progress"` or `"DONE"` returns silently empty list. Replace with `Literal[...]` matching `TaskCountsByStatus` fields verbatim.
+- **[P11-MC-S4]** **SHIPPED in v0.6.5.** `get_next_task.actor` is retained and
+  now selects the actor-specific accept-rate history used by the task-offer
+  governor; CLI and MCP expose the same calculation and recovery fields.
+
+### Theme: MCP schema fidelity
+
+- **[P11-MC-S3]** Return type `list[dict[str, Any]]` / `dict[str, Any]` strips field-level schema from Claude's view across `list_tasks`, `get_task`, `get_next_task`. Define `TaskSummary` or reuse `Task` Pydantic model from `state.models`; drop `json.loads(model_dump_json())` shim. _Closes P11-MC-N1 simultaneously._
+- **[P11-MC-C1]** Every tool re-resolves `Path.cwd()` per call; future `os.chdir()` would silently address different project. Capture `_STATE_DIR` at module import.
+- **[P11-MC-C2]** `_reap_stale` swallows all exceptions silently; no surfacing in `claude --debug` traces. Add `logger.warning("stale-claim reaping failed: %s", exc)` inside except. _Adjacent to CL-3 in tech-debt-backlog (`_reap_stale_claims` bare except) — close both in the same patch._
+- **[P11-MC-C3]** `WorkPacketResponse.content: Any` allowed but narrower union possible. Switch `Any` → `str | dict[str, Any]`.
+- **[P11-MC-N1]** `json.loads(t.model_dump_json())` triple-roundtrips data through JSON. Replace with `t.model_dump(mode="json")`. _Closed automatically by P11-MC-S3._
+- **[P11-MC-N2]** `DependencyEdge` constructed with `**{"from": dep_id, "to": t.id}` splat to dodge keyword. Add comment or switch to `DependencyEdge.model_validate(...)`.
+
+### Theme: Skill hygiene (no-fuzzy-detection rule)
+
+See [Theme 1](#theme-1-no-fuzzy-detection-rule-across-skills) for batch-fix leverage notes.
+
+- **[P11-SK-S1]** `skills/execute/SKILL.md:8,15,256` — fuzzy detection for `fakoli-flow:execute`. Add Step 0 `claude plugin list 2>/dev/null | grep -q "fakoli-flow"`; branch on exit code. Mirror `start-prd/SKILL.md:48`. **Note:** the grep pattern must NOT use `^` — `claude plugin list` indents each row with `  ❯ ` so a leading anchor never matches.
+- **[P11-SK-S2]** `skills/finish/SKILL.md:8,245-246` — fuzzy detection for `fakoli-flow:finish`. Add explicit `claude plugin list 2>/dev/null | grep -q "fakoli-flow"` check at top of Step 1.
+- **[P11-SK-S3]** `skills/claim/SKILL.md:15,250` — fuzzy detection for `fakoli-flow` and `fakoli-crew:welder/scout`. Wrap each "when X is installed" section in `claude plugin list 2>/dev/null | grep -q "fakoli-..."` shell check (no `^` anchor) or move prose to `references/composition.md`.
+- **[P11-SK-S4]** `skills/finish/SKILL.md:177-212` — fuzzy detection for sync provider availability. Replace prose with `test -n "$GITHUB_REPOSITORY"`, `gh auth status >/dev/null 2>&1`, `anvil sync github --health`.
+- **[P11-SK-S6]** `skills/start-prd/SKILL.md:194-197` — fuzzy detection for LLM availability. Add explicit `test -n "$ANTHROPIC_API_KEY"` check; document branches; or move to `references/llm-augmentation.md`.
+
+### Theme: Skill hygiene (phase-status drift)
+
+See [Theme 5](#theme-5-phase-status-table-drift-across-skills).
+
+- **[P11-SK-S7]** `skills/state-ops/SKILL.md:119-132` — phase-availability tables contradict `execute/SKILL.md` (`anvil conflicts` "pending" vs "available"). Reconcile via single `references/phase-status.md`.
+- **[P11-SK-S8]** `skills/state-ops/SKILL.md:67-96` — Steps 2 and 3 labeled "Phase 3 — pending" but every other skill uses `list`/`show` as available. Update to "available" matching rest of plugin.
+- **[P11-SK-S9]** `skills/state-ops/SKILL.md:1-4` — description is longest in plugin (60+ words), weak trigger phrase. Add concrete trigger phrases in quotes; trim capability list.
+
+### Theme: Skill hygiene (workflow discipline)
+
+- **[P11-SK-C2]** `skills/start-prd/SKILL.md:70-110` — six-question discipline explicit but stopping rule "material" is interpretive. Add concrete stopping rule — max 1 follow-up if under 5 words, never chain more than 8 total.
+- **[P11-SK-C3]** `skills/plan/SKILL.md:107-137` — Step 3 documents Phase 7 limitation as 4-step workflow buried in paragraph. Promote to `### Step 3a — Author subtasks manually` block or extract.
+- **[P11-SK-C4]** `skills/prd/SKILL.md:76-84` — Step 1 lacks explicit one-question-per-message discipline (weaker than start-prd). Mirror start-prd.
+- **[P11-SK-C5]** `skills/execute/SKILL.md:70-84` — Step 2 abort flow happens after packet fetch; dishonest agent skips it. Move Step 2 ahead of packet fetch.
+- **[P11-SK-C6]** `skills/finish/SKILL.md:109-116` — `--reason` requirement for `apply --reject` buried in prose. Promote to callout at top of section.
+
+### Theme: Skill hygiene (drive-by NITs)
+
+- **[P11-SK-N1]** `skills/start-prd/SKILL.md:228` — Phase 7 Notes table cell has `\|` escape that may render literally. Use HTML entity `&#124;`.
+- **[P11-SK-N2]** `skills/claim/SKILL.md:138-143` — example ISO timestamp drifts vs `execute/SKILL.md:121`. Pick one wall-clock date or use placeholder.
+- **[P11-SK-N3]** `skills/state-ops/SKILL.md:22` — "State-ops is NOT for" sentence repeats 4x in one paragraph. Format as bulleted list.
+- **[P11-SK-N4]** `skills/prd/SKILL.md:200-215` — Phase 3 Limitations section duplicates content at lines 39-46. Delete one table or merge columns.
+
+### Theme: Hooks (hot-path perf)
+
+See [Theme 3](#theme-3-hot-path-perf-budget-on-hook-scripts).
+
+**Superseded for the active manifest.** `hooks/hooks.json` now invokes the
+shell-free Python dispatcher; the entries below describe cleanup of retained,
+unwired legacy scripts rather than current hook latency.
+
+- **[P11-HK-S1]** `hooks/check-claim.sh:36-59` — hot-path perf budget violation; spawns `python3` twice (100-300ms) on every Edit/Write/NotebookEdit; exceeds declared 200ms. Consolidate into single `python3 -c` printing both fields; mirror `record-file-change.sh:35-58` pattern.
+- **[P11-HK-S2]** `hooks/record-file-change.sh:95-106` — hot-path perf budget violation; `_escape_json()` spawns 4 `python3` instances on fallback path; 5-6 total spawns. Move JSON escaping into original extraction `python3` block; emit pre-escaped values.
+- **[P11-HK-N1]** `hooks/record-file-change.sh:55-57` — three `printf … | sed -n 'Np'` invocations; each `sed` is a fork. Replace with single `read` / `mapfile`. _Drive-by during P11-HK-S2._
+- **[P11-HK-N2]** `hooks/check-claim.sh:95` — `>/dev/null || true` discards CLI stdout; future structured JSON warning silently dropped. Add inline comment cross-referencing CLI subcommand contract docs. _Drive-by during P11-HK-S1._
+
+### Theme: Hooks (contract documentation)
+
+See [Theme 4](#theme-4-hook-contract-undocumented-at-plugin-level).
+
+- **[P11-HK-S3]** `README.md` / new `hooks/README.md` — non-blocking contract undocumented at plugin/doc level; future maintainer will reintroduce `set -e`. Add hook-contract section. _Single-paragraph fix; high-leverage._
+
+### Theme: Hooks (robustness)
+
+**Superseded for the active manifest.** The shell-free Python dispatcher owns
+active error isolation and state resolution. Legacy-script findings remain as
+optional cleanup unless those scripts are wired again.
+
+- **[P11-HK-C2]** All four `.sh` files — no diagnostic fallback when hook silently fails. Support `ANVIL_HOOK_DEBUG=1` env var redirecting stderr to `.anvil/.hook-debug.log`.
+- **[P11-HK-C3]** `hooks/detect-state.sh:29` — `$("$CLI" status --hook-format 2>&1)` merges stderr into status line shown to Claude. Drop `2>&1`; capture separately for diagnostic-fallback branch.
+- **[P11-HK-C4]** **SHIPPED.** The active hook manifest no longer invokes the
+  legacy shell scripts. Its shell-free `anvil hook dispatch` path resolves the
+  same HOME/local/`ANVIL_ROOT` state layout as the CLI and MCP server.
+- **[P11-HK-C5]** `hooks/detect-state.sh:14-20` — language detection uses sequential overwrites; polyglot projects mislabeled. Either emit comma-joined list or guard each line. _Cross-plugin coordination opportunity with `fakoli-flow/hooks/detect-context.sh`._
+
+### Theme: Agents (description completeness)
+
+- **[P11-AG-S1]** `agents/critic.md:12-22` — description has only 1 `<example>` block (rubric floor 2; convention 3). Add 2 more with `<commentary>`: one for fakoli-crew fallback path, one for SHOULD-FIX-only verdict.
+- **[P11-AG-S2]** `agents/planner.md:12-40` — description has only 2 `<example>` blocks; below 3-example convention. Add a third covering re-planning after PRD rejection / incremental conflict.
+- **[P11-AG-S3]** `agents/sentinel.md:12-19` — description has only 1 `<example>` block AND example lacks `<commentary>`. Add 2 more examples + `<commentary>` to every example.
+- **[P11-AG-S4]** `agents/sentinel.md:23-28` — `allowed-tools:` used instead of `tools:`. Rename key. _Reviewer may upgrade to MUST FIX for systemic consistency with the 5 Phase 10 MUST FIX agents — costs nothing if bundled with S3/S5._
+- **[P11-AG-S5]** `agents/sentinel.md:1-103` — file is 103 lines, at proportionality floor; missing Composition, Inputs, "NOT" boundary, Status File Output sections. Expand to ~140-180 lines mirroring `critic.md` structure.
+- **[P11-AG-C4]** `agents/planner.md:76-80` — composition mentions only `fakoli-crew:guido` as defer-to; missing scout/critic acknowledgment. Add one-line note.
+- **[P11-AG-N1]** `agents/sentinel.md:103` — missing trailing newline. _Drive-by during P11-AG-S3/S4/S5._
+
+### Theme: Documentation (install messaging, surface counts)
+
+See [Theme 7](#theme-7-install-messaging-drift-in-readme-changelog).
+
+- **[P11-ST-S1]** **SHIPPED.** README uses the public
+  `/plugin marketplace add fakoli/anvil` and `/plugin install anvil@anvil`
+  flow, with source installation kept as an explicit alternative.
+- **[P11-ST-S2]** **SHIPPED.** `[Unreleased]` is empty; dated release entries
+  own past-tense changes.
+- **[P11-ST-S3]** **SHIPPED.** Root `.pytest_cache/` is ignored.
+- **[P11-ST-S4]** **SHIPPED.** README presents one published-package install
+  story and labels alternate paths consistently.
+- **[P11-ST-C1]** **CLOSED as superseded.** A hand-maintained README count
+  table would immediately drift. `anvil describe --json` is the authoritative
+  live CLI/MCP inventory; architecture documents the current surface split.
+- **[P11-ST-C2]** **SHIPPED.** `[Unreleased]` no longer carries unlinked
+  forward-looking provider claims; roadmap items own that planning detail.
+- **[P11-ST-C3]** `README.md:5-7` — minimal badge set; no CI / test-count badges. Add CI status badge (once live-GitHub nightly workflow public) and a test-count badge.
+- **[P11-ST-N1]** **SHIPPED.** The stale "this release" parenthetical is gone.
+
+### Theme: Sync providers (multi-provider expansion)
+
+The `SyncProvider` Protocol shipped in v1.8.0 was deliberately registry-driven so contributors can add providers without engine changes. v1.8.0 / v1.9.0 ship `github_issues` only; it remains the only shipped provider today (see [Shipped](#shipped) → Sync & recovery).
+
+- **[P9B-1]** `LinearIssuesProvider` (`linear_issues`). **OPEN.** GraphQL-only API; httpx client with respx mocking. Status mapping needs a per-team workflow inspection step. Step-by-step contributor guide already in `docs/sync-providers.md` § "Step-by-step: add Linear support". Acceptance: provider module + GraphQL transport + full-lifecycle respx tests + `.github/workflows/anvil-live-linear.yml` gated on `LINEAR_API_KEY` secret + `anvil sync linear_issues --health` works.
+- **[P9B-2]** `MondayBoardsProvider` (`monday_boards`). **OPEN.** Monday has people-columns and per-board custom columns; `provider_metadata` dict carries the bulk of the shape. Auth via Monday API key. REST+JSON (Monday's GraphQL is opt-in per workspace). Same acceptance shape as P9B-1.
+
+### Theme: Multi-PRD (release-scoped plans)
+
+The v0.3 reframe: a single project holds **several release-scoped PRDs** in one
+`state.db` / `events.jsonl` instead of exactly one. Each PRD is a
+release/milestone-scoped, separately-gated, revisable plan carrying a target
+version/tag; its requirements, features, and tasks are partitioned by an owning
+`prd_id`. **Shipped in 0.3.0** — full design in
+[`docs/specs/2026-06-22-multi-prd-revisable.md`](../specs/2026-06-22-multi-prd-revisable.md);
+task-by-task backlog in
+[`docs/backlog/multi-prd-revisable.prd.md`](../backlog/multi-prd-revisable.prd.md).
+
+The three load-bearing properties this theme holds:
+
+- **The v6→v7 migration is zero-data-loss.** The in-place v6→v7 migration (the
+  v0.3 multi-PRD persistence foundation) rebuilds the partitioned `prds` /
+  requirements / features / tasks layout so that a pre-multi-PRD database becomes
+  a project whose lone **`default` PRD owns every existing row**. Nothing is
+  dropped and nothing has to be re-authored; the single-PRD project is just the
+  one-PRD degenerate case after the migration. (The follow-on v7→v8 step is a
+  purely additive per-PRD `revision` counter — see
+  [`state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py) `_m_to_v7` / `_m_to_v8`.)
+- **Gating is per-PRD; conflict detection is cross-PRD.** The `prd_status_gate`
+  keys on the **task's owning PRD** (`task.prd_id`): a task is claimable once
+  its PRD is approved for its exact current material, even while a sibling PRD
+  is still `draft`.
+  Conflict groups and `anvil next` exclusion sets, by contrast, are computed over
+  **all** PRDs, so two tasks in different PRDs that touch the same file are still
+  single-winner-coordinated — the moat holds across the whole project, not
+  per-PRD.
+- **Replay stays equivalent.** Every multi-PRD mutation carries `prd_id` through
+  the event payloads, so replaying `events.jsonl` from empty reconstructs the
+  partitioned canonical state exactly. Replay-equivalence is checked as
+  *logical* equivalence (canonical row-ordered dump / per-table content hash),
+  never byte-identical SQLite, and the migration backfill is written to match
+  what replay would produce.
+
+Release/milestone **sync** wiring (PRD→GitHub-milestone) is intentionally **not**
+in this theme — only the `SyncMapping.prd_id` + prd-kind data plumbing shipped;
+the network-touching milestone client is deferred to **[MPRD-RG1]** under
+[Theme: Sync infrastructure](#theme-sync-infrastructure-push-based-conflict-completion).
+
+### Theme: Sync infrastructure (push-based + conflict completion)
+
+- **[P9B-5]** Webhook-based sync (vs polling). **SPEC-FIRST.** `--watch` polls every N seconds; for providers that publish webhooks (GitHub, Linear, Monday, Jira), accept push-based sync via a long-running listener. Webhook secret in `.anvil/config.yaml`; HMAC verification on every payload. Needs design doc first: engine's current "one fetch round-trip per task per pass" assumption does not hold under webhooks (out-of-order events, duplicates, races). Spec scope: `anvil webhook-listen --provider X --port 8080` subcommand, event de-duplication via `(provider_id, external_id, last_modified)` tuple, out-of-order queueing with configurable max-delay, per-provider HMAC verification, polling fallback when listener crashes.
+- **[P9B-6]** Immediate-apply `*_applied` resolution variants. **TARGETED.** Phase 9 T5 deferred wiring `remote_wins_applied` / `local_wins_applied` per TODOs at `cli/sync.py:1054` and `:1068`. Conflict-safety design (re-fetch on moving target, retry/back-off contract) needs specifying first. Acceptance: `remote_wins_applied` calls `_apply_remote_to_local` inline inside the pull loop; `local_wins_applied` calls `provider.push_task(...)` inline with a defined retry/back-off contract for the race where a parallel remote edit lands between decision and push; `*_applied` tokens join the controlled vocabulary in `docs/github-sync.md`; 4+ new tests in `test_cli_sync.py`.
+- **[MPRD-RG1]** PRD→release-group sync (`ensure_release_group` Protocol + GitHub milestone client). **OPEN.** Deferred out of the multi-PRD release (Phase 7 of [`docs/specs/2026-06-22-multi-prd-revisable.md`](../specs/2026-06-22-multi-prd-revisable.md); tracked as T029 in [`docs/backlog/multi-prd-revisable.prd.md`](../backlog/multi-prd-revisable.prd.md)). The multi-PRD work shipped the release/sync **data plumbing only** — `SyncMapping.prd_id` + `entity_kind: Literal['task','prd']`, per-PRD `--prd` push scoping, and `prd_id` on reconciliation discrepancies. The network-touching milestone wiring was explicitly **not** built so no provider had to change. Scope when picked up:
+  - A **provider-neutral** `ensure_release_group(release_tag, target_version, prd_summary, mapping) -> ExternalRef` Protocol method (covers GitHub Milestone / Linear Cycle / Jira FixVersion), **optional and capability-gated** via a `supports_milestones` (a.k.a. `supports_release_groups`) flag so existing providers stay unchanged.
+  - GitHub client `create_milestone` / `list_milestones` calls plus issue→milestone assignment for the issues a PRD owns.
+  - A `sync.milestone.ensured` (release-group) audit event and **prd-kind** `SyncMapping` row persistence (`entity_kind='prd'`, carrying `prd_id`, null `task_id`) so the 1:1 PRD↔release/milestone mapping is recorded.
+  - A `missing_milestone_mapping` reconciliation discrepancy kind for a PRD that has a `target_tag` but no persisted milestone mapping (sibling to `missing_sync_mapping`; `drift_sync_state` already special-cases prd-kind rows so a milestone produces no task-shaped drift).
+  - Behind the capability flag throughout; `anvil sync … --prd <id> --push` gains the milestone-ensure step only for providers that advertise the capability.
+
+### Theme: Configuration (provider config schemas)
+
+- **[P9B-9]** Provider config schemas in `config.yaml`. **SPEC-FIRST** (co-required with P9B-1 Linear). Current `sync.providers` config key is a flat list; as soon as providers need per-provider config (Linear team ID, Monday board ID, Jira project key + workflow map), the flat list becomes a nested map. Design doc decides: does the new map shape coexist with the flat list, or replace it? Migration path: a list of strings is shorthand for "the listed providers with empty config" — keeps v1.9.0 configs valid.
+
+---
+
+## Cross-cutting themes (high-leverage batches)
+
+Items spanning multiple critics/areas that benefit from cohesive treatment. These come from the [Phase 10 audit](../archive/2026-05-26-plugin-audit.md) and supersede the "items by critic" view when planning Phase 11 welder fan-out. Each theme is welder-sized and self-contained.
+
+### Theme 1 — No-fuzzy-detection rule across skills
+
+**Closes:** P11-SK-S1, P11-SK-S2, P11-SK-S3, P11-SK-S4, ~~P11-SK-S5~~, P11-SK-S6 (originally 6 SHOULD FIX items; **5 live** — P11-SK-S5 closed in Phase 10 Fix #6, see [Closed / shipped](#closed-shipped-cross-reference)).
+**Pattern:** every skill that conditionally bridges to fakoli-flow, fakoli-crew, a sync provider, or LLM augmentation uses prose-only "when X is installed" framing without a `claude plugin list 2>/dev/null | grep -q "X"` shell check (no `^` anchor — `claude plugin list` indents each row, so the anchored form never matches). `start-prd/SKILL.md:48` and `finish/SKILL.md:249-254` are the reference implementations every other skill should mirror.
+**Welder effort:** ~3 lines per site, 5 sites — single welder pass, ~50 minutes.
+
+### Theme 2 — Non-empty actor validation across MCP mutating tools
+
+**Closed in v0.6.5:** P11-MC-S1 (1 SHOULD FIX, originally 6 sites).
+The shared `_require_actor` validator now protects mutating MCP entry points;
+this batch remains here as the audit cross-reference.
+
+### Theme 3 — Hot-path perf budget on hook scripts
+
+**Superseded for the active manifest:** P11-HK-S1, P11-HK-S2, and
+P11-HK-N1 now describe only retained, unwired legacy wrappers. Active hooks use
+the shell-free Python dispatcher. Revisit this batch only if the wrappers are
+wired again or retained compatibility itself gains a measured performance
+requirement.
+
+### Theme 4 — Hook contract undocumented at plugin level
+
+**Closed:** P11-HK-S3. Architecture and design now document the shell-free
+dispatcher, the five active hooks, their non-blocking `exit 0` contract, and
+the separately opt-in blocking stop gate.
+
+### Theme 5 — Phase-status table drift across skills
+
+**Closes:** P11-SK-S7, P11-SK-S8 (2 SHOULD FIX); enabled by P11-SK-C1 (extract to `references/`).
+**Pattern:** `anvil conflicts` is "pending" in state-ops, "available" in execute. `list`/`show` are "pending" in state-ops Step 2/3 but available in every other skill. State-ops is the laggard.
+**Fix shape:** single source of truth at `references/phase-status.md` (or `docs/phase-status.md`); skills link to it instead of inlining tables.
+**Welder effort:** create reference doc + update 7 SKILL.md references — ~2 hours.
+
+### Theme 6 — Composition duplication across three doc/state agents
+
+**Closes:** P11-AG-C1, P11-AG-C2, P11-AG-C3 (3 CONSIDER).
+**Pattern:** docs-scribe, marketplace-scribe, and state-keeper each carry near-identical "three doc/state specialists inside anvil" composition tables. If the split ever changes, three files need to update in lockstep.
+**Fix shape:** extract to `docs/specs/internal-agents.md`; agents link to it.
+**Welder effort:** ~1 hour.
+
+### Theme 7 — Install messaging drift in README + CHANGELOG
+
+**Closed:** P11-ST-S1, P11-ST-S2, P11-ST-S4, and P11-ST-N1. README now has
+one published-package install story, `[Unreleased]` is empty, and release-bound
+phrasing has been removed. The release helper and its tests keep current-version
+examples synchronized.
+
+---
+
+## Later
+
+Follow-on capability and opportunistic hygiene — wanted, but not next in line. Pick up when an adjacent welder pass touches the file, or when a forcing function lands.
+
+### Theme: Sync providers (workflow-aware integrations)
+
+- **[P9B-3]** `JiraIssuesProvider` (`jira_issues`). **OPEN.** Jira's workflow/status taxonomy is per-project; provider needs a one-time discovery call to map anvil's 11 `TaskStatus` values to the project's actual statuses. Auth via PAT + email pair. Acceptance: same shape as P9B-1 plus `--discover-statuses` flag that writes the discovered mapping into `.anvil/config.yaml` under `sync.providers.jira_issues.status_map`.
+- **[P9B-4]** `GitHubProjectsProvider` (`github_projects`). **OPEN.** Sibling to `github_issues` but for Projects v2 (the newer board surface). Shares the gh-CLI / httpx transport from `github_issues` but addresses a different remote object kind. Probably co-locates in `sync/providers/github_projects.py`.
+
+### Theme: Snapshot / replay
+
+- **[P9B-7]** `anvil snapshot` subcommand. **OPEN.** This is a local SQLite
+  `.backup` and retention workflow, distinct from the shipped read-only
+  `anvil project snapshot --json` provider operation. Phase 5 (v1.4.0) removed
+  the pre-created `snapshots/` directory because nothing wrote to it.
+  Acceptance: `anvil snapshot [--retention 30d|count:N]` writes timestamped
+  databases under the resolved state directory; `--list` shows size + age;
+  `--restore <name>` restores atomically (temp file, swap via rename).
+
+### Theme: MCP surface (sync tools)
+
+- **[P9B-8]** MCP sync tools surface. **OPEN.** MCP server (Phase 6) exposes 24 read/mutate tools but does NOT expose `sync_*` tools. Agents that want sync today must shell out via Bash. Acceptance: 4 new MCP tools — `sync_run(provider, *, direction='both', task_id=None)`, `sync_health(provider)`, `sync_status()`, `sync_reconcile(*, fix=False)`. Tool errors map cleanly to `ToolError(message)` with the same exception classes the CLI handles. Documented in `docs/mcp.md` § Sync tools; tests in `tests/test_mcp.py`.
+
+### Theme: Agents (composition deduplication)
+
+See [Theme 6](#theme-6-composition-duplication-across-three-docstate-agents).
+
+- **[P11-AG-C1]** `agents/docs-scribe.md:1-366` — 366 lines (near 400 ceiling); ~60 lines duplicate `marketplace-scribe.md` and `state-keeper.md` composition prose. Extract shared "three doc/state specialists" composition into `docs/specs/internal-agents.md`; link from all three agents.
+- **[P11-AG-C2]** `agents/marketplace-scribe.md:1-308` — same composition duplication (lines 144-161, 292-308). Same fix as C1.
+- **[P11-AG-C3]** `agents/state-keeper.md:1-293` — same duplication pattern (lines 94-107). Same fix as C1.
+
+### Theme: Skills (subdirectory extraction)
+
+- **[P11-SK-C1]** All 7 `SKILL.md` files — no `references/`, `examples/`, or `scripts/` subdirectories; bodies bundle phase-status tables and composition prose. Extract to `references/phase-status.md`, `references/composition.md`, etc. Closes ~20-30% of SKILL.md body weight. _High leverage — enables Theme 5 (phase-status drift) and Theme 1 (no-fuzzy-detection) batches._
+
+### Theme: Hooks (concurrency hardening)
+
+- **[P11-HK-C1]** `hooks/capture-evidence.sh:232` + `record-file-change.sh:113` — race-prone append on shared files (`events.jsonl`, `orphan.json`); JSON records can exceed `PIPE_BUF` when `STDOUT_EXCERPT` is near `MAX_EXCERPT=4000`. Add `flock` guard OR document at-most-rare interleave and have replay tolerate truncation. _May defer further pending a sync-hardening pass._
+
+### Theme: Hooks (config-driven matchers)
+
+Wanted but no compelling forcing function yet; revisit when an adjacent item forces a touch on the same file or when a config-driven matcher framework lands.
+
+- **[P11-HK-N3]** `hooks/capture-evidence.sh:119-128` — hardcoded verification-command pattern list; Phase 6+ TODO already flagged. Track as deferred config-driven matcher. _Aligned with `tech-debt-backlog.md` CL-10 (`capture-evidence.sh` + `gates.py` pattern sets not aligned)._
+
+---
+
+## Companion: tech-debt-backlog.md (not duplicated here)
+
+These items remain owned by [`tech-debt-backlog.md`](../tech-debt-backlog.md) and are not duplicated into roadmap scope unless a roadmap item naturally touches the same file. Listed here for cross-reference only.
+
+| ID | Source | Status |
+|---|---|---|
+| CL-1, CL-2, CL-3, CL-4, CL-5, CL-8, CL-10, CL-11, CL-12, CL-13 | PR #41 critics | OPEN |
+| TQ-1, TQ-2, TQ-3, TQ-4, TQ-6, TQ-7, TQ-8 | PR #41 Critic-4 | OPEN |
+| PS-1 | PR #41 Critic-2 | OPEN |
+
+**Adjacency hint:** Phase 10 finding **P11-MC-C2** (silent `_reap_stale` exception swallow) is adjacent to **CL-3** (`_reap_stale_claims` bare except). The welder closing P11-MC-C2 should consider closing CL-3 in the same patch. Phase 10 finding **P11-HK-N3** (`capture-evidence.sh` hardcoded matcher list) is aligned with **CL-10** (`capture-evidence.sh` + `gates.py` pattern sets not aligned).

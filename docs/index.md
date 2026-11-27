@@ -440,7 +440,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 </ul>
 </div>
 </div>
-<p class="aside"><strong>Where this is going.</strong> Re-running recorded commands independently and a gate that is strict by default are planned and not built yet. Until they land, read a proof as a strong record, not a guarantee.</p>
+<p class="aside"><strong>Where this is going.</strong> Re-running recorded commands independently and a gate that is strict by default are next on the <a href="roadmap/">roadmap</a>. Until they land, read a proof as a strong record, not a guarantee.</p>
 <p class="more"><a href="how-to/claiming-and-shipping-a-task/">Claim and ship a task</a> <a href="evidence-buffer/">How evidence is captured</a> <a href="how-to/attempt-views/">How attempt views work</a></p>
 </div>
 </section>

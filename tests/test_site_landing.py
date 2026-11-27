@@ -15,6 +15,7 @@ tests pin the page to what exists:
 * maintainer working material is excluded from the build, the nav lists only
   published pages, and no published page links into excluded material (MkDocs
   reports such a link at info level only, so ``--strict`` does not catch it);
+* the public roadmap stays one screen, with no tracker ids, dates or versions;
 * the search-scope hook classifies paths as documented.
 
 Layout note: this file lives at ``<repo-root>/tests/``, so ``parents[1]`` is
@@ -232,6 +233,25 @@ def test_published_pages_do_not_link_into_excluded_material():
     assert not broken, (
         "published pages link to material that is excluded from the build "
         f"(use an absolute GitHub URL instead): {broken}"
+    )
+
+
+def test_public_roadmap_is_one_screen_without_tracker_detail():
+    # The item-level tracker lives in docs/backlog/roadmap.md and is not
+    # published. The public page states outcomes only, so it cannot go stale
+    # the way a dated, id-keyed tracker does.
+    assert _is_excluded("backlog/roadmap.md")
+    roadmap = (_docs() / "roadmap.md").read_text(encoding="utf-8")
+    assert len(roadmap.splitlines()) <= 60, "the public roadmap should fit one screen"
+    for section in ("## Now", "## Next", "## Later", "## Not planned"):
+        assert section in roadmap, f"public roadmap is missing {section!r}"
+    tracker_detail = re.findall(
+        r"\b(?:P\d+B?-[A-Z0-9-]+|S[LW]?-?\d+|WF-\d+|B\d{2}|Phase \d+|Wave \d+|20\d\d-\d\d-\d\d)\b"
+        r"|\bv?\d+\.\d+\.\d+\b|#\d+",
+        roadmap,
+    )
+    assert not tracker_detail, (
+        f"tracker ids, dates or versions on the public roadmap: {tracker_detail}"
     )
 
 

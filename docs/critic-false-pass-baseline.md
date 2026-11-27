@@ -6,7 +6,7 @@ SL-2 makes that risk measurable: a fault-injection harness feeds a corpus of
 *known-bad* diffs to the critic and counts how many it approves — the
 **false-pass rate**. You cannot improve the critic until you can score it.
 
-> Roadmap: [`docs/roadmap.md`](roadmap.md) § Wave 1 → **SL-2**. Acceptance: a
+> Roadmap: [`docs/backlog/roadmap.md`](backlog/roadmap.md) § Wave 1 → **SL-2**. Acceptance: a
 > reproducible script plus a committed baseline false-pass number in `docs/`.
 
 ## What "false pass" means

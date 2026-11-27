@@ -4,7 +4,7 @@
 > (repo docs + code + external landscape), with every code-level claim below
 > verified against shipped source by a five-stream fact-check pass. This doc
 > is a **strategic overlay**: it sequences and sharpens existing items from
-> [`roadmap.md`](../roadmap.md) (SL/WF waves) and
+> [`roadmap.md`](roadmap.md) (SL/WF waves) and
 > [`anvil-backlog.md`](anvil-backlog.md) (E1–E13 / B-items) rather than
 > replacing them. Items are numbered `S*` to avoid colliding with either.
 > The same review corrected ~25 stale doc claims (docs said several shipped

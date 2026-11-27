@@ -317,9 +317,8 @@ plumbing.
 
 See [`../sync-providers.md`](../sync-providers.md) for the interface
 contract, the `RecordedSyncProvider` test double, the error hierarchy, and
-the step-by-step walkthrough for adding Linear support. The Phase 9 roadmap
-in [`../roadmap.md`](../roadmap.md) tracks the in-tree Linear / Monday / Jira
-providers.
+the step-by-step walkthrough for adding Linear support. The
+[roadmap](../roadmap.md) lists the planned Linear, Monday and Jira providers.
 
 ---
 
