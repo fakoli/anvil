@@ -2,8 +2,8 @@
 
 Practical answers for evaluating, installing, and operating anvil. For
 positioning ("why is this different from X"), see the comparison table in the
-[README](https://github.com/fakoli/anvil/blob/main/README.md#anvil-vs-an-issue-tracker) and
-[`_positioning.md`](_positioning.md). For architectural depth, see
+[README](https://github.com/fakoli/anvil/blob/main/README.md#anvil-vs-an-issue-tracker).
+For architectural depth, see
 [`architecture.md`](architecture.md); for design rationale, see
 [`design.md`](design.md).
 
@@ -85,8 +85,7 @@ Code-specific because they use the SessionStart / PreToolUse / PostToolUse
 contract — agents in other runtimes still get full coordination via
 claims + leases, just without the editor-time warning.
 
-See [`architecture.md` § CLI / MCP / hooks surface](architecture.md) and
-[`_positioning.md`](_positioning.md).
+See [`architecture.md` § CLI / MCP / hooks surface](architecture.md).
 
 ---
 
@@ -427,7 +426,7 @@ in the same Next bucket.
 Open a pull request against
 [github.com/fakoli/anvil](https://github.com/fakoli/anvil). The
 [contributing guide](contributing.md) covers the test workflow, and the
-[roadmap](roadmap.md) and [backlog](backlog/anvil-backlog.md) list what is
+[roadmap](roadmap.md) and [backlog](https://github.com/fakoli/anvil/blob/main/docs/backlog/anvil-backlog.md) list what is
 planned and what is open.
 
 Three contribution shapes most appreciated right now:
@@ -435,12 +434,13 @@ Three contribution shapes most appreciated right now:
 - **Sync providers.** Linear / Monday providers are on the roadmap but
   community implementations are welcome. Follow
   [`sync-providers.md`](sync-providers.md).
-- **Backlog items.** The [prioritized backlog](backlog/anvil-backlog.md)
-  and the [tech-debt backlog](tech-debt-backlog.md) hold scoped items; the
+- **Backlog items.** The [prioritized backlog](https://github.com/fakoli/anvil/blob/main/docs/backlog/anvil-backlog.md)
+  and the [tech-debt backlog](https://github.com/fakoli/anvil/blob/main/docs/tech-debt-backlog.md) hold scoped items; the
   cross-cutting themes in `roadmap.md` indicate which batch cleanly.
 - **Test coverage.** Keep the local pytest suite and live-test documentation
-  current when adding a surface or provider; [`live-tests.md`](live-tests.md)
-  describes the nightly workflow.
+  current when adding a surface or provider;
+  [`live-tests.md`](https://github.com/fakoli/anvil/blob/main/docs/live-tests.md) has the local runbook (no nightly
+  workflow is committed yet).
 
 For new architectural choices (a second backend, a daemon, a webhook
 listener), write a SPEC-FIRST design doc under `docs/specs/` before

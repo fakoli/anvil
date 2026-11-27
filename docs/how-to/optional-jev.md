@@ -158,6 +158,4 @@ unapproved customer data. Standard-service zero retention is not assumed.
 There are no automatic retries, redirects, fallback providers, result caches,
 or semantic acceptance gates.
 
-The [PRD suite](../specs/jev-integration/README.md) records requirements,
-ownership, future-system boundaries, and the distinction between source
-delivery and live deployment. All switches remain off after installation.
+All switches remain off after installation.

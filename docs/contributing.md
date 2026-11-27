@@ -48,7 +48,8 @@ uvx --with-requirements docs/requirements.txt mkdocs serve
 | Landing page styles | `docs/stylesheets/home.css` |
 | Terminal replay player | `docs/javascripts/terminal-demo.js` |
 | Recorded session the replay plays | `docs/demo/session.json`, `docs/demo/strict-gate.json` |
-| Search scope (what the site search ranks or skips) | `scripts/mkdocs_hooks.py` |
+| What the site publishes and what it leaves out | `mkdocs.yml` (`nav`, `exclude_docs`) |
+| Search ranking of published pages | `scripts/mkdocs_hooks.py` |
 
 Three rules keep the landing page honest:
 
@@ -63,6 +64,12 @@ Three rules keep the landing page honest:
 
 Links inside the landing page's raw HTML are not validated by MkDocs. After
 changing one, build the site and confirm the target exists.
+
+Backlogs, plans, specs, research and archives live under `docs/` but are left
+out of the site by `exclude_docs`. To point at one of them from a published
+page, use an absolute GitHub URL. MkDocs reports a relative link into excluded
+material at info level only, so `--strict` does not fail on it;
+`tests/test_site_landing.py` does.
 
 ## Test workflows on Windows
 

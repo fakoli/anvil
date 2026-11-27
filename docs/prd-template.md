@@ -34,8 +34,6 @@ renumber (`R003`, `R004`) instead.
 
 **Reference**: the current data model and CLI command set are defined in
 [architecture](architecture.md) and the [CLI reference](cli-reference.md).
-The [original v0 build spec](specs/2026-05-24-anvil-v0.md) is retained only as
-a historical design record.
 
 Execution bundles are a post-plan coordination choice, not PRD syntax. Author stable task
 IDs, dependencies, acceptance criteria, and verification here; after tasks are approved
@@ -705,9 +703,7 @@ Once `anvil prd parse` succeeds, the PRD status is `draft`. From there:
    claim automatically.
 
 The current workflow is described in
-[Getting started](how-to/getting-started.md). The original
-[v0 build spec](specs/2026-05-24-anvil-v0.md) retains the historical workflow
-target under "Data Flows" but is not an operational reference.
+[Getting started](how-to/getting-started.md).
 
 ## Evidence contracts (optional): Claims and Artifact assertions
 

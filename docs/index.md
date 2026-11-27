@@ -297,7 +297,7 @@ Claimed task 'T001' as 'agent-a'.
 <p class="card__text">GitHub Issues sync mirrors task status where stakeholders already look. <code>anvil backup</code> pushes the event log to an S3 bucket you own, and <code>anvil restore</code> replays it elsewhere. Neither enforces a lease.</p>
 </li>
 </ul>
-<p class="more"><a href="how-to/coordinating-a-bundle/">Coordinate a milestone bundle</a> <a href="specs/2026-06-10-git-backed-events/">Read the git-backed events proposal</a> <a href="how-to/syncing-with-github/">Set up GitHub sync</a></p>
+<p class="more"><a href="how-to/coordinating-a-bundle/">Coordinate a milestone bundle</a> <a href="migrations/#git-backed-events">Move the event log into git</a> <a href="how-to/syncing-with-github/">Set up GitHub sync</a></p>
 </div>
 </div>
 </section>
@@ -440,7 +440,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 </ul>
 </div>
 </div>
-<p class="aside"><strong>Where this is going.</strong> Re-running recorded commands independently and a gate that is strict by default are open items on the <a href="backlog/strategic-backlog/">strategic backlog</a>. Until they land, read a proof as a strong record, not a guarantee.</p>
+<p class="aside"><strong>Where this is going.</strong> Re-running recorded commands independently and a gate that is strict by default are planned and not built yet. Until they land, read a proof as a strong record, not a guarantee.</p>
 <p class="more"><a href="how-to/claiming-and-shipping-a-task/">Claim and ship a task</a> <a href="evidence-buffer/">How evidence is captured</a> <a href="how-to/attempt-views/">How attempt views work</a></p>
 </div>
 </section>
@@ -617,7 +617,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <div class="head">
 <p class="kicker">Open source</p>
 <h2 class="title" id="contribute-title">Built in the open. Come build it.</h2>
-<p class="lede">Anvil is MIT licensed, and its roadmap, backlog and design decisions live in these docs. It is a small project, which means a good pull request changes it.</p>
+<p class="lede">Anvil is MIT licensed, and its roadmap and design rationale live in these docs. It is a small project, which means a good pull request changes it.</p>
 </div>
 <ul class="points points--ruled">
 <li>
@@ -643,7 +643,7 @@ Submit the missing evidence and re-run, or use --no-strict to override for this 
 <span class="c-prompt">$ </span><span class="c-cmd">uv run --project bin pytest</span></pre>
 </figure>
 <p class="aside">One pull request per change. CI and an automated review have to pass before it merges.</p>
-<p class="more"><a href="contributing/">Read the contributing guide</a> <a href="roadmap/">See the roadmap</a> <a href="backlog/anvil-backlog/">Browse the backlog</a> <a href="https://github.com/fakoli/anvil/issues">Open an issue on GitHub</a></p>
+<p class="more"><a href="contributing/">Read the contributing guide</a> <a href="roadmap/">See the roadmap</a> <a href="https://github.com/fakoli/anvil/blob/main/docs/backlog/anvil-backlog.md">Browse the backlog on GitHub</a> <a href="https://github.com/fakoli/anvil/issues">Open an issue on GitHub</a></p>
 </div>
 </div>
 </div>

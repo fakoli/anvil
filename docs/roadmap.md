@@ -3,8 +3,8 @@
 **Last updated:** 2026-08-24 (v0.6.5 closeout; restructured around Shipped /
 Now / Next / Later — the retired v1.11/v2.0/v2.1 version-target buckets are
 gone; see [How this is organized](#how-this-is-organized))
-**Source of truth:** this file. Archived phase backlogs at [`phase-9-backlog.md`](archive/phase-9-backlog.md) and [`phase-11-backlog.md`](archive/phase-11-backlog.md) are kept for historical audit only — do not add new items there.
-**Companion:** [`tech-debt-backlog.md`](tech-debt-backlog.md) for non-roadmap debt (12 OPEN CL/TQ/PS items from PR #41 critics; tracked by origin PR, closed across phases). Items there are not duplicated here unless a roadmap item naturally touches the same file.
+**Source of truth:** this file. Archived phase backlogs at [`phase-9-backlog.md`](https://github.com/fakoli/anvil/blob/main/docs/archive/phase-9-backlog.md) and [`phase-11-backlog.md`](https://github.com/fakoli/anvil/blob/main/docs/archive/phase-11-backlog.md) are kept for historical audit only — do not add new items there.
+**Companion:** [`tech-debt-backlog.md`](https://github.com/fakoli/anvil/blob/main/docs/tech-debt-backlog.md) for non-roadmap debt (12 OPEN CL/TQ/PS items from PR #41 critics; tracked by origin PR, closed across phases). Items there are not duplicated here unless a roadmap item naturally touches the same file.
 
 ## How this is organized
 
@@ -33,7 +33,7 @@ gone; see [How this is organized](#how-this-is-organized))
 - **Item IDs** preserved verbatim from origin (`P9B-N` from phase-9-backlog,
   `P11-XX-XN` from phase-11-backlog, `SL-N`/`WF-N` from the integrity-first
   priority track) so commit messages, audit cross-references, and the
-  [Phase 10 audit](archive/2026-05-26-plugin-audit.md) stay stable. Every ID
+  [Phase 10 audit](https://github.com/fakoli/anvil/blob/main/docs/archive/2026-05-26-plugin-audit.md) stay stable. Every ID
   in the archived backlogs appears here exactly once (except P11-SK-S5, see
   [Closed / shipped](#closed-shipped-cross-reference)).
 
@@ -53,7 +53,7 @@ stays the append-only record of what was promised and delivered; full
 item-level detail for the integrity-first track still lives inline in
 [Now](#now) (shipped items stay listed there too, marked **SHIPPED**, next to
 their still-open siblings). This section is the scannable summary the
-[docs assessment](plans/2026-07-07-docs-assessment.md) asked for — e.g. `sync
+[docs assessment](https://github.com/fakoli/anvil/blob/main/docs/plans/2026-07-07-docs-assessment.md) asked for — e.g. `sync
 github`, `replay`, `run-workflow`, multi-PRD, and `migrate-workspace` are all
 shipped.
 
@@ -90,7 +90,7 @@ shipped.
 - **[SL-2]** Critic false-pass measurement is **PARTIALLY SHIPPED**: the
   fault-injection corpus and harness are committed
   ([`benchmarks/critic_corpus/`](https://github.com/fakoli/anvil/tree/main/benchmarks/critic_corpus),
-  [`docs/critic-false-pass-baseline.md`](critic-false-pass-baseline.md)) with
+  [`docs/critic-false-pass-baseline.md`](https://github.com/fakoli/anvil/blob/main/docs/critic-false-pass-baseline.md)) with
   a mock-backend baseline recorded (`false_pass_rate = 1/4 = 0.25`); the
   real-critic baseline run is still open — tracked in [Now](#now).
 
@@ -152,7 +152,7 @@ restructure, kept here for cross-reference traceability.
 | P9-7 | Multi-provider config — no way to opt out of every sync provider | Phase 9 T5 |
 | P9-8 | Two new plugin-owned doc agents — `marketplace-scribe`, `docs-scribe` | Phase 9 T4 |
 
-See [`tech-debt-backlog.md`](tech-debt-backlog.md) § "Phase 8 / Phase 9 closures (sync + LLM cleanups)" for the full implementation detail and test counts on P9-1..P9-8.
+See [`tech-debt-backlog.md`](https://github.com/fakoli/anvil/blob/main/docs/tech-debt-backlog.md) § "Phase 8 / Phase 9 closures (sync + LLM cleanups)" for the full implementation detail and test counts on P9-1..P9-8.
 
 ---
 
@@ -245,7 +245,7 @@ backed by a passing CI job.
   agent; measure how many it waves through. Acceptance: a reproducible script
   plus a committed baseline false-pass number in `docs/`. The harness, corpus,
   and a mock-backend baseline are committed
-  ([`docs/critic-false-pass-baseline.md`](critic-false-pass-baseline.md));
+  ([`docs/critic-false-pass-baseline.md`](https://github.com/fakoli/anvil/blob/main/docs/critic-false-pass-baseline.md));
   the real-critic baseline run (needs API access) is still open. You cannot
   improve the critic until you can score it.
 
@@ -331,7 +331,7 @@ This theme grows **SL-7** (workflow-step) from a Wave 3 spike into a product axi
 "runtime-neutral **workflow**," the next axis after runtime-neutral **state**. It
 sits on **SL-3** (typed `ProofArtifact`, shipped) for the per-step gate and is the
 forcing function for **SL-4** (status-file coordination → events). Full narrative in
-[`docs/specs/2026-06-19-anvil-workflow-substrate.md`](specs/2026-06-19-anvil-workflow-substrate.md).
+[`docs/specs/2026-06-19-anvil-workflow-substrate.md`](https://github.com/fakoli/anvil/blob/main/docs/specs/2026-06-19-anvil-workflow-substrate.md).
 
 The framing: today anvil's only front door is the PRD (`PRD → parse → review →
 plan/score → tasks → claim → packet → submit evidence → apply`). The **second
@@ -382,7 +382,7 @@ steps cannot double-claim or fake "done").
   transitions. Scoped **only** to ad-hoc loops _not_ derived from a PRD — the
   common case is already covered by WF-1/WF-2 driving the PRD's ready queue.
   Design lives in
-  [`docs/specs/2026-06-19-anvil-workflow-substrate.md`](specs/2026-06-19-anvil-workflow-substrate.md);
+  [`docs/specs/2026-06-19-anvil-workflow-substrate.md`](https://github.com/fakoli/anvil/blob/main/docs/specs/2026-06-19-anvil-workflow-substrate.md);
   it extends the SL-7 spike but does not close it — the general `anvil
   workflow-step` posture-2/3 wrapper (SL-7 above) is a separate, still-open item.
 
@@ -527,9 +527,9 @@ The v0.3 reframe: a single project holds **several release-scoped PRDs** in one
 release/milestone-scoped, separately-gated, revisable plan carrying a target
 version/tag; its requirements, features, and tasks are partitioned by an owning
 `prd_id`. **Shipped in 0.3.0** — full design in
-[`docs/specs/2026-06-22-multi-prd-revisable.md`](specs/2026-06-22-multi-prd-revisable.md);
+[`docs/specs/2026-06-22-multi-prd-revisable.md`](https://github.com/fakoli/anvil/blob/main/docs/specs/2026-06-22-multi-prd-revisable.md);
 task-by-task backlog in
-[`docs/backlog/multi-prd-revisable.prd.md`](backlog/multi-prd-revisable.prd.md).
+[`docs/backlog/multi-prd-revisable.prd.md`](https://github.com/fakoli/anvil/blob/main/docs/backlog/multi-prd-revisable.prd.md).
 
 The three load-bearing properties this theme holds:
 
@@ -565,7 +565,7 @@ the network-touching milestone client is deferred to **[MPRD-RG1]** under
 
 - **[P9B-5]** Webhook-based sync (vs polling). **SPEC-FIRST.** `--watch` polls every N seconds; for providers that publish webhooks (GitHub, Linear, Monday, Jira), accept push-based sync via a long-running listener. Webhook secret in `.anvil/config.yaml`; HMAC verification on every payload. Needs design doc first: engine's current "one fetch round-trip per task per pass" assumption does not hold under webhooks (out-of-order events, duplicates, races). Spec scope: `anvil webhook-listen --provider X --port 8080` subcommand, event de-duplication via `(provider_id, external_id, last_modified)` tuple, out-of-order queueing with configurable max-delay, per-provider HMAC verification, polling fallback when listener crashes.
 - **[P9B-6]** Immediate-apply `*_applied` resolution variants. **TARGETED.** Phase 9 T5 deferred wiring `remote_wins_applied` / `local_wins_applied` per TODOs at `cli/sync.py:1054` and `:1068`. Conflict-safety design (re-fetch on moving target, retry/back-off contract) needs specifying first. Acceptance: `remote_wins_applied` calls `_apply_remote_to_local` inline inside the pull loop; `local_wins_applied` calls `provider.push_task(...)` inline with a defined retry/back-off contract for the race where a parallel remote edit lands between decision and push; `*_applied` tokens join the controlled vocabulary in `docs/github-sync.md`; 4+ new tests in `test_cli_sync.py`.
-- **[MPRD-RG1]** PRD→release-group sync (`ensure_release_group` Protocol + GitHub milestone client). **OPEN.** Deferred out of the multi-PRD release (Phase 7 of [`docs/specs/2026-06-22-multi-prd-revisable.md`](specs/2026-06-22-multi-prd-revisable.md); tracked as T029 in [`docs/backlog/multi-prd-revisable.prd.md`](backlog/multi-prd-revisable.prd.md)). The multi-PRD work shipped the release/sync **data plumbing only** — `SyncMapping.prd_id` + `entity_kind: Literal['task','prd']`, per-PRD `--prd` push scoping, and `prd_id` on reconciliation discrepancies. The network-touching milestone wiring was explicitly **not** built so no provider had to change. Scope when picked up:
+- **[MPRD-RG1]** PRD→release-group sync (`ensure_release_group` Protocol + GitHub milestone client). **OPEN.** Deferred out of the multi-PRD release (Phase 7 of [`docs/specs/2026-06-22-multi-prd-revisable.md`](https://github.com/fakoli/anvil/blob/main/docs/specs/2026-06-22-multi-prd-revisable.md); tracked as T029 in [`docs/backlog/multi-prd-revisable.prd.md`](https://github.com/fakoli/anvil/blob/main/docs/backlog/multi-prd-revisable.prd.md)). The multi-PRD work shipped the release/sync **data plumbing only** — `SyncMapping.prd_id` + `entity_kind: Literal['task','prd']`, per-PRD `--prd` push scoping, and `prd_id` on reconciliation discrepancies. The network-touching milestone wiring was explicitly **not** built so no provider had to change. Scope when picked up:
   - A **provider-neutral** `ensure_release_group(release_tag, target_version, prd_summary, mapping) -> ExternalRef` Protocol method (covers GitHub Milestone / Linear Cycle / Jira FixVersion), **optional and capability-gated** via a `supports_milestones` (a.k.a. `supports_release_groups`) flag so existing providers stay unchanged.
   - GitHub client `create_milestone` / `list_milestones` calls plus issue→milestone assignment for the issues a PRD owns.
   - A `sync.milestone.ensured` (release-group) audit event and **prd-kind** `SyncMapping` row persistence (`entity_kind='prd'`, carrying `prd_id`, null `task_id`) so the 1:1 PRD↔release/milestone mapping is recorded.
@@ -580,7 +580,7 @@ the network-touching milestone client is deferred to **[MPRD-RG1]** under
 
 ## Cross-cutting themes (high-leverage batches)
 
-Items spanning multiple critics/areas that benefit from cohesive treatment. These come from the [Phase 10 audit](archive/2026-05-26-plugin-audit.md) and supersede the "items by critic" view when planning Phase 11 welder fan-out. Each theme is welder-sized and self-contained.
+Items spanning multiple critics/areas that benefit from cohesive treatment. These come from the [Phase 10 audit](https://github.com/fakoli/anvil/blob/main/docs/archive/2026-05-26-plugin-audit.md) and supersede the "items by critic" view when planning Phase 11 welder fan-out. Each theme is welder-sized and self-contained.
 
 ### Theme 1 — No-fuzzy-detection rule across skills
 
@@ -680,7 +680,7 @@ Wanted but no compelling forcing function yet; revisit when an adjacent item for
 
 ## Companion: tech-debt-backlog.md (not duplicated here)
 
-These items remain owned by [`tech-debt-backlog.md`](tech-debt-backlog.md) and are not duplicated into roadmap scope unless a roadmap item naturally touches the same file. Listed here for cross-reference only.
+These items remain owned by [`tech-debt-backlog.md`](https://github.com/fakoli/anvil/blob/main/docs/tech-debt-backlog.md) and are not duplicated into roadmap scope unless a roadmap item naturally touches the same file. Listed here for cross-reference only.
 
 | ID | Source | Status |
 |---|---|---|

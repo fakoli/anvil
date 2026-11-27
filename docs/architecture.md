@@ -1,8 +1,6 @@
 # anvil architecture
 
-> Condensed reference for the current **v0.6.27** standalone state. For the original v0
-> vision and aspirational items, see
-> [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
+> Condensed reference for the current **v0.6.27** standalone state.
 > For what is planned but not yet shipped, see
 > [`roadmap.md`](roadmap.md).
 >
@@ -34,12 +32,7 @@ task is claimable only after its PRD is approved for its exact current
 source/material lineage, even while a sibling PRD is still `draft`. Conflict
 detection, by contrast, spans **all** PRDs — two tasks in
 different PRDs that touch the same file land in one conflict group, so the
-single-winner guarantee holds across the whole project, not per-PRD. See
-[`_positioning.md`](_positioning.md) for the per-PRD-as-scoped-stack framing.
-
-The full positioning (the five differentiators and the Terraform analogy) is maintained
-in [`_positioning.md`](_positioning.md); this document does not duplicate
-that material.
+single-winner guarantee holds across the whole project, not per-PRD.
 
 ### Behaviour-first PRD readiness
 
@@ -608,8 +601,6 @@ and welder-effort estimates.
 
 ## Further reading
 
-- [`_positioning.md`](_positioning.md) — differentiators and the Terraform analogy (internal positioning reference)
-- [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
 - [`mcp.md`](mcp.md) — full 38-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
 - [`sync-providers.md`](sync-providers.md) — contributor guide for new sync providers

@@ -2,7 +2,7 @@
 
 Observed 2026-11-09 on the development host, source based on `8f2b750` plus
 the capture/checksum changes described here. This implements the first capture
-experiment from [the concurrency findings](concurrency-source-findings.md).
+experiment from [the concurrency findings](https://github.com/fakoli/anvil/blob/main/docs/design/concurrency-source-findings.md).
 Temporary synthetic local State only; no operator State or serving changes.
 
 Run the bounded history probe from the checkout:
