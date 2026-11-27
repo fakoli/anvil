@@ -25,15 +25,17 @@ export ANVIL_SESSION_ID="${ANVIL_SESSION_ID:-drain-$$}"
 
 # Anvil's JSON is read with a JSON parser rather than text matching: an actor
 # may contain characters JSON escapes, and the proof below binds to the decoded
-# value. python3 when it is on PATH, otherwise the interpreter uv manages (uv is
-# Anvil's one prerequisite). Resolved HERE, before any claim, so a missing
-# interpreter stops the drainer cleanly instead of stranding a claimed task.
-if command -v python3 > /dev/null 2>&1; then
+# value. python3 when it works, otherwise the interpreter uv manages (uv is
+# Anvil's one prerequisite). Each candidate is RUN here, not just looked up: a
+# version-manager shim can sit on PATH with no interpreter behind it. Resolved
+# before any claim, so a missing or broken interpreter stops the drainer cleanly
+# instead of stranding a claimed task.
+if python3 -c 'import json' > /dev/null 2>&1; then
 	json_python() { python3 "$@"; }
-elif command -v uv > /dev/null 2>&1; then
+elif uv run --quiet --no-project python -c 'import json' > /dev/null 2>&1; then
 	json_python() { uv run --quiet --no-project python "$@"; }
 else
-	echo "ci-drain.sh needs python3 or uv on PATH to read Anvil's JSON output" >&2
+	echo "ci-drain.sh needs a working python3, or uv, on PATH to read Anvil's JSON output" >&2
 	exit 1
 fi
 

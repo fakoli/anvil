@@ -58,6 +58,7 @@ claim  ->  packet  ->  do the work  ->  capture the proof  ->  submit  ->  apply
 ```
 
 ```bash
+command -v jq > /dev/null || { echo "this example needs jq" >&2; exit 1; }   # before claiming
 # single-winner lease + file-conflict check; on a refusal, show it and stop
 claimed="$(anvil claim T001 --actor loop --json)" || { printf '%s\n' "$claimed" >&2; exit 1; }
 claim="$(printf '%s' "$claimed" | jq -r '.data.claim.id')"
@@ -77,8 +78,10 @@ anvil apply T001 --approve --strict   # the gate; --strict refuses unverified wo
 `submit` hands in what you ran and what you changed. The command proof is the
 record `capture-evidence` wrote: the exact command, its exit code and a hash of
 its output, bound to the claim named by `ANVIL_CLAIM_ID`. That id is new for
-every claim, so read it from the claim rather than typing one in. Run by hand,
-plain `anvil claim` prints the same `export` line for you to copy. Without the
+every claim, so read it from the claim rather than typing one in. The example
+does that with `jq` and checks for it before claiming, so a missing tool cannot
+leave a claim behind. Run by hand, plain `anvil claim` prints the same `export`
+line for you to copy. Without the
 variable, or with an id that is not your claim's, the capture still exits 0 but
 is bound to nothing, and the gate reports the check as missing. A task with
 several verification commands needs one capture for each. If a check fails,
