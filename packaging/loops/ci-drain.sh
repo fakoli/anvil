@@ -23,11 +23,25 @@ set -eu
 # yourself before running.
 export ANVIL_SESSION_ID="${ANVIL_SESSION_ID:-drain-$$}"
 
-# Read one field of the claim that `anvil claim --json` returned. A JSON parser
-# rather than text matching: an actor may contain characters JSON escapes, and
-# the proof below binds to the decoded value. Needs python3, which Anvil runs on.
+# Anvil's JSON is read with a JSON parser rather than text matching: an actor
+# may contain characters JSON escapes, and the proof below binds to the decoded
+# value. python3 when it works, otherwise the interpreter uv manages (uv is
+# Anvil's one prerequisite). Each candidate is RUN here, not just looked up: a
+# version-manager shim can sit on PATH with no interpreter behind it. Resolved
+# before any claim, so a missing or broken interpreter stops the drainer cleanly
+# instead of stranding a claimed task.
+if python3 -c 'import json' > /dev/null 2>&1; then
+	json_python() { python3 "$@"; }
+elif uv run --quiet --no-project python -c 'import json' > /dev/null 2>&1; then
+	json_python() { uv run --quiet --no-project python "$@"; }
+else
+	echo "ci-drain.sh needs a working python3, or uv, on PATH to read Anvil's JSON output" >&2
+	exit 1
+fi
+
+# Read one field of the claim that `anvil claim --json` returned.
 claim_field() {
-	printf '%s' "$claimed" | python3 -c 'import json, sys; print(json.load(sys.stdin)["data"]["claim"][sys.argv[1]])' "$1"
+	printf '%s' "$claimed" | json_python -c 'import json, sys; print(json.load(sys.stdin)["data"]["claim"][sys.argv[1]])' "$1"
 }
 
 # Run ONE verification command and record its command proof against the claim.
@@ -53,10 +67,32 @@ verify() {
 	fi
 }
 
+# Stop unless every command proof the task requires was really recorded under
+# this claim. `capture-evidence` exits 0 whatever happens: with capture switched
+# off in config.yaml it records nothing, and a capture that does not match the
+# claim lands in the orphan buffer. Its exit code proves neither. The preflight
+# reads what was recorded and lists each required proof with `satisfied`. Checked
+# before `submit` for the same reason as above: the claim is still held, so the
+# task can be fixed and re-run rather than left in needs_review without proof.
+# Command proofs only: the preflight does not assess other evidence (see step 5).
+require_proofs() {
+	preflight="$(anvil evidence-preflight "$task" --json)" || {
+		printf '%s\n' "$preflight" >&2
+		exit 1
+	}
+	missing="$(printf '%s' "$preflight" | json_python -c 'import json, sys; print("\n".join(p["command"] for p in json.load(sys.stdin)["data"]["required_command_proofs"] if not p["satisfied"]))')"
+	if [ -n "$missing" ]; then
+		echo "no passing command proof under claim $claim for $task, claim still held; not submitting:" >&2
+		printf '%s\n' "$missing" >&2
+		exit 1
+	fi
+}
+
 # Drain until the queue is empty (exit 3), but PROPAGATE any real error instead
 # of masking it as a clean drain. Using `if` (not a bare `while cmd`) is what
 # lets us tell exit 3 apart from exit 1/2: a bare `while` would stop on BOTH and
 # then report success. The `if` condition also keeps `set -e` from tripping.
+refused=""   # the task whose claim was refused on the previous pass, if any
 while true; do
 	if anvil next -q; then
 		:                          # a task is ready -> run the body below
@@ -73,10 +109,23 @@ while true; do
 	[ -n "$task" ] || break
 	# Concurrency: another drainer may have claimed this task between `next` and
 	# here. Skip to the next task instead of aborting the whole loop (`set -e`
-	# would otherwise exit on a lost lease). `next` won't re-recommend a claimed
-	# task, so this can't spin. The claim id and owner bind step 4's command
-	# proofs to this claim.
-	claimed="$(anvil claim "$task" --json)" || continue
+	# would otherwise exit on a lost lease). `next` won't re-recommend a task
+	# someone else holds, so a lost race cannot spin. Every other refusal (an
+	# unapproved PRD, an actor mismatch) repeats on each pass: `next` hands the
+	# same task straight back. Stop when that happens instead of looping forever.
+	# In --json mode the refusal is printed on stdout, so show it here; nothing
+	# else will. The claim id and owner bind step 4's command proofs to this claim.
+	if claimed="$(anvil claim "$task" --json)"; then
+		refused=""
+	else
+		printf '%s\n' "$claimed" >&2
+		if [ "$task" = "$refused" ]; then
+			echo "claim refused twice in a row for $task; stopping" >&2
+			exit 1
+		fi
+		refused="$task"
+		continue
+	fi
 	claim="$(claim_field id)"
 	actor="$(claim_field claimed_by)"
 
@@ -90,13 +139,20 @@ while true; do
 
 	# 4. Run every verification command the packet lists and record a command
 	#    proof for each: one `verify` line per command. Step 6 refuses approval
-	#    while any of them is missing.
+	#    while any of them is missing, so `require_proofs` checks that they all
+	#    landed while the claim is still held.
 	verify "REPLACE_WITH_VERIFICATION_COMMAND"
 	# verify "REPLACE_WITH_ANOTHER_VERIFICATION_COMMAND"
+	require_proofs
 
 	# 5. Submit completion evidence: what you ran (one --commands per command
 	#    verified above) and what you changed. This releases the claim and moves
 	#    the task to needs_review.
+	#    This skeleton hands in command proofs and changed files ONLY. A task
+	#    that also requires other evidence (a link, a diff, a screenshot, an
+	#    artifact assertion) needs the matching flags added here (see
+	#    `anvil submit --help`): `require_proofs` does not look at those
+	#    requirements, and step 6 refuses the task without them.
 	anvil submit "$task" \
 		--commands "REPLACE_WITH_VERIFICATION_COMMAND" \
 		--files-changed "REPLACE_WITH_FILES_CHANGED"

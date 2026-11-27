@@ -58,8 +58,11 @@ claim  ->  packet  ->  do the work  ->  capture the proof  ->  submit  ->  apply
 ```
 
 ```bash
-anvil claim T001 --actor loop         # single-winner lease + file-conflict check
-export ANVIL_ACTOR=loop ANVIL_CLAIM_ID=C9F3A2104   # claim prints this line for you
+jq -n . > /dev/null 2>&1 || { echo "this example needs a working jq" >&2; exit 1; }   # before claiming
+# single-winner lease + file-conflict check; on a refusal, show it and stop
+claimed="$(anvil claim T001 --actor loop --json)" || { printf '%s\n' "$claimed" >&2; exit 1; }
+claim="$(printf '%s' "$claimed" | jq -r '.data.claim.id')"
+export ANVIL_ACTOR=loop ANVIL_CLAIM_ID="$claim"    # binds the proof below to this claim
 anvil packet T001                     # the contract: criteria, files, verify cmds
 # ... implement against the packet ...
 uv run pytest -x > pytest.log 2>&1; code=$?        # the packet's verification command
@@ -74,11 +77,22 @@ anvil apply T001 --approve --strict   # the gate; --strict refuses unverified wo
 
 `submit` hands in what you ran and what you changed. The command proof is the
 record `capture-evidence` wrote: the exact command, its exit code and a hash of
-its output, bound to the claim named by `ANVIL_CLAIM_ID`. Without that variable
-the capture still exits 0 but is bound to nothing, and the gate reports the
-check as missing. A task with several verification commands needs one capture
-for each. If a check fails, stop before `submit`: `submit` releases the claim,
-and the task would sit in `needs_review` with a failing proof.
+its output, bound to the claim named by `ANVIL_CLAIM_ID`. That id is new for
+every claim, so read it from the claim rather than typing one in. The example
+does that with `jq` and runs it once before claiming, so a missing or broken
+tool cannot leave a claim behind. Run by hand, plain `anvil claim` prints the
+same `export` line for you to copy. Without the variable, or with an id that is
+not your claim's, the capture still exits 0 but is bound to nothing, and the
+gate reports the check as missing. A task with several verification commands
+needs one capture for each. If a check fails, stop before `submit`: `submit`
+releases the claim, and the task would sit in `needs_review` with a failing
+proof.
+
+The capture exits 0 even when it records nothing, so check before you hand in:
+[`anvil evidence-preflight T001 --json`](../cli-reference.md#evidence-preflight)
+lists each required command proof with `satisfied` true or false. It covers
+command proofs only. A task that also requires a link, a diff, a screenshot or
+an artifact assertion needs that evidence passed to `submit` as well.
 
 Anvil's hooks make this capture for you only when the command contains
 `pytest`, `ruff check`, `mypy`, `npm test`, `cargo test` or `bun test`
@@ -125,7 +139,10 @@ done
 ```
 
 The committed [`packaging/loops/ci-drain.sh`](https://github.com/fakoli/anvil/blob/main/packaging/loops/ci-drain.sh)
-is the full version (also skips a lost lease so concurrent drainers don't abort).
+is the full version. It also skips a lost lease so concurrent drainers don't
+abort, stops with the refusal when a claim is refused for any other reason
+(such as a PRD that is not approved), and runs the evidence preflight so a task
+is never submitted without its command proofs.
 
 Durable, leased state makes **both** resumable and safe to run concurrently:
 single-winner leases mean two runners never claim the same task, and a crashed
