@@ -56,8 +56,8 @@ schemas through `describe_surface`, then execute the documented CLI command.
 
 ## The standalone loop
 
-init → author/parse PRD → review → plan + score → claim → work packet →
-submit evidence → apply review verdict.
+init → author/parse PRD → review → plan + score → review tasks → claim →
+work packet → submit evidence → apply review verdict.
 
 ```bash
 anvil init                 # scaffold state; echoes the prd.md path to author
@@ -66,11 +66,12 @@ anvil prd parse            # echoes stable source identity (default/id/custom)
 anvil prd review           # draft → reviewed
 anvil prd review --approve # reviewed → approved
 anvil plan && anvil score
+anvil review tasks         # drafted → ready; only ready tasks can be claimed
 anvil next                 # pick a ready task
 anvil claim T001           # lease it, get a branch
 anvil packet T001          # work packet; do the work
 anvil submit T001 --commands "pytest -q" --files-changed src/x.py
-anvil apply T001           # apply the review verdict
+anvil apply T001           # show the gate verdict; a reviewer adds --approve
 ```
 
 ## Capabilities (MCP tool ⇄ CLI command)

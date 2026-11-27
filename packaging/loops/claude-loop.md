@@ -38,8 +38,9 @@ already wrap this; the raw flow is:
 3. `anvil packet <task>` — fetch the work packet (the contract: acceptance
    criteria, files in scope, verification commands). Read it before editing.
 4. Do the work on the claim's branch; run the packet's verification commands.
-5. `anvil submit <task> --commands "<cmds>" --files-changed "<paths>"` — the
-   evidence is the typed proof; this auto-releases the claim → `needs_review`.
+5. `anvil submit <task> --commands "<cmds>" --files-changed "<paths>"` — hands
+   in what ran and what changed (the hooks captured each command's proof as it
+   ran); this auto-releases the claim → `needs_review`.
 6. `anvil apply <task> --approve` — the gate (refuses approval when required
    evidence is missing; pass `--strict` to enforce). Then loop back to step 1.
 

@@ -17,16 +17,20 @@ New to terms like the loop, packet, or claim? See the [glossary](../glossary.md)
 Get a queue of `ready` tasks before any loop runs:
 
 ```bash
-anvil init                 # one-time: create .anvil/ state
-anvil prd parse            # PRD markdown -> features + tasks
-anvil prd assess           # optional advisory behavior/testability feedback
-anvil plan                 # generate the task graph (deps, conflict groups)
-anvil score                # score each task on the six dimensions
+anvil init                  # one-time: create the project's state
+anvil prd parse             # read the PRD you wrote at the path init printed
+anvil prd assess            # optional advisory behavior/testability feedback
+anvil prd review            # draft -> reviewed
+anvil prd review --approve  # reviewed -> approved; nothing can be claimed before this
+anvil plan                  # generate the task graph (deps, conflict groups)
+anvil score                 # score each task on the six dimensions
+anvil review tasks          # promote tasks that pass the readiness gate to ready
 ```
 
 After this, `anvil list --status ready` shows claimable work. (See
-`docs/how-to/authoring-a-prd.md` for the PRD step and
-`docs/how-to/claiming-and-shipping-a-task.md` for the manual single-task flow.)
+[Authoring a PRD](authoring-a-prd.md) for the PRD step and
+[Claiming and shipping a task](claiming-and-shipping-a-task.md) for the manual
+single-task flow.)
 
 ## 2. The seam — `anvil next -q`
 
@@ -47,26 +51,40 @@ on an empty queue (exit 0). Use `-q` for control flow, `--json` for the id.
 
 ## 3. The loop body (already exists)
 
-One governed task = the same five steps everywhere. `/anvil:execute` wraps them.
+One governed task = the same six steps everywhere. `/anvil:execute` wraps them.
 
 ```
-claim  ->  packet  ->  do the work  ->  submit --commands --files-changed  ->  apply
+claim  ->  packet  ->  do the work  ->  capture the proof  ->  submit  ->  apply
 ```
 
 ```bash
-anvil claim T001                      # single-winner lease + file-conflict check
+anvil claim T001 --actor loop         # single-winner lease + file-conflict check
+export ANVIL_ACTOR=loop ANVIL_CLAIM_ID=C9F3A2104   # claim prints this line for you
 anvil packet T001                     # the contract: criteria, files, verify cmds
-# ... implement against the packet, run its verification commands ...
-anvil submit T001 \
+# ... implement against the packet ...
+uv run pytest -x > pytest.log 2>&1; code=$?        # the packet's verification command
+anvil hook capture-evidence --command "uv run pytest -x" \
+  --exit-code "$code" --stdout-file pytest.log --actor loop   # record the command proof
+anvil submit T001 --actor loop \
   --commands "uv run pytest -x" \
-  --files-changed "src/anvil/foo.py"  # the evidence; auto-releases -> needs_review
+  --files-changed "src/app/foo.py"    # hand in the evidence; -> needs_review
 anvil apply T001 --approve --strict   # the gate; --strict refuses unverified work
 ```
 
-`submit`'s evidence (`--commands`, `--files-changed`, optional `--output-file`,
-`--pr-url`) is the typed proof. `apply` is the gate: with `--strict` it refuses
-`--approve` when required evidence is missing. Leasing + evidence gating are why
+`submit` hands in what you ran and what you changed. The command proof is the
+record `capture-evidence` wrote: the exact command, its exit code and a hash of
+its output, bound to the claim named by `ANVIL_CLAIM_ID`. Without that variable
+the capture still exits 0 but is bound to nothing, and the gate reports the
+check as missing. In a harness with Anvil's hooks installed the capture happens
+as the command runs, so you only write that step yourself in a bare shell.
+
+`apply` is the gate: with `--strict` it refuses `--approve` until every required
+check has a matching, passing command proof. Leasing + evidence gating are why
 parallel loops cannot double-claim or fake "done".
+
+This loop approves its own work. The CLI allows that, and the approval records
+who gave it. To keep a person in the loop, leave out the `apply` line: tasks
+then stop at `needs_review` until someone approves them.
 
 ## 4. Two modes, one primitive
 

@@ -36,7 +36,7 @@ while true; do
 		exit "$rc"                 # real error -> propagate, do NOT mask as drained
 	fi
 
-	# --- per-task body: claim -> packet -> work -> submit --evidence -> apply ---
+	# --- per-task body: claim -> packet -> work -> capture proof -> submit -> apply ---
 
 	# 1. Claim the recommended task (single-winner lease + file-conflict check).
 	task="$(anvil next --json | sed -n 's/.*"id"[^"]*"\([^"]*\)".*/\1/p' | head -n1)"
@@ -44,8 +44,12 @@ while true; do
 	# Concurrency: another drainer may have claimed this task between `next` and
 	# here. Skip to the next task instead of aborting the whole loop (`set -e`
 	# would otherwise exit on a lost lease). `next` won't re-recommend a claimed
-	# task, so this can't spin.
-	anvil claim "$task" || continue
+	# task, so this can't spin. The claim id and actor bind step 4's command
+	# proof to this claim.
+	claimed="$(anvil claim "$task" --json)" || continue
+	claim="$(printf '%s\n' "$claimed" | sed -n 's/.*"claim": {"id": "\([^"]*\)".*/\1/p')"
+	actor="$(printf '%s\n' "$claimed" | sed -n 's/.*"claimed_by": "\([^"]*\)".*/\1/p')"
+	[ -n "$claim" ] && [ -n "$actor" ] || { echo "could not read the claim for $task" >&2; exit 1; }
 
 	# 2. Fetch the work packet — the contract that teaches the steps,
 	#    acceptance criteria, files in scope, and verification commands.
@@ -55,15 +59,27 @@ while true; do
 	#    script, etc.). It must implement the packet's acceptance criteria.
 	#    e.g.  codex exec "Implement $task per .anvil/packets/$task.md"
 
-	# 4. Submit completion evidence (the typed proof gate). `--commands` and
-	#    `--files-changed` ARE the evidence; this auto-releases the claim and
-	#    moves the task to needs_review.
+	# 4. Run the packet's verification command and record its command proof.
+	#    A bare shell has no hooks, so nothing captures the proof for you, and
+	#    step 6 refuses approval without it. ANVIL_CLAIM_ID binds the proof to
+	#    this claim; without it the capture still exits 0 but proves nothing.
+	#    The command string must be the one the packet lists.
+	code=0
+	REPLACE_WITH_VERIFICATION_COMMAND > verify.log 2>&1 || code=$?
+	ANVIL_CLAIM_ID="$claim" anvil hook capture-evidence \
+		--command "REPLACE_WITH_VERIFICATION_COMMAND" \
+		--exit-code "$code" --stdout-file verify.log --actor "$actor"
+
+	# 5. Submit completion evidence: what you ran and what you changed. This
+	#    releases the claim and moves the task to needs_review.
 	anvil submit "$task" \
-		--commands "REPLACE_WITH_VERIFICATION_COMMANDS" \
+		--commands "REPLACE_WITH_VERIFICATION_COMMAND" \
 		--files-changed "REPLACE_WITH_FILES_CHANGED"
 
-	# 5. Apply the gate. `--strict` refuses --approve when required evidence is
-	#    missing, so a step can't ship unverified.
+	# 6. Apply the gate. `--strict` refuses --approve until every required check
+	#    has a matching, passing command proof, so a step can't ship unverified.
+	#    This approves the loop's own work; drop the line to leave tasks at
+	#    needs_review for a person.
 	anvil apply "$task" --approve --strict
 done
 
