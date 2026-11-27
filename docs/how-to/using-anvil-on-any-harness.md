@@ -114,10 +114,16 @@ intentionally absent.
 ## Or just use the CLI
 
 ```bash
-anvil init && anvil prd parse && anvil plan && anvil next
+anvil init                       # then write the PRD at the path it prints
+anvil prd parse && anvil prd review && anvil prd review --approve
+anvil plan && anvil score && anvil review tasks
+anvil next
 anvil claim T001 && anvil packet T001
-anvil submit T001 --commands "uv run pytest -x" --files-changed "src/foo.py" && anvil apply T001
+anvil submit T001 --commands "uv run pytest -x" --files-changed "src/foo.py"
+anvil apply T001                 # shows the gate verdict; add --approve to accept
 ```
+
+[Getting started](getting-started.md) walks through each step with its output.
 
 Every read command takes `--json`. `AGENTS.md` carries the full MCP-tool ⇄
 CLI-command table — codex gets it spliced in automatically; for any MCP-only

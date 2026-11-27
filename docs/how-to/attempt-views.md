@@ -1,8 +1,8 @@
 # Bounded current-attempt reads
 
 `anvil.attempt_view.read_attempt_view(state_dir, task_id, *, prd_id=None, limits=None)`
-is an observational Python read core. CLI, MCP, bundle packet rendering, and timing
-composition are separate integration work. Pass the state directory already
+is the observational Python read core behind `anvil packet TASK_ID --attempt` and
+the `get_attempt_view` MCP tool. Pass the state directory already
 resolved by Anvil; do not assume that a checkout contains its own `.anvil` directory.
 
 The returned JSON-compatible dictionary uses schema

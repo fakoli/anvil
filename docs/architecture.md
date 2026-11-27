@@ -178,7 +178,7 @@ complete public shape.
 |---|---|---|
 | `PRDStatus` | draft, reviewed, approved, rejected | Gates task claimability |
 | `FeatureStatus` | proposed, ready, in_progress, done | Coarse-grain status on a Feature |
-| `TaskStatus` | proposed, drafted, reviewed, ready, claimed, in_progress, blocked, needs_review, accepted, done, rejected | The 11-status task lifecycle (see [Task lifecycle](#task-lifecycle)) |
+| `TaskStatus` | proposed, drafted, reviewed, ready, claimed, in_progress, blocked, needs_review, accepted, done, rejected, closed | The 12-status task lifecycle (see [Task lifecycle](#task-lifecycle)) |
 | `TaskPriority` | low, medium, high, critical | Sort key for `anvil next` |
 | `ClaimType` | task, feature, file_scope, exploratory | Distinguishes whole-task vs partial leases |
 | `ClaimStatus` | active, released, stale, force_released | Lease lifecycle |
@@ -278,7 +278,9 @@ Source: [`assets/diagrams/lifecycle.mmd`](https://github.com/fakoli/anvil/blob/m
 > reported at apply time but **enforced** only when `strict_evidence`
 > resolves true; the default path approves regardless.
 
-All 11 statuses are defined in `TaskStatus` and the allowed transitions are
+All 12 statuses are defined in `TaskStatus`. `closed` marks a task closed
+without completion (`anvil task-action TASK close`, with a resolution such as
+`duplicate` or `wont_do`); the allowed transitions for the rest are
 the public functions in
 [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py).
 The module is pure (no I/O); each function returns a new `Task` via
@@ -471,7 +473,7 @@ in [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/b
 - Hooks: `hook ...` (sub-app — the active manifest uses `hook dispatch`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
-### MCP tools (38)
+### MCP tools (39)
 
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
 [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py).
@@ -481,7 +483,7 @@ on the wire; the 12 planning-tagged tools (`parse_prd`, `assess_prd`, `plan_task
 `score_tasks`, ...) require `ANVIL_MCP_PLANNING=1` (`mcp_server.py`
 tag-disables them at startup).
 
-- **Default execution surface (26):** task/project reads, claim/evidence
+- **Default execution surface (27):** task/project reads, claim/evidence
   mutation, dependency/conflict reads, and the complete coordinator-bundle
   execution/review/reconciliation loop.
 - **Planning surface (12):** `init_project`, `parse_prd`, `assess_prd`,
@@ -594,7 +596,7 @@ is on the [roadmap](roadmap.md); the notable open themes:
 
 ## Further reading
 
-- [`mcp.md`](mcp.md) — full 38-tool MCP reference with error envelope contract
+- [`mcp.md`](mcp.md) — full 39-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
 - [`sync-providers.md`](sync-providers.md) — contributor guide for new sync providers
 - [`prd-template.md`](prd-template.md) — PRD authoring schema and worked example

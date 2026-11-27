@@ -23,6 +23,36 @@ set -eu
 # yourself before running.
 export ANVIL_SESSION_ID="${ANVIL_SESSION_ID:-drain-$$}"
 
+# Read one field of the claim that `anvil claim --json` returned. A JSON parser
+# rather than text matching: an actor may contain characters JSON escapes, and
+# the proof below binds to the decoded value. Needs python3, which Anvil runs on.
+claim_field() {
+	printf '%s' "$claimed" | python3 -c 'import json, sys; print(json.load(sys.stdin)["data"]["claim"][sys.argv[1]])' "$1"
+}
+
+# Run ONE verification command and record its command proof against the claim.
+# Call it once for EVERY verification command the packet lists, with the command
+# string exactly as the packet gives it: the gate wants a matching, passing
+# proof for each. A bare shell has no hooks, so nothing else captures the proof.
+# ANVIL_CLAIM_ID binds it to this claim; without it the capture still exits 0
+# but proves nothing. The output goes to its own temporary file, so concurrent
+# drainers in one checkout never read each other's.
+# A failing command stops the drainer HERE, before `submit` would release the
+# claim: the failed proof is kept, and the task stays claimed until the lease
+# expires or you `anvil release` it, instead of landing in needs_review broken.
+verify() {
+	log="$(mktemp)"
+	code=0
+	sh -c "$1" > "$log" 2>&1 || code=$?
+	ANVIL_CLAIM_ID="$claim" anvil hook capture-evidence \
+		--command "$1" --exit-code "$code" --stdout-file "$log" --actor "$actor"
+	rm -f "$log"
+	if [ "$code" -ne 0 ]; then
+		echo "verification failed (exit $code) for $task, claim $claim still held: $1" >&2
+		exit "$code"
+	fi
+}
+
 # Drain until the queue is empty (exit 3), but PROPAGATE any real error instead
 # of masking it as a clean drain. Using `if` (not a bare `while cmd`) is what
 # lets us tell exit 3 apart from exit 1/2: a bare `while` would stop on BOTH and
@@ -36,7 +66,7 @@ while true; do
 		exit "$rc"                 # real error -> propagate, do NOT mask as drained
 	fi
 
-	# --- per-task body: claim -> packet -> work -> submit --evidence -> apply ---
+	# --- per-task body: claim -> packet -> work -> capture proof -> submit -> apply ---
 
 	# 1. Claim the recommended task (single-winner lease + file-conflict check).
 	task="$(anvil next --json | sed -n 's/.*"id"[^"]*"\([^"]*\)".*/\1/p' | head -n1)"
@@ -44,8 +74,11 @@ while true; do
 	# Concurrency: another drainer may have claimed this task between `next` and
 	# here. Skip to the next task instead of aborting the whole loop (`set -e`
 	# would otherwise exit on a lost lease). `next` won't re-recommend a claimed
-	# task, so this can't spin.
-	anvil claim "$task" || continue
+	# task, so this can't spin. The claim id and owner bind step 4's command
+	# proofs to this claim.
+	claimed="$(anvil claim "$task" --json)" || continue
+	claim="$(claim_field id)"
+	actor="$(claim_field claimed_by)"
 
 	# 2. Fetch the work packet — the contract that teaches the steps,
 	#    acceptance criteria, files in scope, and verification commands.
@@ -55,15 +88,23 @@ while true; do
 	#    script, etc.). It must implement the packet's acceptance criteria.
 	#    e.g.  codex exec "Implement $task per .anvil/packets/$task.md"
 
-	# 4. Submit completion evidence (the typed proof gate). `--commands` and
-	#    `--files-changed` ARE the evidence; this auto-releases the claim and
-	#    moves the task to needs_review.
+	# 4. Run every verification command the packet lists and record a command
+	#    proof for each: one `verify` line per command. Step 6 refuses approval
+	#    while any of them is missing.
+	verify "REPLACE_WITH_VERIFICATION_COMMAND"
+	# verify "REPLACE_WITH_ANOTHER_VERIFICATION_COMMAND"
+
+	# 5. Submit completion evidence: what you ran (one --commands per command
+	#    verified above) and what you changed. This releases the claim and moves
+	#    the task to needs_review.
 	anvil submit "$task" \
-		--commands "REPLACE_WITH_VERIFICATION_COMMANDS" \
+		--commands "REPLACE_WITH_VERIFICATION_COMMAND" \
 		--files-changed "REPLACE_WITH_FILES_CHANGED"
 
-	# 5. Apply the gate. `--strict` refuses --approve when required evidence is
-	#    missing, so a step can't ship unverified.
+	# 6. Apply the gate. `--strict` refuses --approve until every required check
+	#    has a matching, passing command proof, so a step can't ship unverified.
+	#    This approves the loop's own work; drop the line to leave tasks at
+	#    needs_review for a person.
 	anvil apply "$task" --approve --strict
 done
 
