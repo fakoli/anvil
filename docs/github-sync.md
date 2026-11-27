@@ -201,8 +201,7 @@ event records the choice in `resolution`.
 **`_deferred` is the current contract.** Recording a `local_wins` /
 `remote_wins` decision does NOT immediately mutate the other side in this
 iteration — the mutation rides the next push (for `local_wins`) or next
-pull (for `remote_wins`) pass. A future release (tracked in
-[`phase-9-backlog.md`](archive/phase-9-backlog.md)) may wire `*_applied` variants
+pull (for `remote_wins`) pass. A future release may wire `*_applied` variants
 that mutate immediately; until then the deferred contract is the truthful
 one.
 

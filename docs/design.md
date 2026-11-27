@@ -357,7 +357,7 @@ Polling-only in v0. Sync providers (`github_issues` today, more in v2.0) call `g
 
 **Why deferred:** webhooks require a public HTTP endpoint, HMAC verification, out-of-order event de-duplication, and an at-most-once delivery contract. That complexity is not needed at the current single-user-laptop scale. The cost/benefit changes if sync runs on a server with public DNS or if sub-minute updates become important.
 
-Tracked as P9B-5 (`roadmap.md` § v2.0, SPEC-FIRST). A spec doc must precede implementation because the engine's current "one fetch round-trip per pass" assumption does not hold under webhooks.
+It is on the [roadmap](roadmap.md). A spec doc must precede implementation because the engine's current "one fetch round-trip per pass" assumption does not hold under webhooks.
 
 ### Multi-backend abstraction beyond SQLite (deferred indefinitely)
 
@@ -438,9 +438,9 @@ The 2026-06-20 review resolved the open questions by *removing* most of them fro
 
 If you disagree with anything here, the design is open for argument.
 
-- **For new capability requests** (a sync provider, a new MCP tool, a missing CLI verb): add to `roadmap.md` under the right theme and target version. Include a one-paragraph "why now": what forcing function makes this the right moment.
+- **For new capability requests** (a sync provider, a new MCP tool, a missing CLI verb): open an issue. Include a one-paragraph "why now": what forcing function makes this the right moment.
 - **For cleanups and refactors** (untangle a duplication, fix a hot-path perf budget, close a critic finding): add to `tech-debt-backlog.md` with the origin PR or critic round, severity, and adjacency hints.
-- **For new architectural choices** (a second backend, a daemon, a webhook listener): write a SPEC-FIRST design doc in `docs/specs/` before opening a PR. The roadmap items tagged SPEC-FIRST (P9B-5, P9B-9) are the precedents to mirror.
+- **For new architectural choices** (a second backend, a daemon, a webhook listener): write a SPEC-FIRST design doc in `docs/specs/` before opening a PR.
 - **For positioning-level changes** (the choices in this file): open an issue, link the user evidence that motivated the change, and propose the trade-off explicitly. The choices in this doc are opinionated, but they are based on current evidence and can change.
 
 The point of writing rationale down is making the trade-offs legible enough to revisit. Each item here is a choice, and most can be changed with new evidence.

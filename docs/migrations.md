@@ -234,13 +234,13 @@ If the version is still 1, 2, or 3 after running any `anvil` command, the
 upgrade did not fire — `initialize()` was never invoked. Most likely a
 process-supervision oddity; open a bug.
 
-## Git-backed events Phase A (v1.22.0) — v0–v3 → v4 auto-upgrade
+## Git-backed events Phase A (v1.22.0) — v0–v3 → v4 auto-upgrade { #git-backed-events }
 
 Changing event storage with `anvil migrate-events --to git --yes` is a separate
 operation from a schema upgrade. Stop all writers and retained backend handles
 before conversion, retain its backup, then reopen clients afterward. Zero active
 claims alone does not establish that writers have stopped. Concurrent conversion
-is not qualified; see [MIG-1](tech-debt-backlog.md#mig-1-concurrent-local-to-git-event-conversion-high).
+is not qualified.
 The schema-26 release rollout uses `anvil migrate state` and preserves the
 existing event-storage format and history bytes.
 

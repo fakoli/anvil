@@ -2,8 +2,8 @@
 
 Practical answers for evaluating, installing, and operating anvil. For
 positioning ("why is this different from X"), see the comparison table in the
-[README](https://github.com/fakoli/anvil/blob/main/README.md#anvil-vs-an-issue-tracker) and
-[`_positioning.md`](_positioning.md). For architectural depth, see
+[README](https://github.com/fakoli/anvil/blob/main/README.md#anvil-vs-an-issue-tracker).
+For architectural depth, see
 [`architecture.md`](architecture.md); for design rationale, see
 [`design.md`](design.md).
 
@@ -85,8 +85,7 @@ Code-specific because they use the SessionStart / PreToolUse / PostToolUse
 contract — agents in other runtimes still get full coordination via
 claims + leases, just without the editor-time warning.
 
-See [`architecture.md` § CLI / MCP / hooks surface](architecture.md) and
-[`_positioning.md`](_positioning.md).
+See [`architecture.md` § CLI / MCP / hooks surface](architecture.md).
 
 ---
 
@@ -230,8 +229,7 @@ To debug a hook that is misbehaving, run the dispatcher directly with a
 sample payload on stdin to inspect its stderr:
 `echo '{}' | uv run --project bin python -P -m anvil.cli hook dispatch <name>`.
 A `ANVIL_HOOK_DEBUG=1` env var that redirects hook stderr to
-`.anvil/.hook-debug.log` is tracked as a Phase 11 backlog item
-([P11-HK-C2](roadmap.md)) but does not ship today.
+`.anvil/.hook-debug.log` does not ship today.
 
 ### Where does my data live, and should I commit it to git?
 
@@ -336,9 +334,8 @@ Shipping today: `anvil backup` pushes `events.jsonl` (and optionally
 `state.db`, with `--include-db`) to a configured `durable_store: s3`, and
 `anvil restore` pulls it back and rebuilds state via replay. `cp -R`
 remains the fully-local flow. A native `anvil snapshot` subcommand (a
-local `sqlite3 .backup` wrapper with retention) is on the roadmap — see
-[`roadmap.md` § Snapshot / replay](roadmap.md), item P9B-7 — but is not
-yet shipped; `anvil backup` / `restore` and the `anvil replay` command
+local `sqlite3 .backup` wrapper with retention) is on the
+[roadmap](roadmap.md) but is not yet shipped; `anvil backup` / `restore` and the `anvil replay` command
 (see the next question) are the supported recovery paths today.
 
 ### What if `state.db` gets corrupted?
@@ -386,15 +383,11 @@ the JSONL ordering is consistent with the SQLite commit order. See
 ### When will Linear, Monday, or Jira support land?
 
 None yet — `github_issues` is the only sync provider that ships today.
-On the roadmap, per [`roadmap.md`](roadmap.md):
+The [roadmap](roadmap.md) puts proof integrity first. After that:
 
-- `LinearIssuesProvider` (GraphQL transport, item P9B-1) and
-  `MondayBoardsProvider` (REST + JSON with people-columns, item P9B-2).
-  Both are OPEN and in development. Webhook-based sync (P9B-5) is
-  SPEC-FIRST alongside them.
-- `JiraIssuesProvider` (per-project workflow discovery, P9B-3) and
-  `GitHubProjectsProvider` (Projects v2 board surface, P9B-4). Both OPEN,
-  as follow-on work after Linear/Monday land.
+- Linear and Monday providers, with webhook-based sync alongside them.
+- Jira and GitHub Projects providers, as follow-on work once Linear and
+  Monday land.
 
 The `SyncProvider` Protocol has already shipped and is deliberately
 registry-driven so contributors can add providers without engine
@@ -413,21 +406,19 @@ is the reference implementation — read it alongside the contributor
 guide at [`sync-providers.md`](sync-providers.md), which walks through
 the Linear case step by step.
 
-Per-provider acceptance criteria (from `roadmap.md` § Next → Theme: Sync
-providers): provider module + transport (GraphQL or REST) + full-lifecycle
+Per-provider acceptance criteria: provider module + transport (GraphQL or REST) + full-lifecycle
 respx tests + live nightly workflow gated on the provider's API key secret +
 `anvil sync <provider_id> --health` works.
 
-Provider config schemas in `config.yaml` (item P9B-9) are co-required
-with the first new provider — that work is SPEC-FIRST and tracked
-in the same Next bucket.
+Provider config schemas in `config.yaml` are co-required with the first
+new provider.
 
 ### How do I contribute?
 
 Open a pull request against
 [github.com/fakoli/anvil](https://github.com/fakoli/anvil). The
 [contributing guide](contributing.md) covers the test workflow, and the
-[roadmap](roadmap.md) and [backlog](backlog/anvil-backlog.md) list what is
+[roadmap](roadmap.md) and [backlog](https://github.com/fakoli/anvil/blob/main/docs/backlog/anvil-backlog.md) list what is
 planned and what is open.
 
 Three contribution shapes most appreciated right now:
@@ -435,12 +426,12 @@ Three contribution shapes most appreciated right now:
 - **Sync providers.** Linear / Monday providers are on the roadmap but
   community implementations are welcome. Follow
   [`sync-providers.md`](sync-providers.md).
-- **Backlog items.** The [prioritized backlog](backlog/anvil-backlog.md)
-  and the [tech-debt backlog](tech-debt-backlog.md) hold scoped items; the
-  cross-cutting themes in `roadmap.md` indicate which batch cleanly.
+- **Backlog items.** The [prioritized backlog](https://github.com/fakoli/anvil/blob/main/docs/backlog/anvil-backlog.md)
+  and the [tech-debt backlog](https://github.com/fakoli/anvil/blob/main/docs/tech-debt-backlog.md) hold scoped items.
 - **Test coverage.** Keep the local pytest suite and live-test documentation
-  current when adding a surface or provider; [`live-tests.md`](live-tests.md)
-  describes the nightly workflow.
+  current when adding a surface or provider;
+  [`live-tests.md`](https://github.com/fakoli/anvil/blob/main/docs/live-tests.md) has the local runbook (no nightly
+  workflow is committed yet).
 
 For new architectural choices (a second backend, a daemon, a webhook
 listener), write a SPEC-FIRST design doc under `docs/specs/` before

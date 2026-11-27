@@ -1,8 +1,6 @@
 # anvil architecture
 
-> Condensed reference for the current **v0.6.27** standalone state. For the original v0
-> vision and aspirational items, see
-> [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
+> Condensed reference for the current **v0.6.27** standalone state.
 > For what is planned but not yet shipped, see
 > [`roadmap.md`](roadmap.md).
 >
@@ -34,12 +32,7 @@ task is claimable only after its PRD is approved for its exact current
 source/material lineage, even while a sibling PRD is still `draft`. Conflict
 detection, by contrast, spans **all** PRDs — two tasks in
 different PRDs that touch the same file land in one conflict group, so the
-single-winner guarantee holds across the whole project, not per-PRD. See
-[`_positioning.md`](_positioning.md) for the per-PRD-as-scoped-stack framing.
-
-The full positioning (the five differentiators and the Terraform analogy) is maintained
-in [`_positioning.md`](_positioning.md); this document does not duplicate
-that material.
+single-winner guarantee holds across the whole project, not per-PRD.
 
 ### Behaviour-first PRD readiness
 
@@ -352,10 +345,8 @@ log; a CI equivalence test
 ([`tests/test_replay_equivalence.py`](https://github.com/fakoli/anvil/blob/main/tests/test_replay_equivalence.py))
 verifies the guarantee. `anvil backup` / `anvil restore` also ship —
 S3 push/pull of `events.jsonl` plus a replay-based restore. Only the
-`anvil snapshot` subcommand (item P9B-7, a local sqlite `.backup`
-wrapper — see
-[`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot-replay))
-remains open. Copying the resolved state directory wholesale stays as the fully-local
+`anvil snapshot` subcommand (a local sqlite `.backup` wrapper, on the
+[roadmap](roadmap.md)) remains open. Copying the resolved state directory wholesale stays as the fully-local
 fallback; the replay guarantee makes that safe and minimal:
 
 ```bash
@@ -404,7 +395,7 @@ replaces only that PRD's rows and leaves the others untouched.
 
 A `snapshots/` subdirectory was originally planned (and is shown in the v0
 spec) but the `anvil snapshot` subcommand has not yet shipped — see
-[Roadmap → Snapshot / replay](roadmap.md#theme-snapshot-replay).
+the [roadmap](roadmap.md).
 Backups today are done with `anvil backup` / `anvil restore` (S3 push/pull
 of `events.jsonl` plus a replay-based restore) or by copying the resolved state
 directory wholesale (`cp -R`); the replay guarantee makes that safe. Run
@@ -505,7 +496,7 @@ tag-disables them at startup).
 Sync tools (`sync_run`, `sync_health`, `sync_status`, `sync_reconcile`) are
 not yet on the MCP surface — agents that want sync today shell out via Bash
 to `anvil sync`. See
-[Roadmap → MCP sync tools](roadmap.md#theme-mcp-surface-sync-tools).
+the [roadmap](roadmap.md).
 
 ### Hooks (5)
 
@@ -588,28 +579,21 @@ points at a file you can grep.
 
 ## What is NOT here yet
 
-This document describes the current shipped behaviour only. The full backlog of
-planned-but-not-yet-shipped items is in [`roadmap.md`](roadmap.md);
-the notable open themes:
+This document describes the current shipped behaviour only. What is planned
+is on the [roadmap](roadmap.md); the notable open themes:
 
+- independent re-execution of recorded commands, and a strict evidence gate by
+  default;
 - additional workflow-aware sync providers and provider-specific configuration;
 - webhook-based sync and remaining conflict-resolution wiring;
 - the local SQLite `anvil snapshot` backup/retention command (distinct from the
   shipped read-only `anvil project snapshot` provider operation);
-- an MCP sync surface; and
-- focused agent, skill, hook, and documentation hygiene.
-
-Each item carries a backlog id (`P9B-N` from the Phase 9 backlog or
-`P11-XX-XN` from the Phase 11 backlog) preserved across audits — see
-[`roadmap.md`](roadmap.md) for per-item acceptance criteria, file pointers,
-and welder-effort estimates.
+- an MCP sync surface.
 
 ---
 
 ## Further reading
 
-- [`_positioning.md`](_positioning.md) — differentiators and the Terraform analogy (internal positioning reference)
-- [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
 - [`mcp.md`](mcp.md) — full 38-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
 - [`sync-providers.md`](sync-providers.md) — contributor guide for new sync providers

@@ -64,8 +64,9 @@ extra_css:
 extra_javascript:
   - javascripts/a11y.js
 
-# Search scope: keeps archived plans, research and backlogs from outranking
-# the user guides. See the module docstring.
+# Search ranking: the user guides outrank design records and performance
+# notes. See the module docstring. (Maintainer material never reaches the
+# index; exclude_docs below keeps it out of the build.)
 hooks:
   - scripts/mkdocs_hooks.py
 
@@ -107,54 +108,43 @@ validation:
     absolute_links: ignore
     unrecognized_links: warn
 
-# In the repo but intentionally NOT in the site nav:
-#   _positioning.md    — internal source-of-truth, marked "not part of
-#                        user-facing docs nav" in its own header
-#   backlog/*.prd.md   — machine-ingested PRD data files, not prose
-#   research/*         — competitive-intelligence / market research notes;
-#                        kept in repo for provenance, not published
-#   archive/*          — superseded plans/backlogs/audits; historical only,
-#                        see archive/README.md
-#   plans/2026-07-07-docs-assessment.md — this restructure's own working
-#                        doc; maintainer-only, not part of the site
-not_in_nav: |
-  _positioning.md
-  backlog/anvil-backlog.prd.md
-  backlog/multi-prd-revisable.prd.md
-  research/2026-06-19-backlog-management-research.md
-  research/2026-06-19-maximize-anvil-codex.md
-  research/2026-06-19-maximize-anvil-openclaw.md
-  research/2026-06-20-agent-fleet-pull-market-landscape.md
-  research/2026-06-20-competitive-analysis-agent-state-tools.md
-  research/agent-workflow-formats.md
-  research/competitor-issue-analysis.md
-  research/intent-driven-development-landscape.md
-  research/spec-driven-development-synthesis.md
-  research/2026-10-08-issue-246-long-running-delivery.md
-  archive/README.md
-  archive/BUILD-REPORT.md
-  archive/phase-9-backlog.md
-  archive/phase-11-backlog.md
-  archive/2026-05-25-phase-8-sync.md
-  archive/2026-05-25-phase-9.md
-  archive/2026-05-26-phase-10-plugin-audit.md
-  archive/2026-06-01-sl1-rr-1-event-sourcing-write-path.md
-  archive/2026-05-26-plugin-audit.md
-  plans/2026-07-07-docs-assessment.md
-  plans/2026-07-07-retro-opps-prd.md
-  plans/2026-10-08-issue-246-long-running-delivery.md
+# Maintainer working material stays in the repository but is NOT built into the
+# site: backlogs, plans, specs, research, archives, incident notes and the
+# positioning source text. `not_in_nav` only hides a page from the menu (it is
+# still built, served and listed in sitemap.xml); `exclude_docs` keeps the file
+# out of the build altogether. The files are left in place because tests,
+# source docstrings and agent prompts cite these paths. Link to them from a
+# published page with an absolute GitHub URL, never a relative one.
+# tests/test_site_landing.py pins this list.
+exclude_docs: |
+  /archive/
+  /backlog/
+  /findings/
+  /plans/
+  /postmortems/
+  /research/
+  /specs/
+  /_positioning.md
+  /critic-false-pass-baseline.md
+  /live-tests.md
+  /tech-debt-backlog.md
+  /decisions/wf3-format.md
+  /design/concurrency-and-approval-research.md
+  /design/concurrency-source-findings.md
+  /design/spec-kit-concurrency-comparison.md
+  /reference/codex.md
+  /requirements.txt
 
 # Top-level entries render as tabs (navigation.tabs); keep the labels short.
-# Guides are grouped by the job the reader is doing, not alphabetically.
+# Five tabs: three for a user doing a task, one that explains how Anvil works,
+# one about the project itself. The landing page (index.md) is reached from the
+# logo, so it has no tab of its own.
 nav:
-  - Home: index.md
   - Get started:
       - Getting started: how-to/getting-started.md
       - Where state lives: how-to/state-location.md
       - Authoring a PRD: how-to/authoring-a-prd.md
-      - PRD template & schema: prd-template.md
       - Glossary: glossary.md
-      - FAQ: faq.md
   - Guides:
       - The core loop:
           - Claiming & shipping a task: how-to/claiming-and-shipping-a-task.md
@@ -178,62 +168,28 @@ nav:
   - Reference:
       - CLI: cli-reference.md
       - MCP server: mcp.md
+      - PRD template & schema: prd-template.md
       - Provider read contracts: contracts/provider-reads-v1.md
       - Agents: agents-reference.md
       - Skills: skills-reference.md
       - Hooks: hooks-reference.md
       - LLM integration: llm.md
-      - Model strategy: model-strategy.md
       - Evidence buffer: evidence-buffer.md
-      - Context budget: context-budget.md
       - GitHub sync: github-sync.md
       - Migrations: migrations.md
-      - Codex harness: reference/codex.md
-  - Architecture:
+  - Concepts:
       - Architecture: architecture.md
       - Design rationale: design.md
-      - Validation notes:
+      - Performance notes:
           - Ledger latency: design/ledger-latency-validation.md
           - Snapshot capture latency: design/snapshot-capture-latency.md
           - Execution and proof qualification: design/execution-scale-validation.md
-          - Concurrency source findings: design/concurrency-source-findings.md
-          - Concurrency and approval research: design/concurrency-and-approval-research.md
-          - Spec Kit comparison: design/spec-kit-concurrency-comparison.md
-  - Contribute:
-      - Contributing: contributing.md
-      - Sync providers (contributing): sync-providers.md
-      - Backlog: backlog/anvil-backlog.md
-      - Strategic backlog: backlog/strategic-backlog.md
-      - Tech-debt backlog: tech-debt-backlog.md
-      - Production readiness plan (2026-07): plans/2026-07-02-production-readiness.md
-      - Running the bake-off: plans/bake-off.md
-      - Packet quality: plans/packet-quality.md
-      - Specs:
-          - Jev integration suite: specs/jev-integration/README.md
-          - Jev foundation: specs/jev-integration/foundation.md
-          - Jev semantic assurance: specs/jev-integration/semantic-assurance.md
-          - Jev agent assistance: specs/jev-integration/agent-assistance.md
-          - Jev Serving assistance: specs/jev-integration/serving-assistance.md
-          - Historical v0 build spec: specs/2026-05-24-anvil-v0.md
-          - Plugin audit & critics: specs/2026-05-26-plugin-audit-and-critics.md
-          - Event-sourcing write path (SL-1): specs/2026-06-01-sl1-rr-1-event-sourcing-write-path.md
-          - Git-backed events: specs/2026-06-10-git-backed-events.md
-          - Workflow substrate (WF-3): specs/2026-06-19-anvil-workflow-substrate.md
-          - Unattended ergonomics: specs/2026-06-19-ergonomics-unattended.md
-          - P11 audit batch: specs/2026-06-19-p11-audit-batch.md
-          - Scoring agent: specs/2026-06-19-scoring-agent.md
-          - ProofArtifact (SL-3): specs/2026-06-19-sl3-proofartifact.md
-          - Output contract (SL-5): specs/2026-06-19-sl5-output-contract.md
-          - Workflow adapter (SL-7): specs/2026-06-19-sl7-workflow-adapter.md
-          - Multi-PRD revisable: specs/2026-06-22-multi-prd-revisable.md
-      - Decisions:
+  - Project:
+      - Roadmap: roadmap.md
+      - FAQ: faq.md
+      - Contributing:
+          - Contributing: contributing.md
+          - Writing a sync provider: sync-providers.md
+          - Model strategy: model-strategy.md
+          - Context budget: context-budget.md
           - Behavior-first PRD readiness: decisions/2026-07-19-behavioral-readiness.md
-          - WF-3 workflow format: decisions/wf3-format.md
-      - Quality & evidence:
-          - Live sync tests: live-tests.md
-          - Critic false-pass baseline: critic-false-pass-baseline.md
-          - Postmortems:
-              - 2026-06-22 skill init loop: postmortems/2026-06-22-skill-init-loop.md
-          - Findings:
-              - 2026-07-05 OpenClaw weak runner: findings/2026-07-05-openclaw-weak-runner.md
-  - Roadmap: roadmap.md

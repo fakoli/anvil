@@ -22,7 +22,7 @@ problems:
    parallel safely, but the file-overlap heuristic forbids it.
 2. **It depends on an honest up-front declaration with no after-check.** This is
    the *same gameability class* the old substring gate was in (the roadmap calls
-   this out explicitly, `docs/roadmap.md:143-148`): a task declares its files,
+   this out explicitly, `docs/backlog/roadmap.md:143-148`): a task declares its files,
    the engine trusts the declaration, and nothing ever compares the declaration
    to what the task *actually did*.
 

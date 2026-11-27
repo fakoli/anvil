@@ -423,5 +423,6 @@ entry, and removing project state is not a hook-control mechanism.
 - [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py) —
   the six `anvil hook ...` subcommands: `dispatch`, `check-claim`,
   `record-file-change`, `capture-evidence`, `heartbeat`, and the opt-in,
-  blocking `stop-gate` (not wired by default — see
-  [`docs/reference/codex.md`](reference/codex.md) for how to enable it).
+  blocking `stop-gate` (not wired by default — to enable it, add a `Stop`
+  hook that runs `anvil hook stop-gate` to your harness config, then confirm
+  it blocks as expected before relying on it).

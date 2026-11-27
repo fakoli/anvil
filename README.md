@@ -262,8 +262,9 @@ merges.
 
 Beta (v0.6.27). The full PRD → plan → claim → execute → verify → finish loop
 works today, alongside GitHub Issues sync and optional LLM planning.
-Near-term focus is provider expansion, usability, and remaining pre-1.0
-contract hardening; Linear/Monday providers and webhook sync are on the
+Near-term focus is proof integrity: re-running recorded commands
+independently and making the strict evidence gate the default. Linear and
+Monday providers and webhook sync follow on the
 [roadmap](https://anvilstate.com/roadmap/).
 
 ## License

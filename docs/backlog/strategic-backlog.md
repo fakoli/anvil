@@ -4,7 +4,7 @@
 > (repo docs + code + external landscape), with every code-level claim below
 > verified against shipped source by a five-stream fact-check pass. This doc
 > is a **strategic overlay**: it sequences and sharpens existing items from
-> [`roadmap.md`](../roadmap.md) (SL/WF waves) and
+> [`roadmap.md`](roadmap.md) (SL/WF waves) and
 > [`anvil-backlog.md`](anvil-backlog.md) (E1–E13 / B-items) rather than
 > replacing them. Items are numbered `S*` to avoid colliding with either.
 > The same review corrected ~25 stale doc claims (docs said several shipped
@@ -311,7 +311,7 @@ placeholder.
   sequencing, the others reduced to reference/index; a small
   `tests/test_doc_sync.py` asserts the highest-drift counts; stale-claim
   class tracked in `tech-debt-backlog.md` if not closed.
-- **Likely files:** `docs/roadmap.md`, `docs/backlog/*.md`, `tests/test_doc_sync.py` (new)
+- **Likely files:** `docs/backlog/roadmap.md`, `docs/backlog/*.md`, `tests/test_doc_sync.py` (new)
 - **Depends on:** —
 
 ### S13 — Skill-vs-CLI drift eval (pull forward postmortem action (a))

@@ -1,12 +1,12 @@
-> ## Archived — see [roadmap.md](../roadmap.md) for live planning
+> ## Archived — see [roadmap.md](../backlog/roadmap.md) for live planning
 >
 > This file is preserved as a historical audit trail of what was deferred at the
 > close of Phase 9. The live forward-planning source of truth has moved to
-> [`docs/roadmap.md`](../roadmap.md) (version × theme organized; evolves continuously).
+> [`docs/backlog/roadmap.md`](../backlog/roadmap.md) (version × theme organized; evolves continuously).
 >
 > Every forward-looking item below (P9B-1 through P9B-9) has been re-homed in the
 > roadmap with its original ID preserved. Use this file only to understand the
-> Phase 9 decision context. For "what's planned next", read `roadmap.md`.
+> Phase 9 decision context. For "what's planned next", read `docs/backlog/roadmap.md`.
 
 # anvil — Post-v1.9.0 Backlog (v2.x roadmap + carry-forward tech debt)
 
@@ -115,7 +115,7 @@ Deferred out of the multi-PRD release (Phase 7 of `docs/specs/2026-06-22-multi-p
 - A `missing_milestone_mapping` reconciliation discrepancy kind for a PRD that has a `target_tag` but no persisted milestone mapping (sibling to `missing_sync_mapping`; `drift_sync_state` already special-cases prd-kind rows so a milestone produces no task-shaped drift).
 - The milestone-ensure step is wired into `anvil sync … --prd <id> --push` only for providers that advertise the capability.
 
-Re-homed in the live roadmap as `[MPRD-RG1]` (`docs/roadmap.md` § v2.0 → Theme: Sync infrastructure).
+Re-homed in the live roadmap as `[MPRD-RG1]` (`docs/backlog/roadmap.md` § v2.0 → Theme: Sync infrastructure).
 
 ---
 

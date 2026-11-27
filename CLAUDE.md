@@ -73,6 +73,7 @@ can be inferred from the code, it does not belong here.
   Entrypoints: `bin/anvil`, `bin/anvil-mcp`.
 - `AGENTS.md` is the **end-user usage doc** that `anvil install <harness>` ships
   to other harnesses. Keep it usage-focused — it is not the place for dev rules.
-- Planning: `docs/roadmap.md` (live) · `docs/backlog/anvil-backlog.md` (product
+- Planning: `docs/backlog/roadmap.md` (live tracker; `docs/roadmap.md` is the
+  public one-screen roadmap, keep them in step) · `docs/backlog/anvil-backlog.md` (product
   backlog) · `docs/tech-debt-backlog.md` (deferred review findings).
 - Cross-harness distribution: `bin/src/anvil/cli/install.py` + `packaging/`.

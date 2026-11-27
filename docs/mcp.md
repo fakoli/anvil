@@ -1794,9 +1794,6 @@ wiring automatically.
 
 ## See also
 
-- [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — historical
-  v0 design record; this page and `anvil describe --json` define the current
-  MCP contract.
 - [`hooks-reference.md`](hooks-reference.md) — the shell-free claim-discipline,
   evidence, heartbeat, and state-detection dispatcher paths plus their retained
   legacy wrappers.

@@ -177,8 +177,7 @@ execution. Report lock wait, mutation duration, offered
 load, refusals and correctness checks alongside it. CLI startup, HTTP delivery,
 canonical snapshots, browser rendering and model inference are separate latency
 measurements. A passing journey is correctness evidence, not a latency or fleet
-capacity qualification. See the [concurrency findings](../design/concurrency-source-findings.md)
-for the measured baseline and qualification boundaries, and the
+capacity qualification. See the
 [ledger validation](../design/ledger-latency-validation.md) for the implemented
 latency results and remaining scale limits. The [execution qualification guide](../design/execution-scale-validation.md)
 adds real claim-bound command captures, replay and canonical-reader checks, plus
