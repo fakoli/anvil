@@ -44,6 +44,6 @@ harness. `anvil install <harness>` writes the MCP config and instruction file fo
 a target harness (idempotent, backed up, reversible with `--rollback`).
 
 Documentation, including a replay of a recorded session and the cross-harness
-install guide: https://fakoli.github.io/anvil/
+install guide: https://anvilstate.com/
 
 Source and the Claude Code plugin: https://github.com/fakoli/anvil
