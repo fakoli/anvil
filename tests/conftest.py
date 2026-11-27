@@ -75,6 +75,17 @@ def git_repo_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
         check=True,
         capture_output=True,
     )
+    # A commit otherwise starts `git maintenance run --auto --detach`, which
+    # holds `.git/objects/maintenance.lock` for a moment after the commit
+    # returns. A copy taken in that moment lists the lock, finds it gone and
+    # fails with shutil.Error. The setting is stored in the repository, so every
+    # copy inherits it and its own commits start nothing in the background.
+    subprocess.run(
+        ["git", "config", "maintenance.auto", "false"],
+        cwd=template,
+        check=True,
+        capture_output=True,
+    )
     (template / "README.md").write_text("initial\n", encoding="utf-8")
     subprocess.run(
         ["git", "add", "README.md"],

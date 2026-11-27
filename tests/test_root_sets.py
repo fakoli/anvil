@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,6 +38,10 @@ def _repo(path: Path) -> Path:
     _git(path, "init", "-q", "-b", "main")
     _git(path, "config", "user.email", "test@example.invalid")
     _git(path, "config", "user.name", "Anvil Test")
+    # No background maintenance after a commit: its short-lived
+    # `.git/objects/maintenance.lock` breaks a copy of the repository taken
+    # straight afterwards (see `git_repo_template` in conftest.py).
+    _git(path, "config", "maintenance.auto", "false")
     (path / "README.md").write_text("initial\n", encoding="utf-8")
     _git(path, "add", "README.md")
     _git(path, "commit", "-qm", "initial")
@@ -46,6 +51,19 @@ def _repo(path: Path) -> Path:
 def _json(result):
     assert result.exit_code == 0, result.output
     return json.loads(result.output)
+
+
+def test_helper_repository_starts_no_background_maintenance(tmp_path):
+    """Tests copy `_repo` repositories; a detached Git process would race them."""
+    repo = _repo(tmp_path / "repo")
+
+    trace = subprocess.run(
+        ["git", "-C", str(repo), "commit", "--allow-empty", "-qm", "probe"],
+        check=True, capture_output=True, text=True,
+        env={**os.environ, "GIT_TRACE": "1"},
+    ).stderr
+
+    assert "maintenance run" not in trace
 
 
 @pytest.fixture
