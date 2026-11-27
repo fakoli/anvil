@@ -8,6 +8,7 @@ Coverage target: git_ops/ >= 85%.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -77,6 +78,30 @@ def test_git_repo_copies_do_not_share_mutations(
         capture_output=True,
         text=True,
     ).stdout == ""
+
+
+def test_git_repo_copies_start_no_background_maintenance(
+    tmp_path: Path, git_repo_factory: GitRepoFactory
+) -> None:
+    """A commit in a copy leaves no detached Git process behind.
+
+    ``git maintenance run --auto --detach`` holds
+    ``.git/objects/maintenance.lock`` for a moment after the commit returns. A
+    copy of the repository taken in that moment fails with ``shutil.Error``
+    when the lock disappears mid-walk.
+    """
+    repo = git_repo_factory(tmp_path / "repo")
+
+    trace = subprocess.run(
+        ["git", "commit", "--allow-empty", "-q", "-m", "probe"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_TRACE": "1"},
+    ).stderr
+
+    assert "maintenance run" not in trace
 
 
 # ---------------------------------------------------------------------------
