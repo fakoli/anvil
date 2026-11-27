@@ -1,12 +1,9 @@
 # anvil roadmap (maintainer tracker)
 
-> The item-level tracker for maintainers. The public roadmap is the
-> one-screen page at [`../roadmap.md`](../roadmap.md); keep the two in step.
-
-**Last updated:** 2026-08-24 (v0.6.5 closeout; restructured around Shipped /
-Now / Next / Later — the retired v1.11/v2.0/v2.1 version-target buckets are
-gone; see [How this is organized](#how-this-is-organized))
-**Source of truth:** this file. Archived phase backlogs at [`phase-9-backlog.md`](../archive/phase-9-backlog.md) and [`phase-11-backlog.md`](../archive/phase-11-backlog.md) are kept for historical audit only — do not add new items there.
+**Last updated:** 2026-11-26 (moved here from `docs/roadmap.md`; Now puts proof
+integrity first). Structure dates from the v0.6.5 closeout: Shipped / Now /
+Next / Later; see [How this is organized](#how-this-is-organized).
+**Source of truth:** this file, for item-level tracking. The public roadmap is the one-screen [`../roadmap.md`](../roadmap.md); keep the two in step. Archived phase backlogs at [`phase-9-backlog.md`](../archive/phase-9-backlog.md) and [`phase-11-backlog.md`](../archive/phase-11-backlog.md) are kept for historical audit only — do not add new items there.
 **Companion:** [`tech-debt-backlog.md`](../tech-debt-backlog.md) for non-roadmap debt (12 OPEN CL/TQ/PS items from PR #41 critics; tracked by origin PR, closed across phases). Items there are not duplicated here unless a roadmap item naturally touches the same file.
 
 ## How this is organized
@@ -161,14 +158,14 @@ See [`tech-debt-backlog.md`](../tech-debt-backlog.md) § "Phase 8 / Phase 9 clos
 
 ## Now
 
-**Priority track: integrity-first (90-day plan).** This track sits above the
-Next/Later buckets below. It is the committed direction for the current
-stretch and it is sequenced by credibility risk, not by how demonstrable each
-item is. The Next/Later buckets remain the backlog; this track is what
-actually gets built first. Status as of 2026-07-07: **Wave 1 and Wave 2 are
-done except SL-2's real-critic baseline run** (SL-0, SL-1, SL-3, SL-6 shipped
-— see [Shipped](#shipped)); **Wave 3 has not started** (SL-4, SL-5, SL-7 all
-open).
+**Priority track: integrity-first.** This track sits above the Next/Later
+buckets below and is sequenced by credibility risk, not by how demonstrable
+each item is. **What gets built first (owner decision, 2026-11-26): proof
+integrity**, per [`strategic-backlog.md`](strategic-backlog.md): S1 independent
+re-execution, S2 strict evidence gate by default, S5/S6 published measurements
+(S6 is SL-2's real-critic baseline run) and S4 portable proof export. The public
+[`../roadmap.md`](../roadmap.md) lists these under Now. Wave 3 below (SL-4,
+SL-5, SL-7, all open) follows them; Waves 1 and 2 are otherwise shipped.
 
 > Operating-model principle: sequencing this track by credibility risk embodies
 > fakoli-style **P5** (sequence by credibility risk, not demonstrability). See

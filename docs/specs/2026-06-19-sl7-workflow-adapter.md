@@ -22,7 +22,7 @@ wrap an *external* unit of work, and that an external dynamic-workflow script's
 otherwise-discarded intermediate state can be persisted as canonical `Evidence` /
 `Decision` rows.
 
-Two postures (the roadmap's "postures 2 and 3", `docs/roadmap.md:150-155`):
+Two postures (the roadmap's "postures 2 and 3", `docs/backlog/roadmap.md:150-155`):
 
 - **Posture 2 — the governed step.** A single CLI wrapper,
   `anvil workflow-step`, that runs *one* external command (or script) through the
@@ -160,7 +160,7 @@ showing:
    such that **after the script process exits**, those intermediate values are
    recoverable by reading `events.jsonl` (shown via `anvil describe` or a raw
    `grep` of the log). This is the literal roadmap acceptance line
-   (`docs/roadmap.md:154-155`).
+   (`docs/backlog/roadmap.md:154-155`).
 3. A short written finding: did the existing seams compose cleanly, or did the
    spike reveal a missing engine primitive? (This is the spike's real output.)
 
@@ -274,7 +274,7 @@ the spike must not regress production paths.
 
 ## 10. References
 
-- `docs/roadmap.md:150-155` (SL-7 postures 2 and 3, acceptance line)
+- `docs/backlog/roadmap.md:150-155` (SL-7 postures 2 and 3, acceptance line)
 - `bin/src/anvil/state/transitions.py:121-137` (`_can_claim_task`),
   `:442-467` (claim), `:532-586` (submit → needs_review → accepted),
   `:164-207` (`_evidence_complete`)

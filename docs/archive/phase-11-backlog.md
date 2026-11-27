@@ -1,14 +1,14 @@
-> ## Archived — see [roadmap.md](../roadmap.md) for live planning
+> ## Archived — see [roadmap.md](../backlog/roadmap.md) for live planning
 >
 > This file is preserved as a historical audit trail of what was deferred at the
 > close of Phase 10 (the plugin-audit pass). The live forward-planning source of
-> truth has moved to [`docs/roadmap.md`](../roadmap.md) (version × theme organized;
+> truth has moved to [`docs/backlog/roadmap.md`](../backlog/roadmap.md) (version × theme organized;
 > evolves continuously).
 >
 > Every deferred item below (P11-XX-XN, 56 live) has been re-homed in the roadmap
 > with its original ID preserved. The 7 cross-cutting themes are also carried
 > over. Use this file only to understand the Phase 10 audit context and per-critic
-> grouping. For "what's planned next", read `roadmap.md`.
+> grouping. For "what's planned next", read `docs/backlog/roadmap.md`.
 
 # Phase 11 backlog (and beyond)
 

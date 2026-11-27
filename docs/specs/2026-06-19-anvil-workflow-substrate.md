@@ -3,7 +3,7 @@
 **Date:** 2026-06-19
 **Status:** Draft — WF-1/WF-2 building now (this PR); WF-3 deferred
 **Plugin:** `anvil`
-**Tracks:** roadmap integrity-track `WF-1`/`WF-2`/`WF-3` (the "runtime-neutral workflow" axis, [`docs/roadmap.md` § "Theme: Workflow substrate"](../roadmap.md)); extends `SL-7` (workflow-step spike); sits on `SL-3` (typed proof); closes `SL-4` (status-file → events)
+**Tracks:** roadmap integrity-track `WF-1`/`WF-2`/`WF-3` (the "runtime-neutral workflow" axis, [`docs/backlog/roadmap.md` § "Theme: Workflow substrate"](../backlog/roadmap.md)); extends `SL-7` (workflow-step spike); sits on `SL-3` (typed proof); closes `SL-4` (status-file → events)
 **Depends on:** `SL-7` spike (the governed-step posture) for WF-3; `SL-3` (`ProofArtifact`) for WF-3's typed per-step gate. WF-1/WF-2 depend on nothing new — they expose loop seams over the lifecycle that already ships.
 **Breaking:** NO. WF-1 adds one optional flag; WF-2 adds committed docs/adapters; WF-3 is additive and deferred.
 
@@ -280,7 +280,7 @@ This is not feature width — it is making the central claim more true.
    become loop passes; fakoli-crew's agents become per-step executors; and
    coordination becomes Anvil **events** instead of grep-parsed markdown status
    files — the concrete payoff of `SL-4`
-   ([`docs/roadmap.md:131-138`](../roadmap.md)). One substrate, not three.
+   ([`docs/backlog/roadmap.md:131-138`](../backlog/roadmap.md)). One substrate, not three.
 4. **Correct, not just fast.** Every step is leased + evidence-gated, so parallel
    loops *cannot* double-claim or fake "done." Anvil makes the loop trustworthy —
    which is the performance that matters (fewer redone tasks, no silent
@@ -427,7 +427,7 @@ engine change and no new format to maintain.
   how-to)
 - `docs/research/agent-workflow-formats.md` (the runtime landscape; the substrate
   framing)
-- `docs/roadmap.md` § "Theme: Workflow substrate" (WF-1/WF-2/WF-3 entries), `:34-68` (the reframe and
+- `docs/backlog/roadmap.md` § "Theme: Workflow substrate" (WF-1/WF-2/WF-3 entries), `:34-68` (the reframe and
   the three integration postures), `:131-138` (SL-4)
 - `docs/specs/2026-06-19-sl7-workflow-adapter.md` (the spike this grows from)
 - `docs/specs/2026-06-19-sl3-proofartifact.md` (`ProofRequirement` for WF-3's gate)

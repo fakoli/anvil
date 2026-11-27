@@ -22,8 +22,8 @@ can check for itself.
 ## Next: more places to sync
 
 - Linear and Monday sync providers. GitHub Issues is the only provider today.
-- Webhook-based sync, and conflict resolutions that apply immediately instead
-  of on the next pass.
+- Webhook-based sync through an opt-in listener that you start yourself.
+- Conflict resolutions that apply immediately instead of on the next pass.
 
 ## Later
 
@@ -33,7 +33,8 @@ can check for itself.
 
 ## Not planned
 
-- A daemon or long-running service.
+- A background daemon that Anvil depends on. The core loop stays a CLI plus
+  an MCP server that lives only as long as the agent session.
 - A hosted service or account system.
 - Real-time collaborative editing.
 

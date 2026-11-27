@@ -3,7 +3,7 @@
 **Date:** 2026-06-19
 **Status:** Draft — needs approval before implementation
 **Plugin:** `anvil`
-**Tracks:** roadmap "Version: next (v1.11 / v2.0 candidate)" and the [7 cross-cutting themes](../roadmap.md#cross-cutting-themes-high-leverage-batches); archived catalog [`docs/phase-11-backlog.md`](../archive/phase-11-backlog.md); source [Phase 10 audit](../archive/2026-05-26-plugin-audit.md) (2026-05-26)
+**Tracks:** roadmap "Version: next (v1.11 / v2.0 candidate)" and the [7 cross-cutting themes](../backlog/roadmap.md#cross-cutting-themes-high-leverage-batches); archived catalog [`docs/phase-11-backlog.md`](../archive/phase-11-backlog.md); source [Phase 10 audit](../archive/2026-05-26-plugin-audit.md) (2026-05-26)
 **Breaking:** NO. Every item is non-breaking hygiene (docs, schema-truthfulness, perf, robustness).
 
 ---
@@ -15,12 +15,12 @@ The **P11 batch** is the set of deferred findings from the Phase-10 plugin audit
 items below MUST-FIX, of which 56 were carried forward as live. None are
 breaking; the bulk are mechanical. They are catalogued by critic in
 [`phase-11-backlog.md`](../archive/phase-11-backlog.md) and re-homed by version × theme in
-[`roadmap.md`](../roadmap.md).
+[`roadmap.md`](../backlog/roadmap.md).
 
 **Why this is lower-priority than the integrity track.** The roadmap explicitly
 defers P11 behind the SL-* integrity work: "Adding a third sync provider makes
 the product wider; it does not make the central claim more true. None of it
-belongs in these 90 days." (`roadmap.md:160-162`). P11 is quality polish on
+belongs in these 90 days." (`docs/backlog/roadmap.md:160-162`). P11 is quality polish on
 surfaces that already work — it does not move the replay/provenance/non-gameable
 claims the product is built on. So it runs *opportunistically*, after the SL
 specs, and never blocks them.
@@ -303,7 +303,7 @@ Themes whose every item resolved in §2 are not repeated. What follows is the
     (Theme 5 can link a `phase-status.md` if Unit A chooses that route). Close
     SK-C1 as superseded/won't-do.
 - **Approach:** this is not really a PR — it's a documentation reconciliation.
-  Update `roadmap.md` and `phase-11-backlog.md` to mark these ids
+  Update `docs/backlog/roadmap.md` and `phase-11-backlog.md` to mark these ids
   superseded/closed with the evidence above, so the backlog stops claiming work
   that the extraction already invalidated. Can be folded into the Unit-A or
   Unit-B PR's docs changes rather than a standalone PR.
